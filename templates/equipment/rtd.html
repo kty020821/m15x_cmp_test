@@ -1,0 +1,208 @@
+{% extends 'base.html' %}
+{% block title %}RTD 현황{% endblock %}
+
+{% block extra_css %}
+<style>
+.rtd-page { padding: 28px 28px 60px; display: flex; flex-direction: column; gap: 20px; }
+.page-header { display: flex; align-items: center; justify-content: space-between; }
+.page-title  { font-size: 16px; font-weight: 700; color: var(--tx-1); }
+.page-sub    { font-size: 12px; color: var(--tx-2); margin-top: 3px; }
+.btn-refresh { display: flex; align-items: center; gap: 6px; padding: 7px 14px; background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--rs); color: var(--tx-2); font-size: 12px; cursor: pointer; transition: background .12s, color .12s; }
+.btn-refresh:hover { background: var(--bg-hover); color: var(--tx-1); }
+.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
+.filter-group { display: flex; flex-direction: column; gap: 5px; min-width: 160px; }
+.filter-label { font-size: 11px; font-weight: 600; color: var(--tx-muted); text-transform: uppercase; letter-spacing: .06em; }
+.filter-select { padding: 7px 10px; background: var(--bg-2); border: 1px solid var(--bd); border-radius: var(--rs); color: var(--tx-1); font-size: 13px; outline: none; cursor: pointer; transition: border-color .12s; }
+.filter-select:focus { border-color: var(--accent); }
+.btn-apply { padding: 8px 22px; background: var(--accent); border: none; border-radius: var(--rs); color: #000; font-size: 13px; font-weight: 700; cursor: pointer; transition: opacity .15s; align-self: flex-end; }
+.btn-apply:hover { opacity: .85; }
+.summary-bar { display: flex; gap: 12px; flex-wrap: wrap; }
+.sum-chip { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 14px 20px; display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+.sum-chip .s-label { font-size: 11px; color: var(--tx-2); font-weight: 600; }
+.sum-chip .s-val   { font-size: 24px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
+.sum-chip .s-val.ok  { color: var(--up); }
+.sum-chip .s-val.bad { color: var(--dn); }
+.sum-chip .s-val.neu { color: var(--tx-1); }
+.oper-section { display: flex; flex-direction: column; gap: 10px; }
+.oper-title { font-size: 12px; font-weight: 600; color: var(--tx-muted); text-transform: uppercase; letter-spacing: .06em; padding: 8px 0 6px; border-bottom: 1px solid var(--bd); }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.rtd-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px; cursor: pointer; transition: background .12s, border-color .12s; display: flex; flex-direction: column; gap: 10px; position: relative; overflow: hidden; }
+.rtd-card:hover { background: var(--bg-hover); border-color: #3a3a3a; }
+.rtd-card::before { content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%; background: var(--up); }
+.rtd-card.has-rtd::before { background: var(--dn); }
+.rtd-card.all-rtd::before { background: #7f1d1d; }
+.card-lot { display: flex; align-items: center; justify-content: space-between; }
+.lot-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 20px; background: var(--bg-active); color: var(--tx-2); border: 1px solid var(--bd); font-family: 'IBM Plex Mono', monospace; }
+.flow-badge { font-size: 10px; color: var(--tx-muted); font-family: 'IBM Plex Mono', monospace; }
+.card-oper { font-size: 12px; font-weight: 600; color: var(--tx-1); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card-counts { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.count-avail { font-size: 26px; font-weight: 800; font-family: 'IBM Plex Mono', monospace; color: var(--up); line-height: 1; }
+.count-sep   { font-size: 16px; color: var(--tx-muted); font-weight: 300; }
+.count-total { font-size: 18px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; color: var(--tx-2); }
+.count-rtd-badge { margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 20px; background: var(--dn-bg); color: var(--dn); border: 1px solid var(--dn-bd); }
+.count-rtd-badge.zero { background: var(--up-bg); color: var(--up); border-color: var(--up-bd); }
+.card-grp { font-size: 11px; color: var(--tx-muted); display: flex; align-items: center; gap: 4px; }
+.card-grp::before { content: ''; display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 500; align-items: center; justify-content: center; }
+.modal-overlay.open { display: flex; }
+.modal-box { background: var(--bg-1); border: 1px solid var(--bd); border-radius: var(--r); width: min(860px, 94vw); max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 16px 48px rgba(0,0,0,.6); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--bd); flex-shrink: 0; }
+.modal-title { font-size: 14px; font-weight: 700; color: var(--tx-1); }
+.modal-sub   { font-size: 12px; color: var(--tx-2); margin-top: 3px; }
+.modal-close { width: 28px; height: 28px; background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--rs); display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--tx-2); font-size: 16px; transition: background .12s, color .12s; flex-shrink: 0; }
+.modal-close:hover { background: var(--bg-hover); color: var(--tx-1); }
+.modal-body { overflow-y: auto; padding: 20px 22px; flex: 1; }
+.detail-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.detail-table th { text-align: left; padding: 8px 12px; background: var(--bg-0); border-bottom: 1px solid var(--bd); font-size: 11px; font-weight: 600; color: var(--tx-muted); text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
+.detail-table td { padding: 9px 12px; border-bottom: 1px solid var(--bd-soft); color: var(--tx-1); vertical-align: middle; }
+.detail-table tr:last-child td { border-bottom: none; }
+.detail-table tr:hover td { background: var(--bg-hover); }
+.td-eqp  { font-family: 'IBM Plex Mono', monospace; font-weight: 600; }
+.td-rtd-y { color: var(--dn); font-weight: 700; }
+.td-rtd-n { color: var(--up); font-weight: 700; }
+.td-desc  { color: var(--tx-2); max-width: 200px; word-break: break-word; }
+.td-tm    { font-size: 11px; color: var(--tx-muted); font-family: 'IBM Plex Mono', monospace; white-space: nowrap; }
+.modal-section-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; margin: 0 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--bd); }
+.hidden { display: none !important; }
+.empty-state { padding: 60px 20px; text-align: center; color: var(--tx-muted); font-size: 13px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="rtd-page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">RTD 현황</h1>
+      <p class="page-sub">LOT_CD / 공정별 진행 가능 장비 현황</p>
+    </div>
+    <button class="btn-refresh" onclick="location.reload()">↻ 새로고침</button>
+  </div>
+
+  {% if result.success %}
+  <div class="filter-panel">
+    <div class="filter-group">
+      <span class="filter-label">FAB</span>
+      <select class="filter-select" id="sel-fab">
+        <option value="all">전체</option>
+        {% for f in result.fab_list %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">LOT_CD</span>
+      <select class="filter-select" id="sel-lot">
+        <option value="all">전체</option>
+        {% for l in result.lot_cd_list %}<option value="{{ l }}">{{ l }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">공정그룹</span>
+      <select class="filter-select" id="sel-grp">
+        <option value="all">전체</option>
+        {% for g in result.grp_list %}<option value="{{ g }}">{{ g }}</option>{% endfor %}
+      </select>
+    </div>
+    <button class="btn-apply" onclick="applyFilter()">적용</button>
+  </div>
+  <div class="summary-bar" id="js-summary"></div>
+  <div id="js-card-area"></div>
+  {% else %}
+  <div style="padding:40px; color:var(--dn); font-size:13px;">오류: {{ result.error }}</div>
+  {% endif %}
+</div>
+
+<div class="modal-overlay" id="js-modal" onclick="closeModal(event)">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="js-modal-title">장비 상세</div>
+        <div class="modal-sub"  id="js-modal-sub"></div>
+      </div>
+      <button class="modal-close" onclick="closeModalDirect()">✕</button>
+    </div>
+    <div class="modal-body" id="js-modal-body"></div>
+  </div>
+</div>
+
+<script>
+const ALL_CARDS = {{ result_json|safe }}.cards || [];
+let activeCards = [...ALL_CARDS];
+
+function applyFilter() {
+  const fab = document.getElementById('sel-fab').value;
+  const lot = document.getElementById('sel-lot').value;
+  const grp = document.getElementById('sel-grp').value;
+  activeCards = ALL_CARDS.filter(c => {
+    return (fab === 'all' || c.fab === fab) &&
+           (lot === 'all' || c.lot_cd === lot) &&
+           (grp === 'all' || c.grp === grp);
+  });
+  renderSummary();
+  renderCards();
+}
+
+function renderSummary() {
+  const totalEq = activeCards.reduce((s,c) => s+c.total, 0);
+  const availEq = activeCards.reduce((s,c) => s+c.avail, 0);
+  const rtdEq   = activeCards.reduce((s,c) => s+c.rtd,   0);
+  document.getElementById('js-summary').innerHTML = `
+    <div class="sum-chip"><span class="s-label">총 공정 수</span><span class="s-val neu">${activeCards.length}</span></div>
+    <div class="sum-chip"><span class="s-label">전체 장비</span><span class="s-val neu">${totalEq}</span></div>
+    <div class="sum-chip"><span class="s-label">진행 가능</span><span class="s-val ok">${availEq}</span></div>
+    <div class="sum-chip"><span class="s-label">진행 금지 (RTD)</span><span class="s-val ${rtdEq>0?'bad':'ok'}">${rtdEq}</span></div>`;
+}
+
+function renderCards() {
+  const area = document.getElementById('js-card-area');
+  if (activeCards.length === 0) { area.innerHTML = '<div class="empty-state">조건에 맞는 데이터가 없습니다.</div>'; return; }
+  const operGroups = {};
+  activeCards.forEach(c => { if (!operGroups[c.oper_desc]) operGroups[c.oper_desc] = []; operGroups[c.oper_desc].push(c); });
+  let html = '';
+  Object.entries(operGroups).forEach(([oper, cards]) => {
+    html += `<div class="oper-section" style="margin-bottom:24px;"><div class="oper-title">${escHtml(oper)}</div><div class="card-grid">`;
+    cards.forEach(c => {
+      const hasRtd = c.rtd > 0, allRtd = c.rtd >= c.total;
+      const cardClass = allRtd ? 'rtd-card all-rtd' : hasRtd ? 'rtd-card has-rtd' : 'rtd-card';
+      const rtdBadgeClass = c.rtd === 0 ? 'count-rtd-badge zero' : 'count-rtd-badge';
+      html += `<div class="${cardClass}" onclick="openModal(${ALL_CARDS.indexOf(c)})">
+        <div class="card-lot"><span class="lot-badge">${escHtml(c.lot_cd)}</span><span class="flow-badge">${escHtml(c.flow_id)}</span></div>
+        <div class="card-oper">${escHtml(c.oper_desc)}</div>
+        <div class="card-counts"><span class="count-avail">${c.avail}</span><span class="count-sep">/</span><span class="count-total">${c.total}</span><span class="${rtdBadgeClass}">RTD ${c.rtd}</span></div>
+        <div class="card-grp">${escHtml(c.grp)}</div>
+      </div>`;
+    });
+    html += `</div></div>`;
+  });
+  area.innerHTML = html;
+}
+
+function openModal(cardIdx) {
+  const c = ALL_CARDS[cardIdx]; if (!c) return;
+  document.getElementById('js-modal-title').textContent = `${c.oper_desc}  ·  LOT: ${c.lot_cd}`;
+  document.getElementById('js-modal-sub').textContent = `그룹: ${c.grp}  |  FLOW: ${c.flow_id}  |  진행가능: ${c.avail} / ${c.total}대  |  RTD: ${c.rtd}대`;
+  const rtdRows = c.detail_all.filter(r => (r.RTD||'').toUpperCase() === 'Y');
+  const okRows  = c.units.filter(u => !u.is_rtd).map(u => ({EQP_ID: u.unit_id, LOT_CD: c.lot_cd, FLOW_ID: c.flow_id, RTD:'N', RTD_USER_NM:'-', RTD_TM:'-', RTD_DESC:'-'}));
+  let body = '';
+  if (rtdRows.length > 0) { body += `<div class="modal-section-title">진행 금지 장비 (RTD)</div>` + buildTable(rtdRows); }
+  if (okRows.length  > 0) { body += `<div class="modal-section-title" style="margin-top:${rtdRows.length>0?'24px':'0'};">진행 가능 장비</div>` + buildTable(okRows); }
+  if (!body) body = '<div class="empty-state">상세 데이터가 없습니다.</div>';
+  document.getElementById('js-modal-body').innerHTML = body;
+  document.getElementById('js-modal').classList.add('open');
+}
+
+function buildTable(rows) {
+  let t = `<table class="detail-table"><thead><tr><th>EQP_ID</th><th>LOT_CD</th><th>FLOW_ID</th><th>RTD</th><th>RTD_USER</th><th>RTD_TM</th><th>사유</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    const rtdCls = (r.RTD||'').toUpperCase() === 'Y' ? 'td-rtd-y' : 'td-rtd-n';
+    t += `<tr><td class="td-eqp">${escHtml(r.EQP_ID||'')}</td><td>${escHtml(r.LOT_CD||'')}</td><td>${escHtml(r.FLOW_ID||'')}</td><td class="${rtdCls}">${escHtml(r.RTD||'')}</td><td>${escHtml(r.RTD_USER_NM||'-')}</td><td class="td-tm">${escHtml(r.RTD_TM||'-')}</td><td class="td-desc">${escHtml(r.RTD_DESC||'-')}</td></tr>`;
+  });
+  t += `</tbody></table>`; return t;
+}
+
+function closeModal(e) { if (e.target === document.getElementById('js-modal')) closeModalDirect(); }
+function closeModalDirect() { document.getElementById('js-modal').classList.remove('open'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModalDirect(); });
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+applyFilter();
+</script>
+{% endblock %}
