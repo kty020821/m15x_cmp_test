@@ -129,15 +129,46 @@ def get_wip_data():
         return {'success': False, 'grouped': [], 'total_loss': 0, 'move_ok': 0, 'wip_over': 0, 'group_count': 0, 'error': str(e)}
 
 
-def get_rtd_data(df):
+# ============================================================
+# equipment/services.py - get_rtd_data() 함수
+# 기존 get_rtd_data() 전체를 이걸로 교체
+# ============================================================
+#
+# ※ df는 이 함수 안에서 API 호출해서 가져오도록 네가 만들어둔 상태.
+#   아래는 df를 받은 이후의 집계 로직만 보여줌.
+#   네 함수 구조가 def get_rtd_data(): 라면 df 가져오는 부분은
+#   그대로 두고, 그 아래 집계 로직만 이걸로 바꾸면 돼.
+# ============================================================
+
+def get_rtd_data():
+    import pandas as pd
+
+    # ── 1) API에서 df 가져오기 (네가 만들어둔 부분) ──────────
+    # resp = requests.post(rtd_url, headers=headers, timeout=10)
+    # df = pd.read_json(StringIO(resp.text), dtype={'LOT_CD': str})
+    # ↑ 이 부분은 네 코드 그대로 두기
+    #
+    # 아래는 df가 준비됐다고 가정하고 진행
+    # (테스트용으로 빈 df 방지)
+    try:
+        df  # noqa  -- 위에서 정의된 df 사용
+    except NameError:
+        df = pd.DataFrame()
+
     if df.empty:
         return {'success': False, 'error': '데이터 없음', 'cards': [],
                 'fab_list': [], 'lot_cd_list': [], 'grp_list': []}
+
     try:
+        # LOT_CD 문자열 보장
+        df['LOT_CD'] = df['LOT_CD'].astype(str)
+
+        # ── 필터 옵션 목록 ───────────────────────────────
         fab_list    = sorted(df['FAB'].dropna().unique().tolist())
         lot_cd_list = sorted(df['LOT_CD'].dropna().unique().tolist())
         grp_list    = sorted(df['EQP_OPER_GRP_CD'].dropna().unique().tolist())
 
+        # ── 장비 유형 판별 ───────────────────────────────
         def get_eq_type(model):
             m = str(model).upper()
             if 'OPTA' in m:    return 'OPTA'
@@ -146,6 +177,8 @@ def get_rtd_data(df):
             if 'KCT' in m:     return 'KCT'
             return 'NORMAL'
 
+        # ── 공정그룹(EQP_OPER_GRP_CD)별 전체 장비대수 ────
+        #    유형에 따라 집계 단위가 다름
         def count_total_eq_in_grp(grp_df):
             eq_type = get_eq_type(grp_df['EQP_MODEL_NM'].iloc[0])
             all_ids = grp_df['EQP_ID'].dropna().unique().tolist()
@@ -161,77 +194,119 @@ def get_rtd_data(df):
                 base = [i for i in all_ids if '_' not in str(i)]
                 return len(base) if base else len(all_ids)
 
-        grp_total_cache = {grp: count_total_eq_in_grp(gdf) for grp, gdf in df.groupby('EQP_OPER_GRP_CD')}
+        grp_total_cache = {grp: count_total_eq_in_grp(gdf)
+                           for grp, gdf in df.groupby('EQP_OPER_GRP_CD')}
 
-        cards = []
-        for keys, oper_df in df.groupby(['OPER_DESC', 'LOT_CD', 'FLOW_ID', 'EQP_OPER_GRP_CD']):
-            oper_desc, lot_cd, flow_id, grp = keys
-            eq_type = get_eq_type(oper_df['EQP_MODEL_NM'].iloc[0])
-
+        # ── 유닛(장비/CH) 단위로 RTD 판정 ───────────────
+        def build_units(sub_df, eq_type):
+            """sub_df 안의 장비를 유형별 단위로 묶고 RTD 판정"""
+            units = []
             if eq_type == 'OPTA':
-                prefix_map = {}
-                for _, row in oper_df.iterrows():
+                key_map = {}
+                for _, row in sub_df.iterrows():
                     s = str(row['EQP_ID'])
-                    prefix_map.setdefault(s.split('_P')[0] if '_P' in s else s, []).append(row)
-                units = []
-                for prefix, rows in prefix_map.items():
-                    rdf = pd.DataFrame(rows)
-                    is_rtd = (rdf['RTD'].str.upper() == 'Y').any()
-                    dr = rdf[rdf['RTD'].str.upper() == 'Y'] if is_rtd else rdf.head(1)
-                    units.append({'unit_id': prefix, 'is_rtd': is_rtd, 'detail_rows': dr.to_dict('records')})
+                    key_map.setdefault(s.split('_P')[0] if '_P' in s else s, []).append(row)
             elif eq_type in ('FREX', 'ELASTIC', 'KCT'):
-                ch_map = {}
-                for _, row in oper_df.iterrows():
+                key_map = {}
+                for _, row in sub_df.iterrows():
                     s = str(row['EQP_ID'])
-                    if '_' in s: ch_map.setdefault(s, []).append(row)
-                units = []
-                for ch_id, rows in ch_map.items():
-                    rdf = pd.DataFrame(rows)
-                    is_rtd = (rdf['RTD'].str.upper() == 'Y').any()
-                    dr = rdf[rdf['RTD'].str.upper() == 'Y'] if is_rtd else rdf.head(1)
-                    units.append({'unit_id': ch_id, 'is_rtd': is_rtd, 'detail_rows': dr.to_dict('records')})
+                    if '_' in s:
+                        key_map.setdefault(s, []).append(row)
             else:
-                base_map = {}
-                for _, row in oper_df.iterrows():
+                key_map = {}
+                for _, row in sub_df.iterrows():
                     s = str(row['EQP_ID'])
-                    base_map.setdefault(s if '_' not in s else s.split('_')[0], []).append(row)
-                units = []
-                for eq_id, rows in base_map.items():
-                    rdf = pd.DataFrame(rows)
-                    is_rtd = (rdf['RTD'].str.upper() == 'Y').any()
-                    dr = rdf[rdf['RTD'].str.upper() == 'Y'] if is_rtd else rdf.head(1)
-                    units.append({'unit_id': eq_id, 'is_rtd': is_rtd, 'detail_rows': dr.to_dict('records')})
+                    key_map.setdefault(s if '_' not in s else s.split('_')[0], []).append(row)
 
-            rtd_count   = sum(1 for u in units if u['is_rtd'])
-            total_in_grp = grp_total_cache.get(grp, len(units))
-            detail_all = []
-            for u in units:
-                for r in u['detail_rows']:
-                    detail_all.append({
-                        'EQP_ID': r.get('EQP_ID',''), 'LOT_CD': r.get('LOT_CD',''),
-                        'FLOW_ID': r.get('FLOW_ID',''), 'RTD': r.get('RTD',''),
-                        'RTD_USER_NM': r.get('RTD_USER_NM',''), 'RTD_TM': str(r.get('RTD_TM','')),
-                        'RTD_DESC': r.get('RTD_DESC',''),
-                    })
+            for unit_id, rows in key_map.items():
+                rdf = pd.DataFrame(rows)
+                is_rtd = (rdf['RTD'].astype(str).str.upper() == 'Y').any()
+                dr = rdf[rdf['RTD'].astype(str).str.upper() == 'Y'] if is_rtd else rdf.head(1)
+                units.append({'unit_id': unit_id, 'is_rtd': is_rtd,
+                              'detail_rows': dr.to_dict('records')})
+            return units
+
+        # ── 카드 = 공정(OPER_DESC) ───────────────────────
+        #    카드 안에 LOT_CD + FLOW_ID 별 행(rows)
+        cards = []
+        for oper_desc, oper_df in df.groupby('OPER_DESC'):
+            rows_data = []
+            # 카드가 어느 공정그룹인지 (대표값)
+            card_grp = oper_df['EQP_OPER_GRP_CD'].iloc[0]
+            card_fab = oper_df['FAB'].iloc[0] if 'FAB' in oper_df.columns else ''
+
+            # LOT_CD + FLOW_ID 조합별로 행 생성
+            for (lot_cd, flow_id, grp), sub_df in oper_df.groupby(['LOT_CD', 'FLOW_ID', 'EQP_OPER_GRP_CD']):
+                eq_type = get_eq_type(sub_df['EQP_MODEL_NM'].iloc[0])
+                units   = build_units(sub_df, eq_type)
+
+                total = grp_total_cache.get(grp, len(units))
+                rtd   = sum(1 for u in units if u['is_rtd'])
+                avail = total - rtd
+
+                # 상세(모달)용 데이터
+                detail_all = []
+                for u in units:
+                    for r in u['detail_rows']:
+                        detail_all.append({
+                            'EQP_ID':      r.get('EQP_ID', ''),
+                            'LOT_CD':      str(r.get('LOT_CD', '')),
+                            'FLOW_ID':     r.get('FLOW_ID', ''),
+                            'RTD':         r.get('RTD', ''),
+                            'RTD_USER_NM': r.get('RTD_USER_NM', ''),
+                            'RTD_TM':      str(r.get('RTD_TM', '')),
+                            'RTD_DESC':    r.get('RTD_DESC', ''),
+                        })
+
+                rows_data.append({
+                    'lot_cd':     str(lot_cd),
+                    'flow_id':    flow_id,
+                    'grp':        grp,
+                    'eq_type':    eq_type,
+                    'total':      total,
+                    'avail':      avail,
+                    'rtd':        rtd,
+                    'units':      units,
+                    'detail_all': detail_all,
+                })
+
+            # 행 정렬: lot_cd > flow_id
+            rows_data.sort(key=lambda x: (x['lot_cd'], x['flow_id']))
+
+            # 카드 단위 요약 (RTD 있는 행이 하나라도 있으면 표시)
+            card_has_rtd = any(r['rtd'] > 0 for r in rows_data)
+
             cards.append({
-                'fab': oper_df['FAB'].iloc[0] if 'FAB' in oper_df.columns else '',
-                'lot_cd': lot_cd, 'flow_id': flow_id, 'oper_desc': oper_desc, 'grp': grp,
-                'eq_type': eq_type, 'total': total_in_grp, 'avail': total_in_grp - rtd_count,
-                'rtd': rtd_count, 'units': units, 'detail_all': detail_all,
+                'oper_desc':    oper_desc,
+                'grp':          card_grp,
+                'fab':          card_fab,
+                'rows':         rows_data,
+                'row_count':    len(rows_data),
+                'has_rtd':      card_has_rtd,
             })
 
-        cards.sort(key=lambda x: (x['oper_desc'], x['lot_cd']))
-        return {'success': True, 'error': None, 'cards': cards,
-                'fab_list': fab_list, 'lot_cd_list': lot_cd_list, 'grp_list': grp_list}
+        # 카드 정렬: 공정명
+        cards.sort(key=lambda x: x['oper_desc'])
+
+        return {
+            'success':     True,
+            'error':       None,
+            'cards':       cards,
+            'fab_list':    fab_list,
+            'lot_cd_list': lot_cd_list,
+            'grp_list':    grp_list,
+        }
+
     except Exception as e:
         import traceback
-        return {'success': False, 'error': str(e) + '\n' + traceback.format_exc(),
-                'cards': [], 'fab_list': [], 'lot_cd_list': [], 'grp_list': []}
-
-
-DATA_DIR = Path(__file__).resolve().parent.parent / 'data' / 'inline'
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-inline_url = ''
+        return {
+            'success':     False,
+            'error':       str(e) + '\n' + traceback.format_exc(),
+            'cards':       [],
+            'fab_list':    [],
+            'lot_cd_list': [],
+            'grp_list':    [],
+        }
 
 def load_inline_data(days=15, rn_filter=None):
     import pandas as pd
