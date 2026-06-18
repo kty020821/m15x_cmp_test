@@ -318,5 +318,183 @@ def load_inline_data(days=15, rn_filter=None):
         if fp.exists(): dfs.append(pd.read_parquet(fp))
     if not dfs: return pd.DataFrame()
     result = pd.concat(dfs, ignore_index=True)
+
+
+# ============================================================
+# equipment/services.py - get_rtd_data() 최종본
+# ============================================================
+# 변경점:
+#  - 컬럼명 소문자로 오므로 맨 앞에서 대문자로 통일
+#  - RTD 판정: '금지'  (기존 'Y' → '금지')
+#  - 모달 상세도 '금지'/'해제' 기준
+# ============================================================
+
+def get_rtd_data():
+    import pandas as pd
+    from io import StringIO
+
+    # ── 1) Impala에서 df 가져오기 ────────────────────────
+    #   네가 만들어둔 쿼리 실행 부분.
+    #   예시 (실제 네 코드로 교체):
+    #   query = """ ...위에서 정리한 SQL... """
+    #   lake.auto_run_sync_paragraph(code=query)
+    #   df = lake.get_rst().toPandas()
+    #
+    #   아래는 df가 준비됐다고 가정
+    # ────────────────────────────────────────────────────
+    try:
+        df  # noqa
+    except NameError:
+        df = pd.DataFrame()
+
+    if df.empty:
+        return {'success': False, 'error': '데이터 없음', 'cards': [],
+                'fab_list': [], 'lot_cd_list': [], 'grp_list': []}
+
+    try:
+        # ── 컬럼명 대문자 통일 (소문자로 내려옴) ─────────
+        df.columns = df.columns.str.upper()
+
+        # LOT_CD 문자열 보장
+        df['LOT_CD'] = df['LOT_CD'].astype(str)
+
+        # ── 필터 옵션 목록 ───────────────────────────────
+        fab_list    = sorted(df['FAB'].dropna().unique().tolist())
+        lot_cd_list = sorted(df['LOT_CD'].dropna().unique().tolist())
+        grp_list    = sorted(df['EQP_OPER_GRP_CD'].dropna().unique().tolist())
+
+        # ── 장비 유형 판별 ───────────────────────────────
+        def get_eq_type(model):
+            m = str(model).upper()
+            if 'OPTA' in m:    return 'OPTA'
+            if 'F_REX' in m or 'F-REX' in m or 'FREX' in m: return 'FREX'
+            if 'ELASTIC' in m: return 'ELASTIC'
+            if 'KCT' in m:     return 'KCT'
+            return 'NORMAL'
+
+        # ── RTD 판정 헬퍼: '금지'이면 True ───────────────
+        def is_banned(series):
+            return (series.astype(str) == '금지').any()
+
+        # ── 공정그룹별 전체 장비대수 ─────────────────────
+        def count_total_eq_in_grp(grp_df):
+            eq_type = get_eq_type(grp_df['EQP_MODEL_NM'].iloc[0])
+            all_ids = grp_df['EQP_ID'].dropna().unique().tolist()
+            if eq_type == 'OPTA':
+                prefixes = set()
+                for i in all_ids:
+                    s = str(i)
+                    prefixes.add(s.split('_P')[0] if '_P' in s else s)
+                return len(prefixes)
+            elif eq_type in ('FREX', 'ELASTIC', 'KCT'):
+                return len([i for i in all_ids if '_' in str(i)])
+            else:
+                base = [i for i in all_ids if '_' not in str(i)]
+                return len(base) if base else len(all_ids)
+
+        grp_total_cache = {grp: count_total_eq_in_grp(gdf)
+                           for grp, gdf in df.groupby('EQP_OPER_GRP_CD')}
+
+        # ── 유닛(장비/CH) 단위로 RTD 판정 ───────────────
+        def build_units(sub_df, eq_type):
+            units = []
+            if eq_type == 'OPTA':
+                key_map = {}
+                for _, row in sub_df.iterrows():
+                    s = str(row['EQP_ID'])
+                    key_map.setdefault(s.split('_P')[0] if '_P' in s else s, []).append(row)
+            elif eq_type in ('FREX', 'ELASTIC', 'KCT'):
+                key_map = {}
+                for _, row in sub_df.iterrows():
+                    s = str(row['EQP_ID'])
+                    if '_' in s:
+                        key_map.setdefault(s, []).append(row)
+            else:
+                key_map = {}
+                for _, row in sub_df.iterrows():
+                    s = str(row['EQP_ID'])
+                    key_map.setdefault(s if '_' not in s else s.split('_')[0], []).append(row)
+
+            for unit_id, rows in key_map.items():
+                rdf = pd.DataFrame(rows)
+                banned = is_banned(rdf['RTD'])
+                dr = rdf[rdf['RTD'].astype(str) == '금지'] if banned else rdf.head(1)
+                units.append({'unit_id': unit_id, 'is_rtd': banned,
+                              'detail_rows': dr.to_dict('records')})
+            return units
+
+        # ── 카드 = 공정(OPER_DESC), 안에 LOT+FLOW 행 ────
+        cards = []
+        for oper_desc, oper_df in df.groupby('OPER_DESC'):
+            rows_data = []
+            card_grp = oper_df['EQP_OPER_GRP_CD'].iloc[0]
+            card_fab = oper_df['FAB'].iloc[0] if 'FAB' in oper_df.columns else ''
+
+            for (lot_cd, flow_id, grp), sub_df in oper_df.groupby(['LOT_CD', 'FLOW_ID', 'EQP_OPER_GRP_CD']):
+                eq_type = get_eq_type(sub_df['EQP_MODEL_NM'].iloc[0])
+                units   = build_units(sub_df, eq_type)
+
+                total = grp_total_cache.get(grp, len(units))
+                rtd   = sum(1 for u in units if u['is_rtd'])
+                avail = total - rtd
+
+                detail_all = []
+                for u in units:
+                    for r in u['detail_rows']:
+                        detail_all.append({
+                            'EQP_ID':      r.get('EQP_ID', ''),
+                            'LOT_CD':      str(r.get('LOT_CD', '')),
+                            'FLOW_ID':     r.get('FLOW_ID', ''),
+                            'RTD':         r.get('RTD', ''),
+                            'RTD_USER_NM': r.get('RTD_USER_NM', ''),
+                            'RTD_TM':      str(r.get('RTD_TM', '')),
+                            'RTD_DESC':    r.get('RTD_DESC', ''),
+                        })
+
+                rows_data.append({
+                    'lot_cd':     str(lot_cd),
+                    'flow_id':    flow_id,
+                    'grp':        grp,
+                    'eq_type':    eq_type,
+                    'total':      total,
+                    'avail':      avail,
+                    'rtd':        rtd,
+                    'units':      units,
+                    'detail_all': detail_all,
+                })
+
+            rows_data.sort(key=lambda x: (x['lot_cd'], x['flow_id']))
+            card_has_rtd = any(r['rtd'] > 0 for r in rows_data)
+
+            cards.append({
+                'oper_desc': oper_desc,
+                'grp':       card_grp,
+                'fab':       card_fab,
+                'rows':      rows_data,
+                'row_count': len(rows_data),
+                'has_rtd':   card_has_rtd,
+            })
+
+        cards.sort(key=lambda x: x['oper_desc'])
+
+        return {
+            'success':     True,
+            'error':       None,
+            'cards':       cards,
+            'fab_list':    fab_list,
+            'lot_cd_list': lot_cd_list,
+            'grp_list':    grp_list,
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            'success':     False,
+            'error':       str(e) + '\n' + traceback.format_exc(),
+            'cards':       [],
+            'fab_list':    [],
+            'lot_cd_list': [],
+            'grp_list':    [],
+        }
     if rn_filter is not None: result = result[result['rn'] == rn_filter]
     return result
