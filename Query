@@ -1,0 +1,32 @@
+SELECT 'M15' AS fab,
+       b.eqp_id,
+       ema.eqp_model_nm,
+       ema.eqp_oper_grp_cd,
+       a.eqp_grp_id                                    AS eqp_grp,
+       c.lot_cd,
+       a.flow_id,
+       a.oper_id,
+       d.ctn_desc                                      AS oper_desc,
+       CASE WHEN b.ban_val = 'N' THEN '금지' ELSE '해제' END AS rtd,
+       b.ban_val,
+       b.ban_cd                                        AS rtd_ban_cd,
+       b.chg_tm                                        AS rtd_tm,
+       b.ban_reason_desc                               AS rtd_desc,
+       e.user_nm                                       AS rtd_user_nm
+FROM mes_biz_tpfomodel_def_m15 a,
+     mes_biz_poseqp_inf_m15     b,
+     mes_mes_prod_mas_m15       c,
+     mes_mes_oper_mas_m15       d,
+     mes_mes_user_mas_m15       e,
+     mes_mes_eqp_mas_m15        ema
+WHERE 1 = 1
+  AND c.section_grp_nm    = 'M15DRAM'
+  AND c.lot_cd            IN ('5E2', '5E9')
+  AND a.cond_id           = b.cond_id
+  AND a.prod_id           = c.prod_id
+  AND a.oper_id           = d.oper_id
+  AND b.ban_setup_user_id = e.user_id(+)
+  AND b.eqp_id            = ema.eqp_id
+  AND ema.area_id         = 'CMP'
+  AND c.active_stat_cd    = 'ACTIVE'
+  AND d.active_stat_cd    = 'ACTIVE'
