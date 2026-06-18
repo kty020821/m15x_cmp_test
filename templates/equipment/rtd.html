@@ -231,7 +231,7 @@ function openModal(ci, ri) {
   document.getElementById('js-modal-sub').textContent =
     `FLOW: ${r.flow_id}  |  그룹: ${r.grp}  |  진행가능: ${r.avail} / ${r.total}  |  RTD: ${r.rtd}`;
 
-  const rtdRows = r.detail_all.filter(d => (d.RTD || '').toUpperCase() === 'Y');
+  const rtdRows = r.detail_all.filter(d => (d.RTD || '') === '금지');
   const okRows  = r.units.filter(u => !u.is_rtd).map(u => ({
     EQP_ID: u.unit_id, LOT_CD: r.lot_cd, FLOW_ID: r.flow_id,
     RTD: 'N', RTD_USER_NM: '-', RTD_TM: '-', RTD_DESC: '-'
@@ -255,7 +255,7 @@ function buildTable(rows) {
     <th>EQP_ID</th><th>LOT_CD</th><th>FLOW_ID</th><th>RTD</th>
     <th>RTD_USER</th><th>RTD_TM</th><th>사유</th></tr></thead><tbody>`;
   rows.forEach(r => {
-    const cls = (r.RTD || '').toUpperCase() === 'Y' ? 'td-rtd-y' : 'td-rtd-n';
+    const cls = (r.RTD || '') === '금지' ? 'td-rtd-y' : 'td-rtd-n';
     t += `<tr>
       <td class="td-eqp">${escHtml(r.EQP_ID || '')}</td>
       <td>${escHtml(r.LOT_CD || '')}</td>
