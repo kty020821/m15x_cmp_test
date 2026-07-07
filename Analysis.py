@@ -1,15 +1,14 @@
 """
 분석 데이터 저장 (파일럿) - 최종 wide df를 PostgreSQL에 저장
+- to_sql 대신 psycopg2 execute_values 로 직접 insert (버전 무관, 빠름)
 """
 
 import re
 import pandas as pd
-from sqlalchemy import create_engine
-from django.conf import settings
 from django.db import connections
+from psycopg2.extras import execute_values
 
 
-# ── 컬럼 타입 분류 ────────────────────────────────────────────
 TEXT_COLS = {
     'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_MODEL', 'OPERATION_ID',
     'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID', 'WF_ID', 'IDLE',
@@ -31,16 +30,7 @@ def _safe_table_name(oper_id: str) -> str:
     return f"cmp_analysis_{name}"
 
 
-def _get_pg_engine():
-    """settings의 analysis_db 정보로 SQLAlchemy 엔진 생성"""
-    db = settings.DATABASES['analysis_db']
-    url = (f"postgresql+psycopg2://{db['USER']}:{db['PASSWORD']}"
-           f"@{db['HOST']}:{db['PORT']}/{db['NAME']}")
-    return create_engine(url)
-
-
 def create_analysis_table(df: pd.DataFrame, oper_id: str) -> str:
-    """df 컬럼 구조에 맞춰 테이블 생성 (Django 커넥션으로 DDL 실행)"""
     table = _safe_table_name(oper_id)
     django_conn = connections['analysis_db']
 
@@ -68,7 +58,7 @@ def create_analysis_table(df: pd.DataFrame, oper_id: str) -> str:
 
 
 def save_analysis_df(df: pd.DataFrame, oper_id: str):
-    """최종 wide df를 PG에 저장 (LOT_CD 단위 삭제 후 append)"""
+    """최종 wide df를 PG에 저장 (psycopg2 직접 insert)"""
     if df.empty:
         print("[저장 스킵] df 비어있음")
         return
@@ -77,20 +67,27 @@ def save_analysis_df(df: pd.DataFrame, oper_id: str):
     df.columns = df.columns.str.upper()
 
     table = create_analysis_table(df, oper_id)
-
-    # 기존 데이터 삭제 (Django 커넥션)
     django_conn = connections['analysis_db']
-    lot_cds = df['LOT_CD'].dropna().unique().tolist()
-    with django_conn.cursor() as cur:
-        for lc in lot_cds:
-            cur.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s', [lc])
 
-    # 저장 (SQLAlchemy 엔진)
-    engine = _get_pg_engine()
-    try:
-        df.to_sql(table, engine, if_exists="append", index=False, chunksize=1000)
-    finally:
-        engine.dispose()
+    # NaN → None (PG NULL)
+    df = df.where(pd.notnull(df), None)
+
+    cols     = list(df.columns)
+    col_str  = ", ".join(f'"{c}"' for c in cols)
+    rows     = [tuple(r) for r in df.itertuples(index=False, name=None)]
+    lot_cds  = df['LOT_CD'].dropna().unique().tolist()
+
+    # psycopg2 raw 커서 사용
+    with django_conn.cursor() as cur:
+        raw = cur.cursor   # Django 커서 안의 실제 psycopg2 커서
+
+        # 기존 lot_cd 데이터 삭제
+        for lc in lot_cds:
+            raw.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s', [lc])
+
+        # 대량 insert
+        insert_sql = f'INSERT INTO {table} ({col_str}) VALUES %s'
+        execute_values(raw, insert_sql, rows, page_size=1000)
 
     print(f"[저장 완료] {table}  {len(df):,}행  (lot_cd: {lot_cds})")
 
