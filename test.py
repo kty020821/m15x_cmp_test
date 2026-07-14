@@ -1,79 +1,92 @@
-
 # ============================================================
-# Step 2 — equipment/views.py 에 추가
+# Step 3 — equipment/views.py 에 추가
 # ============================================================
-
-# ── 범례 후보 (★ 항목 추가/변경하려면 여기만 수정) ──────
-#    (PG 컬럼명, 화면 표시명)
-LEGEND_OPTIONS = [
-    ('EQP_ID',    '장비 ID'),
-    ('RECIPE_ID', 'Recipe'),
-    ('EQP_CH_ID', 'Chamber'),
-    ('IDLE',      'Idle/Layer'),
-    ('EQP_MODEL', '장비 모델'),
-    ('PRE_LAYER', '사전 공정'),
-]
-
+# 드래그 선택 영역 통계 (계산은 전부 PostgreSQL이 담당)
+# ============================================================
 
 @csrf_exempt
-def analysis_trend(request):
+def analysis_stats(request):
     """
-    트렌드 스캐터 데이터.
-    body: {oper_id, lot_cd, param}
+    드래그로 선택된 웨이퍼들의 통계 요약.
+    body: {oper_id, ids: [id, id, ...]}
+    반환:
+      count      : 선택 웨이퍼 수
+      stats      : {컬럼: {avg, std, min, max}}  ← 모든 측정값 컬럼
+      idle_dist  : IDLE 값 분포
+      layer_dist : PRE_LAYER(사전공정) 분포
+      eqp_dist   : 장비 분포
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
     body    = json.loads(request.body)
     oper_id = body.get('oper_id')
-    lot_cd  = body.get('lot_cd')
-    param   = body.get('param')
+    ids     = body.get('ids', [])
     table   = _an_table(oper_id)
 
-    # SQL 인젝션 방지: 컬럼명은 화이트리스트 패턴만 허용
-    if not param or not re.match(r'^[0-9A-Za-z_]+$', param):
-        return JsonResponse({'error': '잘못된 파라미터'}, status=400)
-
-    legend_cols = [c for c, _ in LEGEND_OPTIONS]
-    legend_sel  = ', '.join(f'"{c}"' for c in legend_cols)
-
-    sql = f'''
-        SELECT id, "DATE", "{param}", {legend_sel}, "LOT_ID", "WF_ID"
-        FROM {table}
-        WHERE "LOT_CD" = %s AND "{param}" IS NOT NULL
-        ORDER BY "DATE"
-    '''
+    if not ids:
+        return JsonResponse({'count': 0, 'stats': {},
+                             'idle_dist': [], 'layer_dist': [], 'eqp_dist': []})
 
     try:
+        # 1) 측정값 컬럼 목록 조회
         with connections['analysis_db'].cursor() as cur:
-            cur.execute(sql, [lot_cd])
-            rows = cur.fetchall()
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s ORDER BY ordinal_position
+            """, [table])
+            all_cols = [r[0].upper() for r in cur.fetchall()]
+        val_cols = [c for c in all_cols if c not in META_COLS]
 
-        n = len(legend_cols)
-        data = []
-        for r in rows:
-            item = {
-                'id':     r[0],
-                'date':   r[1].strftime('%Y-%m-%d %H:%M:%S') if r[1] else None,
-                'val':    float(r[2]) if r[2] is not None else None,
-                'LOT_ID': r[3 + n],
-                'WF_ID':  r[4 + n],
+        # 2) 각 측정값의 avg/std/min/max 를 SQL로 계산
+        agg = []
+        for c in val_cols:
+            agg.append(f'AVG("{c}")    AS "{c}__a"')
+            agg.append(f'STDDEV("{c}") AS "{c}__s"')
+            agg.append(f'MIN("{c}")    AS "{c}__n"')
+            agg.append(f'MAX("{c}")    AS "{c}__x"')
+        agg_sql = ", ".join(agg)
+        ph = ",".join(["%s"] * len(ids))
+
+        with connections['analysis_db'].cursor() as cur:
+            cur.execute(
+                f'SELECT COUNT(*), {agg_sql} FROM {table} WHERE id IN ({ph})', ids
+            )
+            row = cur.fetchone()
+
+            # 3) 카테고리 분포 (요인 파악용)
+            def dist(col):
+                cur.execute(f'''
+                    SELECT COALESCE(NULLIF("{col}", ''), '(없음)') AS k, COUNT(*)
+                    FROM {table} WHERE id IN ({ph})
+                    GROUP BY k ORDER BY COUNT(*) DESC
+                ''', ids)
+                return [{'key': r[0], 'count': r[1]} for r in cur.fetchall()]
+
+            idle_dist  = dist('IDLE')
+            layer_dist = dist('PRE_LAYER')
+            eqp_dist   = dist('EQP_ID')
+
+        count = row[0]
+        stats = {}
+        i = 1
+        for c in val_cols:
+            a, s, n, x = row[i], row[i+1], row[i+2], row[i+3]
+            i += 4
+            stats[c] = {
+                'avg': round(float(a), 3) if a is not None else None,
+                'std': round(float(s), 3) if s is not None else None,
+                'min': round(float(n), 3) if n is not None else None,
+                'max': round(float(x), 3) if x is not None else None,
             }
-            for i, c in enumerate(legend_cols):
-                item[c] = r[3 + i]
-            data.append(item)
 
-        return JsonResponse({'data': data, 'param': param})
+        return JsonResponse({
+            'count':      count,
+            'stats':      stats,
+            'idle_dist':  idle_dist,
+            'layer_dist': layer_dist,
+            'eqp_dist':   eqp_dist,
+        })
 
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
-
-
-# ============================================================
-# analysis_page 도 수정 (legend_options 넘기기)
-# ============================================================
-def analysis_page(request):
-    return render(request, 'equipment/analysis.html', {
-        'tech_list':      list(TECH_LOT_MAP.keys()),
-        'legend_options': LEGEND_OPTIONS,      # ← 추가
-    })
