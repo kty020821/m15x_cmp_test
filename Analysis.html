@@ -22,9 +22,17 @@
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
 
-.debug-box { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r);
-  padding: 16px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--tx-2); }
-.debug-box strong { color: var(--accent); }
+.chart-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.chart-title { font-size: 13px; font-weight: 700; color: var(--tx-1); }
+.chart-info { font-size: 11px; color: var(--tx-muted); margin-left: 10px; font-weight: 400; }
+.legend-ctrl { display: flex; align-items: center; gap: 8px; }
+.legend-ctrl label { font-size: 11px; color: var(--tx-2); }
+.legend-ctrl select { padding: 5px 9px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--rs); color: var(--tx-1); font-size: 12px; cursor: pointer; }
+
+#js-plot { width: 100%; height: 460px; }
+.empty-hint { padding: 60px 20px; text-align: center; color: var(--tx-muted); font-size: 13px; }
 </style>
 {% endblock %}
 
@@ -56,27 +64,45 @@
       <span class="filter-label">PARAMETER</span>
       <select class="filter-select" id="sel-param" disabled><option value="">-</option></select>
     </div>
-    <button class="btn-run" id="btn-run" disabled onclick="showSelection()">조회</button>
+    <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
   </div>
 
-  <!-- Step1 확인용: 선택값 표시 (Step2에서 차트로 교체) -->
-  <div class="debug-box" id="js-debug">
-    드롭박스가 순서대로 채워지는지 확인하세요.<br>
-    API_BASE: <strong id="js-apibase"></strong>
+  <!-- 트렌드 차트 -->
+  <div class="chart-card">
+    <div class="chart-head">
+      <div>
+        <span class="chart-title">Trend</span>
+        <span class="chart-info" id="js-chart-info"></span>
+      </div>
+      <div class="legend-ctrl">
+        <label>범례:</label>
+        <select id="sel-legend" onchange="redraw()">
+          {% for col, disp in legend_options %}
+          <option value="{{ col }}">{{ disp }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div id="js-plot">
+      <div class="empty-hint">조건을 선택하고 조회하세요.</div>
+    </div>
   </div>
 </div>
 
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script>
-// ★ proxy 경로 자동 처리 (회사 서버: /proxy/8000/... 대응)
-//    Django {% url %} 가 실제 경로를 만들어주므로 로컬/서버 모두 동작
 const API_OPTIONS = "{% url 'analysis-options' %}";
-document.getElementById('js-apibase').textContent = API_OPTIONS;
+const API_TREND   = "{% url 'analysis-trend' %}";
 
-const selTech  = document.getElementById('sel-tech');
-const selLot   = document.getElementById('sel-lot');
-const selOper  = document.getElementById('sel-oper');
-const selParam = document.getElementById('sel-param');
-const btnRun   = document.getElementById('btn-run');
+let currentData  = [];
+let currentParam = '';
+
+const selTech   = document.getElementById('sel-tech');
+const selLot    = document.getElementById('sel-lot');
+const selOper   = document.getElementById('sel-oper');
+const selParam  = document.getElementById('sel-param');
+const selLegend = document.getElementById('sel-legend');
+const btnRun    = document.getElementById('btn-run');
 
 async function postJSON(url, payload) {
   const res = await fetch(url, {
@@ -85,9 +111,8 @@ async function postJSON(url, payload) {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    console.error('API 오류', res.status, url);
     alert(`API 오류 ${res.status}\n${url}`);
-    return {options: []};
+    return {};
   }
   return res.json();
 }
@@ -116,31 +141,28 @@ function resetFrom(level) {
   btnRun.disabled = true;
 }
 
-// TECH → LOT_CD
 selTech.addEventListener('change', async () => {
   resetFrom('lot');
   if (!selTech.value) return;
   const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: selTech.value});
-  fillSelect(selLot, options.map(o => ({value: o, label: o})));
+  fillSelect(selLot, (options || []).map(o => ({value: o, label: o})));
   selLot.disabled = false;
 });
 
-// LOT_CD → OPER
 selLot.addEventListener('change', async () => {
   resetFrom('oper');
   if (!selLot.value) return;
   const {options} = await postJSON(API_OPTIONS, {level: 'oper'});
-  fillSelect(selOper, options);
+  fillSelect(selOper, options || []);
   selOper.disabled = false;
 });
 
-// OPER → PARAMETER
 selOper.addEventListener('change', async () => {
   resetFrom('param');
   if (!selOper.value) return;
   const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: selOper.value});
   if (error) { alert('파라미터 조회 오류: ' + error); return; }
-  fillSelect(selParam, options.map(o => ({value: o, label: o})));
+  fillSelect(selParam, (options || []).map(o => ({value: o, label: o})));
   selParam.disabled = false;
 });
 
@@ -148,16 +170,78 @@ selParam.addEventListener('change', () => {
   btnRun.disabled = !selParam.value;
 });
 
-// Step1: 선택값만 확인 (Step2에서 차트로 교체)
-function showSelection() {
-  document.getElementById('js-debug').innerHTML = `
-    <strong>선택 완료</strong><br>
-    TECH: ${selTech.value}<br>
-    LOT_CD: ${selLot.value}<br>
-    OPER: ${selOper.value}<br>
-    PARAM: ${selParam.value}<br><br>
-    → 여기까지 되면 Step2(차트)로 넘어갑니다.
-  `;
+// ── 조회 → 트렌드 ─────────────────────────────
+async function runQuery() {
+  btnRun.disabled = true;
+  btnRun.textContent = '조회중...';
+  try {
+    const {data, param, error} = await postJSON(API_TREND, {
+      oper_id: selOper.value,
+      lot_cd:  selLot.value,
+      param:   selParam.value,
+    });
+    if (error) { alert('조회 오류: ' + error); return; }
+    if (!data || !data.length) {
+      document.getElementById('js-plot').innerHTML =
+        '<div class="empty-hint">데이터가 없습니다.</div>';
+      return;
+    }
+    currentData  = data;
+    currentParam = param;
+    redraw();
+  } finally {
+    btnRun.disabled = false;
+    btnRun.textContent = '조회';
+  }
+}
+
+// ── Plotly 스캐터 (범례별 색상) ────────────────
+function redraw() {
+  if (!currentData.length) return;
+  const legendCol = selLegend.value;
+
+  // 범례값별 그룹핑
+  const groups = {};
+  currentData.forEach(d => {
+    const key = (d[legendCol] === null || d[legendCol] === '') ? '(없음)' : d[legendCol];
+    if (!groups[key]) groups[key] = {x: [], y: [], ids: [], text: []};
+    groups[key].x.push(d.date);
+    groups[key].y.push(d.val);
+    groups[key].ids.push(d.id);
+    groups[key].text.push(`${d.LOT_ID} / WF${d.WF_ID}<br>${legendCol}: ${key}`);
+  });
+
+  const traces = Object.entries(groups).map(([name, g]) => ({
+    x: g.x, y: g.y,
+    customdata: g.ids,
+    text: g.text,
+    name: String(name),
+    mode: 'markers',
+    type: 'scattergl',
+    marker: {size: 6, opacity: 0.75},
+    hovertemplate: '%{text}<br><b>%{y:.2f}</b><extra></extra>',
+  }));
+
+  const layout = {
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor:  'rgba(0,0,0,0)',
+    font: {color: '#8c8c8c', size: 11},
+    margin: {l: 60, r: 20, t: 10, b: 45},
+    xaxis: {title: 'DATE', gridcolor: '#2a2a2a', zeroline: false},
+    yaxis: {title: currentParam, gridcolor: '#2a2a2a', zeroline: false},
+    dragmode: 'select',
+    legend: {orientation: 'h', y: -0.2, font: {size: 10}},
+    hovermode: 'closest',
+  };
+
+  Plotly.newPlot('js-plot', traces, layout, {
+    responsive: true,
+    modeBarButtonsToRemove: ['lasso2d', 'autoScale2d'],
+    displaylogo: false,
+  });
+
+  document.getElementById('js-chart-info').textContent =
+    `${currentData.length}점 · ${selLot.value} · ${currentParam}`;
 }
 </script>
 {% endblock %}
