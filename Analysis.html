@@ -7,42 +7,24 @@
 .an-title { font-size: 16px; font-weight: 700; color: var(--tx-1); }
 .an-sub { font-size: 12px; color: var(--tx-2); margin-top: 3px; }
 
-/* 필터 바 */
-.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px 18px; display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
-.filter-group { display: flex; flex-direction: column; gap: 5px; min-width: 150px; }
-.filter-label { font-size: 11px; font-weight: 600; color: var(--tx-muted); text-transform: uppercase; letter-spacing: .05em; }
-.filter-select { padding: 7px 10px; background: var(--bg-2); border: 1px solid var(--bd); border-radius: var(--rs); color: var(--tx-1); font-size: 13px; outline: none; cursor: pointer; }
+.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r);
+  padding: 16px 18px; display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
+.filter-group { display: flex; flex-direction: column; gap: 5px; min-width: 160px; }
+.filter-label { font-size: 11px; font-weight: 600; color: var(--tx-muted);
+  text-transform: uppercase; letter-spacing: .05em; }
+.filter-select { padding: 7px 10px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--rs); color: var(--tx-1); font-size: 13px; outline: none; cursor: pointer; }
 .filter-select:focus { border-color: var(--accent); }
 .filter-select:disabled { opacity: .4; cursor: not-allowed; }
-.btn-run { padding: 8px 24px; background: var(--accent); border: none; border-radius: var(--rs); color: #000; font-size: 13px; font-weight: 700; cursor: pointer; }
+
+.btn-run { padding: 8px 24px; background: var(--accent); border: none; border-radius: var(--rs);
+  color: #000; font-size: 13px; font-weight: 700; cursor: pointer; }
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
 
-/* 차트 영역 */
-.chart-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px; }
-.chart-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.chart-title { font-size: 13px; font-weight: 700; color: var(--tx-1); }
-.legend-ctrl { display: flex; align-items: center; gap: 8px; }
-.legend-ctrl label { font-size: 11px; color: var(--tx-2); }
-.legend-ctrl select { padding: 5px 9px; background: var(--bg-2); border: 1px solid var(--bd); border-radius: var(--rs); color: var(--tx-1); font-size: 12px; cursor: pointer; }
-#js-plot { width: 100%; height: 440px; }
-
-/* 통계 패널 */
-.stats-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px; }
-.stats-head { font-size: 13px; font-weight: 700; color: var(--tx-1); margin-bottom: 4px; }
-.stats-sub { font-size: 11px; color: var(--tx-2); margin-bottom: 14px; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
-.stat-box { background: var(--bg-2); border: 1px solid var(--bd); border-radius: var(--rs); padding: 10px 12px; }
-.stat-name { font-size: 11px; color: var(--tx-muted); font-family: 'IBM Plex Mono', monospace; margin-bottom: 4px; word-break: break-all; }
-.stat-avg { font-size: 16px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; color: var(--tx-1); }
-.stat-std { font-size: 11px; color: var(--tx-2); }
-.idle-dist { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--bd); }
-.idle-dist-title { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; margin-bottom: 8px; }
-.idle-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; font-size: 12px; }
-.idle-key { color: var(--tx-1); font-family: 'IBM Plex Mono', monospace; }
-.idle-cnt { color: var(--tx-2); font-weight: 600; }
-
-.empty-hint { padding: 50px 20px; text-align: center; color: var(--tx-muted); font-size: 13px; }
+.debug-box { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r);
+  padding: 16px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--tx-2); }
+.debug-box strong { color: var(--accent); }
 </style>
 {% endblock %}
 
@@ -53,7 +35,7 @@
     <p class="an-sub">공정 파라미터 트렌드 및 산포 요인 분석</p>
   </div>
 
-  <!-- 필터 (종속 드롭박스) -->
+  <!-- 종속 드롭박스 -->
   <div class="filter-panel">
     <div class="filter-group">
       <span class="filter-label">TECH</span>
@@ -74,73 +56,90 @@
       <span class="filter-label">PARAMETER</span>
       <select class="filter-select" id="sel-param" disabled><option value="">-</option></select>
     </div>
-    <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
+    <button class="btn-run" id="btn-run" disabled onclick="showSelection()">조회</button>
   </div>
 
-  <!-- 트렌드 차트 -->
-  <div class="chart-card">
-    <div class="chart-head">
-      <span class="chart-title">Trend</span>
-      <div class="legend-ctrl">
-        <label>범례:</label>
-        <select id="sel-legend" onchange="redraw()">
-          {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
-        </select>
-      </div>
-    </div>
-    <div id="js-plot"><div class="empty-hint">조건을 선택하고 조회하세요. 차트에서 영역을 드래그하면 통계가 나옵니다.</div></div>
-  </div>
-
-  <!-- 드래그 통계 -->
-  <div class="stats-card" id="js-stats-card" style="display:none;">
-    <div class="stats-head">선택 영역 통계</div>
-    <div class="stats-sub" id="js-stats-sub"></div>
-    <div class="stats-grid" id="js-stats-grid"></div>
-    <div class="idle-dist" id="js-idle-dist"></div>
+  <!-- Step1 확인용: 선택값 표시 (Step2에서 차트로 교체) -->
+  <div class="debug-box" id="js-debug">
+    드롭박스가 순서대로 채워지는지 확인하세요.<br>
+    API_BASE: <strong id="js-apibase"></strong>
   </div>
 </div>
 
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <script>
-const OPER_META = {};       // 선택 상태 저장
-let currentData = [];       // 현재 조회된 데이터
-let currentParam = '';
+// ★ proxy 경로 자동 처리 (회사 서버: /proxy/8000/... 대응)
+//    Django {% url %} 가 실제 경로를 만들어주므로 로컬/서버 모두 동작
+const API_OPTIONS = "{% url 'analysis-options' %}";
+document.getElementById('js-apibase').textContent = API_OPTIONS;
 
-// ── 종속 드롭박스 ──────────────────────────────
 const selTech  = document.getElementById('sel-tech');
 const selLot   = document.getElementById('sel-lot');
 const selOper  = document.getElementById('sel-oper');
 const selParam = document.getElementById('sel-param');
 const btnRun   = document.getElementById('btn-run');
 
-async function fetchOptions(payload) {
-  const res = await fetch('/api/analysis/options/', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload)
+async function postJSON(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
   });
+  if (!res.ok) {
+    console.error('API 오류', res.status, url);
+    alert(`API 오류 ${res.status}\n${url}`);
+    return {options: []};
+  }
   return res.json();
 }
 
+function fillSelect(sel, options) {
+  sel.innerHTML = '<option value="">선택</option>';
+  options.forEach(o => {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    opt.textContent = o.label;
+    sel.appendChild(opt);
+  });
+}
+
+function resetFrom(level) {
+  const order = ['lot', 'oper', 'param'];
+  const map = {lot: selLot, oper: selOper, param: selParam};
+  let hit = false;
+  order.forEach(l => {
+    if (l === level) hit = true;
+    if (hit) {
+      map[l].innerHTML = '<option value="">-</option>';
+      map[l].disabled = true;
+    }
+  });
+  btnRun.disabled = true;
+}
+
+// TECH → LOT_CD
 selTech.addEventListener('change', async () => {
   resetFrom('lot');
   if (!selTech.value) return;
-  const {options} = await fetchOptions({level: 'lot_cd', tech: selTech.value});
+  const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: selTech.value});
   fillSelect(selLot, options.map(o => ({value: o, label: o})));
   selLot.disabled = false;
 });
 
+// LOT_CD → OPER
 selLot.addEventListener('change', async () => {
   resetFrom('oper');
   if (!selLot.value) return;
-  const {options} = await fetchOptions({level: 'oper'});
-  fillSelect(selOper, options);   // [{value,label}]
+  const {options} = await postJSON(API_OPTIONS, {level: 'oper'});
+  fillSelect(selOper, options);
   selOper.disabled = false;
 });
 
+// OPER → PARAMETER
 selOper.addEventListener('change', async () => {
   resetFrom('param');
   if (!selOper.value) return;
-  const {options} = await fetchOptions({level: 'param', oper_id: selOper.value});
+  const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: selOper.value});
+  if (error) { alert('파라미터 조회 오류: ' + error); return; }
   fillSelect(selParam, options.map(o => ({value: o, label: o})));
   selParam.disabled = false;
 });
@@ -149,128 +148,16 @@ selParam.addEventListener('change', () => {
   btnRun.disabled = !selParam.value;
 });
 
-function fillSelect(sel, options) {
-  sel.innerHTML = '<option value="">선택</option>';
-  options.forEach(o => {
-    const opt = document.createElement('option');
-    opt.value = o.value; opt.textContent = o.label;
-    sel.appendChild(opt);
-  });
-}
-
-function resetFrom(level) {
-  const order = ['lot', 'oper', 'param'];
-  const map = {lot: selLot, oper: selOper, param: selParam};
-  let started = false;
-  order.forEach(l => {
-    if (l === level) started = true;
-    if (started) {
-      map[l].innerHTML = '<option value="">-</option>';
-      map[l].disabled = true;
-    }
-  });
-  btnRun.disabled = true;
-}
-
-// ── 조회 → 트렌드 그리기 ───────────────────────
-async function runQuery() {
-  btnRun.disabled = true; btnRun.textContent = '조회중...';
-  try {
-    const res = await fetch('/api/analysis/trend/', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        oper_id: selOper.value, lot_cd: selLot.value, param: selParam.value
-      })
-    });
-    const {data, param, error} = await res.json();
-    if (error) { alert('오류: ' + error); return; }
-    currentData = data; currentParam = param;
-    redraw();
-    document.getElementById('js-stats-card').style.display = 'none';
-  } finally {
-    btnRun.disabled = false; btnRun.textContent = '조회';
-  }
-}
-
-// ── Plotly 스캐터 (범례별 색상) ────────────────
-function redraw() {
-  if (!currentData.length) return;
-  const legendCol = document.getElementById('sel-legend').value;
-
-  // 범례값별로 그룹핑
-  const groups = {};
-  currentData.forEach(d => {
-    const key = d[legendCol] || '(빈값)';
-    if (!groups[key]) groups[key] = {x: [], y: [], ids: [], text: []};
-    groups[key].x.push(d.date);
-    groups[key].y.push(d.val);
-    groups[key].ids.push(d.id);
-    groups[key].text.push(`${d.LOT_ID} / WF${d.WF_ID}<br>${legendCol}: ${key}`);
-  });
-
-  const traces = Object.entries(groups).map(([name, g]) => ({
-    x: g.x, y: g.y, customdata: g.ids, text: g.text,
-    name: String(name), mode: 'markers', type: 'scattergl',
-    marker: {size: 6, opacity: 0.75},
-    hovertemplate: '%{text}<br>%{y:.2f}<extra></extra>',
-  }));
-
-  const layout = {
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-    font: {color: '#8c8c8c', size: 11},
-    margin: {l: 55, r: 20, t: 10, b: 40},
-    xaxis: {title: 'DATE', gridcolor: '#2a2a2a', zeroline: false},
-    yaxis: {title: currentParam, gridcolor: '#2a2a2a', zeroline: false},
-    dragmode: 'select',
-    legend: {orientation: 'h', y: -0.18, font: {size: 10}},
-    hovermode: 'closest',
-  };
-
-  Plotly.newPlot('js-plot', traces, layout, {
-    responsive: true, displamodeBar: true,
-    modeBarButtonsToRemove: ['lasso2d', 'autoScale2d'],
-  });
-
-  // 드래그 선택 이벤트
-  document.getElementById('js-plot').on('plotly_selected', (ev) => {
-    if (!ev || !ev.points || !ev.points.length) return;
-    const ids = ev.points.map(p => p.customdata);
-    fetchStats(ids);
-  });
-}
-
-// ── 드래그 통계 (PG가 계산) ────────────────────
-async function fetchStats(ids) {
-  const res = await fetch('/api/analysis/stats/', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({oper_id: selOper.value, ids: ids})
-  });
-  const {count, stats, idle_dist, error} = await res.json();
-  if (error) { console.error(error); return; }
-
-  const card = document.getElementById('js-stats-card');
-  card.style.display = 'block';
-  document.getElementById('js-stats-sub').textContent = `선택된 웨이퍼: ${count}개`;
-
-  // 측정값 통계 박스
-  let gridHtml = '';
-  Object.entries(stats).forEach(([col, s]) => {
-    gridHtml += `<div class="stat-box">
-      <div class="stat-name">${col}</div>
-      <div class="stat-avg">${s.avg ?? '-'}</div>
-      <div class="stat-std">σ ${s.std ?? '-'}</div>
-    </div>`;
-  });
-  document.getElementById('js-stats-grid').innerHTML = gridHtml;
-
-  // IDLE 분포
-  let idleHtml = '<div class="idle-dist-title">Idle / Layer Change 분포</div>';
-  idle_dist.forEach(d => {
-    idleHtml += `<div class="idle-row"><span class="idle-key">${d.idle}</span><span class="idle-cnt">${d.count}개</span></div>`;
-  });
-  document.getElementById('js-idle-dist').innerHTML = idleHtml;
-
-  card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+// Step1: 선택값만 확인 (Step2에서 차트로 교체)
+function showSelection() {
+  document.getElementById('js-debug').innerHTML = `
+    <strong>선택 완료</strong><br>
+    TECH: ${selTech.value}<br>
+    LOT_CD: ${selLot.value}<br>
+    OPER: ${selOper.value}<br>
+    PARAM: ${selParam.value}<br><br>
+    → 여기까지 되면 Step2(차트)로 넘어갑니다.
+  `;
 }
 </script>
 {% endblock %}
