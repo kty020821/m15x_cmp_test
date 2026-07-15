@@ -1,12 +1,12 @@
 # ============================================================
 # equipment/views.py — analysis_corr 함수를 아래로 교체
-# (R² 계산 추가)
+# R² + 추세선(회귀식) 계산 추가
 # ============================================================
 
 @csrf_exempt
 def analysis_corr(request):
     """
-    Correlation 산점도 + R².
+    Correlation 산점도 + R² + 추세선.
     body: {oper_id, lot_cd, x_col, y_col}
     """
     if request.method != 'POST':
@@ -36,13 +36,28 @@ def analysis_corr(request):
         with connections['analysis_db'].cursor() as cur:
             cur.execute(sql, [lot_cd])
             rows = cur.fetchall()
-            # R² = CORR^2
-            cur.execute(
-                f'SELECT CORR("{x_col}", "{y_col}") FROM {table} WHERE "LOT_CD" = %s',
-                [lot_cd])
-            corr = cur.fetchone()[0]
+            # R², 회귀선(기울기/절편), x범위 를 SQL로 한 번에
+            #   REGR_SLOPE(y, x), REGR_INTERCEPT(y, x), CORR(x, y)
+            cur.execute(f'''
+                SELECT CORR("{x_col}", "{y_col}"),
+                       REGR_SLOPE("{y_col}", "{x_col}"),
+                       REGR_INTERCEPT("{y_col}", "{x_col}"),
+                       MIN("{x_col}"), MAX("{x_col}")
+                FROM {table} WHERE "LOT_CD" = %s
+            ''', [lot_cd])
+            corr, slope, intercept, xmin, xmax = cur.fetchone()
 
         r2 = round(corr * corr, 4) if corr is not None else None
+
+        # 추세선 두 점 (xmin, xmax 에서의 y)
+        trend = None
+        if slope is not None and intercept is not None and xmin is not None:
+            trend = {
+                'x': [float(xmin), float(xmax)],
+                'y': [float(slope * xmin + intercept), float(slope * xmax + intercept)],
+                'slope': round(float(slope), 5),
+                'intercept': round(float(intercept), 5),
+            }
 
         n = len(legend_cols)
         data = []
@@ -58,6 +73,9 @@ def analysis_corr(request):
                 item[c] = r[3 + i]
             data.append(item)
 
-        return JsonResponse({'data': data, 'x_col': x_col, 'y_col': y_col, 'r2': r2})
+        return JsonResponse({
+            'data': data, 'x_col': x_col, 'y_col': y_col,
+            'r2': r2, 'trend': trend,
+        })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
