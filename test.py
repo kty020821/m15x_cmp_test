@@ -1,92 +1,87 @@
 # ============================================================
-# Step 3 — equipment/views.py 에 추가
-# ============================================================
-# 드래그 선택 영역 통계 (계산은 전부 PostgreSQL이 담당)
+# equipment/views.py 에 추가 — Correlation 데이터 API
 # ============================================================
 
 @csrf_exempt
-def analysis_stats(request):
+def analysis_corr(request):
     """
-    드래그로 선택된 웨이퍼들의 통계 요약.
-    body: {oper_id, ids: [id, id, ...]}
-    반환:
-      count      : 선택 웨이퍼 수
-      stats      : {컬럼: {avg, std, min, max}}  ← 모든 측정값 컬럼
-      idle_dist  : IDLE 값 분포
-      layer_dist : PRE_LAYER(사전공정) 분포
-      eqp_dist   : 장비 분포
+    Correlation 산점도 데이터.
+    body: {oper_id, lot_cd, x_col, y_col}
+    반환: [{x, y, id, EQP_ID, RECIPE_ID, ...범례컬럼, LOT_ID, WF_ID}]
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
     body    = json.loads(request.body)
     oper_id = body.get('oper_id')
-    ids     = body.get('ids', [])
+    lot_cd  = body.get('lot_cd')
+    x_col   = body.get('x_col')
+    y_col   = body.get('y_col')
     table   = _an_table(oper_id)
 
-    if not ids:
-        return JsonResponse({'count': 0, 'stats': {},
-                             'idle_dist': [], 'layer_dist': [], 'eqp_dist': []})
+    # 컬럼명 화이트리스트 검증
+    for c in (x_col, y_col):
+        if not c or not re.match(r'^[0-9A-Za-z_]+$', c):
+            return JsonResponse({'error': '잘못된 컬럼'}, status=400)
 
+    legend_cols = [c for c, _ in LEGEND_OPTIONS]
+    legend_sel  = ', '.join(f'"{c}"' for c in legend_cols)
+
+    sql = f'''
+        SELECT id, "{x_col}", "{y_col}", {legend_sel}, "LOT_ID", "WF_ID"
+        FROM {table}
+        WHERE "LOT_CD" = %s AND "{x_col}" IS NOT NULL AND "{y_col}" IS NOT NULL
+        ORDER BY "DATE"
+    '''
     try:
-        # 1) 측정값 컬럼 목록 조회
         with connections['analysis_db'].cursor() as cur:
-            cur.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = %s ORDER BY ordinal_position
-            """, [table])
-            all_cols = [r[0].upper() for r in cur.fetchall()]
-        val_cols = [c for c in all_cols if c not in META_COLS]
+            cur.execute(sql, [lot_cd])
+            rows = cur.fetchall()
 
-        # 2) 각 측정값의 avg/std/min/max 를 SQL로 계산
-        agg = []
-        for c in val_cols:
-            agg.append(f'AVG("{c}")    AS "{c}__a"')
-            agg.append(f'STDDEV("{c}") AS "{c}__s"')
-            agg.append(f'MIN("{c}")    AS "{c}__n"')
-            agg.append(f'MAX("{c}")    AS "{c}__x"')
-        agg_sql = ", ".join(agg)
-        ph = ",".join(["%s"] * len(ids))
-
-        with connections['analysis_db'].cursor() as cur:
-            cur.execute(
-                f'SELECT COUNT(*), {agg_sql} FROM {table} WHERE id IN ({ph})', ids
-            )
-            row = cur.fetchone()
-
-            # 3) 카테고리 분포 (요인 파악용)
-            def dist(col):
-                cur.execute(f'''
-                    SELECT COALESCE(NULLIF("{col}", ''), '(없음)') AS k, COUNT(*)
-                    FROM {table} WHERE id IN ({ph})
-                    GROUP BY k ORDER BY COUNT(*) DESC
-                ''', ids)
-                return [{'key': r[0], 'count': r[1]} for r in cur.fetchall()]
-
-            idle_dist  = dist('IDLE')
-            layer_dist = dist('PRE_LAYER')
-            eqp_dist   = dist('EQP_ID')
-
-        count = row[0]
-        stats = {}
-        i = 1
-        for c in val_cols:
-            a, s, n, x = row[i], row[i+1], row[i+2], row[i+3]
-            i += 4
-            stats[c] = {
-                'avg': round(float(a), 3) if a is not None else None,
-                'std': round(float(s), 3) if s is not None else None,
-                'min': round(float(n), 3) if n is not None else None,
-                'max': round(float(x), 3) if x is not None else None,
+        n = len(legend_cols)
+        data = []
+        for r in rows:
+            item = {
+                'id':     r[0],
+                'x':      float(r[1]) if r[1] is not None else None,
+                'y':      float(r[2]) if r[2] is not None else None,
+                'LOT_ID': r[3 + n],
+                'WF_ID':  r[4 + n],
             }
+            for i, c in enumerate(legend_cols):
+                item[c] = r[3 + i]
+            data.append(item)
 
-        return JsonResponse({
-            'count':      count,
-            'stats':      stats,
-            'idle_dist':  idle_dist,
-            'layer_dist': layer_dist,
-            'eqp_dist':   eqp_dist,
-        })
-
+        return JsonResponse({'data': data, 'x_col': x_col, 'y_col': y_col})
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
+
+# ============================================================
+# analysis_options 의 param 레벨을 "숫자 컬럼만" 반환하도록 수정
+# (기존 param 블록을 아래로 교체)
+# ============================================================
+#
+#     if level == 'param':
+#         table = _an_table(body.get('oper_id'))
+#         try:
+#             with connections['analysis_db'].cursor() as cur:
+#                 cur.execute("""
+#                     SELECT column_name, data_type FROM information_schema.columns
+#                     WHERE table_name = %s ORDER BY ordinal_position
+#                 """, [table])
+#                 rows = cur.fetchall()
+#             # 숫자형(double precision, numeric, integer 등)만
+#             num = [r[0].upper() for r in rows
+#                    if r[0].upper() not in META_COLS and 'double' in r[1] or 'numeric' in r[1] or 'int' in r[1]]
+#             # 위 조건 우선순위 버그 방지용으로 아래처럼 명확히:
+#             num = []
+#             for name, dtype in rows:
+#                 up = name.upper()
+#                 if up in META_COLS:
+#                     continue
+#                 if any(t in dtype for t in ('double', 'numeric', 'real', 'int')):
+#                     num.append(up)
+#             return JsonResponse({'options': num})
+#         except Exception as e:
+#             return JsonResponse({'options': [], 'error': str(e)})
