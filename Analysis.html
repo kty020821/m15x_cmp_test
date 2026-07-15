@@ -22,7 +22,6 @@
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
 
-/* 차트 2단 배치 */
 .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 1200px) { .chart-row { grid-template-columns: 1fr; } }
 
@@ -36,7 +35,6 @@
 .plot-area { width: 100%; height: 420px; }
 .empty-hint { padding: 60px 20px; text-align: center; color: var(--tx-muted); font-size: 13px; }
 
-/* 통계 표 */
 .stats-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 18px; }
 .stats-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .stats-title { font-size: 13px; font-weight: 700; color: var(--tx-1); }
@@ -47,19 +45,24 @@
 
 .sec-title { font-size: 11px; font-weight: 700; color: var(--tx-muted);
   text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 8px; }
-.sec-title:first-child { margin-top: 0; }
 
-table.tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
-table.tbl th { text-align: right; padding: 7px 12px; color: var(--tx-muted);
-  font-weight: 600; border-bottom: 1px solid var(--bd); font-size: 11px; }
-table.tbl th:first-child { text-align: left; }
-table.tbl td { text-align: right; padding: 7px 12px; color: var(--tx-1);
-  font-family: 'IBM Plex Mono', monospace; border-bottom: 1px solid rgba(255,255,255,0.04); }
-table.tbl td:first-child { text-align: left; color: var(--tx-2);
-  font-family: 'IBM Plex Mono', monospace; }
-table.tbl tr:hover td { background: var(--bg-2); }
+/* 요인분포 축소 */
+.dist-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; }
+.dist-mini { font-size: 11px; }
+.dist-mini .dt-title { font-size: 10px; font-weight: 700; color: var(--tx-muted);
+  text-transform: uppercase; margin-bottom: 4px; }
+.dist-mini .dt-row { display: flex; justify-content: space-between; padding: 2px 0;
+  font-family: 'IBM Plex Mono', monospace; color: var(--tx-2); }
+.dist-mini .dt-row .k { color: var(--tx-1); }
 
-.dist-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px; }
+#js-box { width: 100%; height: 360px; margin-top: 6px; }
+.r2-tbl { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+.r2-tbl th { text-align: right; padding: 6px 12px; color: var(--tx-muted); font-size: 11px;
+  border-bottom: 1px solid var(--bd); }
+.r2-tbl th:first-child { text-align: left; }
+.r2-tbl td { text-align: right; padding: 6px 12px; font-family: 'IBM Plex Mono', monospace;
+  color: var(--tx-1); border-bottom: 1px solid rgba(255,255,255,0.04); }
+.r2-tbl td:first-child { text-align: left; color: var(--tx-2); }
 </style>
 {% endblock %}
 
@@ -70,7 +73,6 @@ table.tbl tr:hover td { background: var(--bg-2); }
     <p class="an-sub">공정 파라미터 트렌드 및 산포 요인 분석</p>
   </div>
 
-  <!-- 필터 -->
   <div class="filter-panel">
     <div class="filter-group">
       <span class="filter-label">TECH</span>
@@ -94,9 +96,7 @@ table.tbl tr:hover td { background: var(--bg-2); }
     <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
   </div>
 
-  <!-- 차트 2단: 트렌드 + Correlation -->
   <div class="chart-row">
-    <!-- 트렌드 -->
     <div class="chart-card">
       <div class="chart-head">
         <span class="chart-title">Trend</span>
@@ -110,7 +110,6 @@ table.tbl tr:hover td { background: var(--bg-2); }
       <div class="plot-area" id="js-trend"><div class="empty-hint">조회하면 트렌드가 표시됩니다.</div></div>
     </div>
 
-    <!-- Correlation -->
     <div class="chart-card">
       <div class="chart-head">
         <span class="chart-title">Correlation</span>
@@ -125,7 +124,6 @@ table.tbl tr:hover td { background: var(--bg-2); }
     </div>
   </div>
 
-  <!-- 통계 (표) -->
   <div class="stats-card" id="js-stats-card" style="display:none;">
     <div class="stats-head">
       <span class="stats-title">선택 영역 분석</span>
@@ -138,26 +136,28 @@ table.tbl tr:hover td { background: var(--bg-2); }
     <div class="sec-title">요인 분포</div>
     <div class="dist-tables" id="js-dist"></div>
 
-    <div class="sec-title">측정값 통계</div>
-    <table class="tbl" id="js-stats-tbl">
-      <thead>
-        <tr><th>Parameter</th><th>Avg</th><th>Std</th><th>Min</th><th>Max</th></tr>
-      </thead>
-      <tbody id="js-stats-body"></tbody>
+    <div class="sec-title" id="js-box-title">주요 상관 변수 (R² Top 5) · 전체 vs 선택</div>
+    <div id="js-box"></div>
+    <table class="r2-tbl" id="js-r2-tbl">
+      <thead><tr><th>변수</th><th>R²</th><th>전체 avg</th><th>선택 avg</th></tr></thead>
+      <tbody id="js-r2-body"></tbody>
     </table>
   </div>
 </div>
 
 <script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
 <script>
-const API_OPTIONS = "{% url 'analysis-options' %}";
-const API_TREND   = "{% url 'analysis-trend' %}";
-const API_CORR    = "{% url 'analysis-corr' %}";
-const API_STATS   = "{% url 'analysis-stats' %}";
+const API_OPTIONS   = "{% url 'analysis-options' %}";
+const API_TREND     = "{% url 'analysis-trend' %}";
+const API_CORR      = "{% url 'analysis-corr' %}";
+const API_STATS     = "{% url 'analysis-stats' %}";
+const API_CORR_RANK = "{% url 'analysis-corr-rank' %}";
+const API_BOX_SEL   = "{% url 'analysis-box-sel' %}";
 
 let trendData = [];
-let corrParams = [];       // 숫자 컬럼 목록 (correlation 축 선택지)
+let corrParams = [];
 let currentParam = '';
+let topRanked = [];   // R² top5 [{col, r2, box_all}]
 
 const selTech   = document.getElementById('sel-tech');
 const selLot    = document.getElementById('sel-lot');
@@ -220,7 +220,6 @@ selOper.addEventListener('change', async () => {
   if (error) { alert('오류: ' + error); return; }
   corrParams = options || [];
   fillSelect(selParam, corrParams.map(o => ({value: o, label: o})));
-  // correlation 축 드롭박스도 채움
   fillSelect(selCorrX, corrParams.map(o => ({value: o, label: o})));
   fillSelect(selCorrY, corrParams.map(o => ({value: o, label: o})));
   selParam.disabled = false;
@@ -228,7 +227,6 @@ selOper.addEventListener('change', async () => {
 
 selParam.addEventListener('change', () => { btnRun.disabled = !selParam.value; });
 
-// ── 조회 ────────────────────────────────────────
 async function runQuery() {
   btnRun.disabled = true; btnRun.textContent = '조회중...';
   try {
@@ -239,18 +237,26 @@ async function runQuery() {
     trendData = data || [];
     currentParam = param;
     drawTrend();
-    // correlation 기본값: X=선택param, Y=두번째 컬럼
+
     if (!selCorrX.value) selCorrX.value = param;
     if (!selCorrY.value && corrParams.length > 1) {
       selCorrY.value = corrParams.find(c => c !== param) || corrParams[0];
     }
     drawCorr();
+
+    // R² top5 계산 (트렌드 param 기준)
+    const rankRes = await postJSON(API_CORR_RANK, {
+      oper_id: selOper.value, lot_cd: selLot.value, base_col: selParam.value,
+    });
+    topRanked = rankRes.ranked || [];
+
+    // 이전 선택 통계 숨김
+    document.getElementById('js-stats-card').style.display = 'none';
   } finally {
     btnRun.disabled = false; btnRun.textContent = '조회';
   }
 }
 
-// ── 공통 레이아웃 (흰 배경 기준) ─────────────────
 function baseLayout(xTitle, yTitle, titleText) {
   return {
     title: { text: titleText,
@@ -285,7 +291,6 @@ function groupByLegend(data, legendCol, xKey, yKey) {
   return groups;
 }
 
-// ── 트렌드 ──────────────────────────────────────
 function drawTrend() {
   if (!trendData.length) return;
   const legendCol = selLegend.value;
@@ -300,8 +305,6 @@ function drawTrend() {
 
   const title = `${selTech.value} · ${selLot.value} · ${currentParam}`;
   const layout = baseLayout('DATE', currentParam, title);
-
-  // 스펙선 (임시: max/min/평균) — 나중에 getSpecLines만 교체
   addSpecShapes(layout, trendData.map(d => d.val));
 
   const div = document.getElementById('js-trend');
@@ -315,7 +318,6 @@ function drawTrend() {
   div.on('plotly_doubleclick', clearSelection);
 }
 
-// ── Correlation ─────────────────────────────────
 async function drawCorr() {
   const xc = selCorrX.value, yc = selCorrY.value;
   if (!xc || !yc || !selOper.value || !selLot.value) return;
@@ -351,22 +353,17 @@ async function drawCorr() {
   div.on('plotly_doubleclick', clearSelection);
 }
 
-// ── 스펙선 (★ 실제 값 넣을 때 getSpecLines 만 수정) ──
+// ── 스펙선 (★ 실제 값은 getSpecLines만 교체) ──
 function getSpecLines(vals) {
-  // [나중에] 서버 스펙값으로 교체:
-  //   return {upper: s.upper, lower: s.lower, target: s.target};
   const v = vals.filter(x => x !== null && !isNaN(x));
   if (!v.length) return null;
-  return {
-    upper: Math.max(...v),
-    lower: Math.min(...v),
-    target: v.reduce((a,b) => a+b, 0) / v.length,
-  };
+  return {upper: Math.max(...v), lower: Math.min(...v),
+          target: v.reduce((a,b)=>a+b,0)/v.length};
 }
 const SPEC_STYLE = {
-  upper:  {color: '#ef4444', dash: 'dash', label: 'Upper'},
-  lower:  {color: '#ef4444', dash: 'dash', label: 'Lower'},
-  target: {color: '#22c55e', dash: 'dot',  label: 'Target'},
+  upper: {color:'#ef4444', dash:'dash', label:'Upper'},
+  lower: {color:'#ef4444', dash:'dash', label:'Lower'},
+  target:{color:'#22c55e', dash:'dot',  label:'Target'},
 };
 function addSpecShapes(layout, vals) {
   const spec = getSpecLines(vals);
@@ -375,51 +372,96 @@ function addSpecShapes(layout, vals) {
   ['upper','target','lower'].forEach(k => {
     const val = spec[k]; if (val == null || isNaN(val)) return;
     const st = SPEC_STYLE[k];
-    layout.shapes.push({type: 'line', xref: 'paper', yref: 'y',
-      x0: 0, x1: 1, y0: val, y1: val,
-      line: {color: st.color, width: 1.4, dash: st.dash}, layer: 'below'});
-    layout.annotations.push({xref: 'paper', yref: 'y', x: 1, xanchor: 'right',
-      y: val, yanchor: 'bottom', text: `${st.label} ${val.toFixed(2)}`,
-      showarrow: false, font: {size: 10, color: st.color}});
+    layout.shapes.push({type:'line', xref:'paper', yref:'y', x0:0, x1:1, y0:val, y1:val,
+      line:{color:st.color, width:1.4, dash:st.dash}, layer:'below'});
+    layout.annotations.push({xref:'paper', yref:'y', x:1, xanchor:'right', y:val, yanchor:'bottom',
+      text:`${st.label} ${val.toFixed(2)}`, showarrow:false, font:{size:10, color:st.color}});
   });
 }
 
-// ── 드래그 통계 ─────────────────────────────────
+// ── 드래그 통계 ──
 async function onSelected(ids) {
-  const {count, stats, idle_dist, layer_dist, eqp_dist, error} =
-    await postJSON(API_STATS, {oper_id: selOper.value, ids: ids});
-  if (error) { console.error(error); return; }
+  const distRes = await postJSON(API_STATS, {oper_id: selOper.value, ids: ids});
+  if (distRes.error) { console.error(distRes.error); return; }
 
   const card = document.getElementById('js-stats-card');
   card.style.display = 'block';
-  document.getElementById('js-stats-count').textContent = `${count}개 웨이퍼`;
+  document.getElementById('js-stats-count').textContent = `${distRes.count}개 웨이퍼`;
 
-  // 요인 분포 → 작은 표들
   document.getElementById('js-dist').innerHTML = [
-    distTable('Idle / Layer', idle_dist),
-    distTable('사전 공정', layer_dist),
-    distTable('장비', eqp_dist),
+    distMini('Idle / Layer', distRes.idle_dist),
+    distMini('사전 공정', distRes.layer_dist),
+    distMini('장비', distRes.eqp_dist),
   ].join('');
 
-  // 측정값 통계 → 표
+  if (!topRanked.length) {
+    document.getElementById('js-box-title').style.display = 'none';
+    document.getElementById('js-box').innerHTML = '';
+    document.getElementById('js-r2-body').innerHTML = '';
+    card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    return;
+  }
+  document.getElementById('js-box-title').style.display = '';
+
+  const topCols = topRanked.map(r => r.col);
+  const boxRes = await postJSON(API_BOX_SEL, {oper_id: selOper.value, ids: ids, cols: topCols});
+  const boxSel = boxRes.box_sel || {};
+
+  drawBoxPlots(topRanked, boxSel);
+
   let body = '';
-  Object.entries(stats).forEach(([col, s]) => {
-    body += `<tr><td>${col}</td><td>${s.avg ?? '-'}</td><td>${s.std ?? '-'}</td>
-             <td>${s.min ?? '-'}</td><td>${s.max ?? '-'}</td></tr>`;
+  topRanked.forEach(r => {
+    const selAvg = boxSel[r.col] ? boxSel[r.col].avg : '-';
+    const allAvg = r.box_all ? r.box_all.avg : '-';
+    body += `<tr><td>${r.col}</td><td>${r.r2}</td><td>${allAvg ?? '-'}</td><td>${selAvg ?? '-'}</td></tr>`;
   });
-  document.getElementById('js-stats-body').innerHTML = body;
+  document.getElementById('js-r2-body').innerHTML = body;
 
   card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
-function distTable(title, rows) {
-  let h = `<div><div class="sec-title" style="margin-top:0">${title}</div>
-    <table class="tbl"><tbody>`;
-  (rows||[]).slice(0, 8).forEach(r => {
-    h += `<tr><td>${r.key}</td><td>${r.count}</td></tr>`;
+function distMini(title, rows) {
+  let h = `<div class="dist-mini"><div class="dt-title">${title}</div>`;
+  (rows||[]).slice(0, 5).forEach(r => {
+    h += `<div class="dt-row"><span class="k">${r.key}</span><span>${r.count}</span></div>`;
   });
-  h += `</tbody></table></div>`;
+  h += `</div>`;
   return h;
+}
+
+function drawBoxPlots(ranked, boxSel) {
+  const traces = [];
+  ranked.forEach((r, idx) => {
+    const a = r.box_all, s = boxSel[r.col];
+    if (!a) return;
+    traces.push({
+      type:'box', name:'전체', legendgroup:'all', x:[r.col],
+      q1:[a.q1], median:[a.med], q3:[a.q3], lowerfence:[a.min], upperfence:[a.max],
+      marker:{color:'#94a3b8'}, line:{width:1.2}, showlegend: idx===0,
+      offsetgroup:'all', boxpoints:false,
+      hovertemplate:'전체<br>median %{median}<extra></extra>',
+    });
+    if (s) {
+      traces.push({
+        type:'box', name:'선택', legendgroup:'sel', x:[r.col],
+        q1:[s.q1], median:[s.med], q3:[s.q3], lowerfence:[s.min], upperfence:[s.max],
+        marker:{color:'#22c55e'}, line:{width:1.4}, showlegend: idx===0,
+        offsetgroup:'sel', boxpoints:false,
+        hovertemplate:'선택<br>median %{median}<extra></extra>',
+      });
+    }
+  });
+
+  const layout = {
+    paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+    font:{family:'Noto Sans KR, sans-serif', color:'#666', size:11},
+    margin:{l:55, r:20, t:10, b:70}, boxmode:'group',
+    xaxis:{tickangle:-30, gridcolor:'rgba(0,0,0,0.06)', tickfont:{size:10}},
+    yaxis:{gridcolor:'rgba(0,0,0,0.08)', griddash:'dot', zeroline:false, tickfont:{size:10}},
+    legend:{orientation:'h', x:0.5, xanchor:'center', y:1.12, font:{size:10}},
+    showlegend:true,
+  };
+  Plotly.newPlot('js-box', traces, layout, {responsive:true, displaylogo:false, displayModeBar:false});
 }
 
 function clearSelection() {
