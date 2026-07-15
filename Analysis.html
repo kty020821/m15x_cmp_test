@@ -1,130 +1,433 @@
-/* ============================================================
-   Step 3 — analysis.html 수정 3곳
-   ============================================================ */
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}산포 분석{% endblock %}
 
+{% block extra_css %}
+<style>
+.an-page { padding: 24px 28px 60px; display: flex; flex-direction: column; gap: 18px; }
+.an-title { font-size: 16px; font-weight: 700; color: var(--tx-1); }
+.an-sub { font-size: 12px; color: var(--tx-2); margin-top: 3px; }
 
-/* ─────────────────────────────────────────────────────────
-   [1] {% block extra_css %} 안, </style> 앞에 추가
-   ───────────────────────────────────────────────────────── */
+.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r);
+  padding: 16px 18px; display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
+.filter-group { display: flex; flex-direction: column; gap: 5px; min-width: 150px; }
+.filter-label { font-size: 11px; font-weight: 600; color: var(--tx-muted);
+  text-transform: uppercase; letter-spacing: .05em; }
+.filter-select { padding: 7px 10px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--rs); color: var(--tx-1); font-size: 13px; outline: none; cursor: pointer; }
+.filter-select:focus { border-color: var(--accent); }
+.filter-select:disabled { opacity: .4; cursor: not-allowed; }
+.btn-run { padding: 8px 24px; background: var(--accent); border: none; border-radius: var(--rs);
+  color: #000; font-size: 13px; font-weight: 700; cursor: pointer; }
+.btn-run:hover { opacity: .85; }
+.btn-run:disabled { opacity: .4; cursor: not-allowed; }
 
-.stats-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r);
-  padding: 18px; margin-top: 4px; }
-.stats-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+/* 차트 2단 배치 */
+.chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 1200px) { .chart-row { grid-template-columns: 1fr; } }
+
+.chart-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 16px; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 10px; flex-wrap: wrap; }
+.chart-title { font-size: 13px; font-weight: 700; color: var(--tx-1); }
+.chart-ctrls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mini-label { font-size: 11px; color: var(--tx-2); }
+.mini-select { padding: 5px 9px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--rs); color: var(--tx-1); font-size: 12px; cursor: pointer; }
+.plot-area { width: 100%; height: 420px; }
+.empty-hint { padding: 60px 20px; text-align: center; color: var(--tx-muted); font-size: 13px; }
+
+/* 통계 표 */
+.stats-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r); padding: 18px; }
+.stats-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .stats-title { font-size: 13px; font-weight: 700; color: var(--tx-1); }
 .stats-count { font-size: 12px; color: var(--accent); font-weight: 600; }
-.stats-hint { font-size: 11px; color: var(--tx-muted); margin-bottom: 16px; }
-
-.sec-title { font-size: 11px; font-weight: 700; color: var(--accent);
-  text-transform: uppercase; letter-spacing: .06em; margin: 18px 0 10px;
-  padding-bottom: 6px; border-bottom: 1px solid var(--bd); }
-.sec-title:first-of-type { margin-top: 0; }
-
-/* 측정값 통계 카드 */
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 10px; }
-.stat-box { background: var(--bg-2); border: 1px solid var(--bd); border-radius: var(--rs); padding: 10px 12px; }
-.stat-name { font-size: 10px; color: var(--tx-muted); font-family: 'IBM Plex Mono', monospace;
-  margin-bottom: 5px; word-break: break-all; }
-.stat-avg { font-size: 17px; font-weight: 700; font-family: 'IBM Plex Mono', monospace; color: var(--tx-1); }
-.stat-sub { font-size: 10px; color: var(--tx-2); margin-top: 3px; font-family: 'IBM Plex Mono', monospace; }
-
-/* 분포 (idle / layer / eqp) */
-.dist-wrap { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; }
-.dist-col { display: flex; flex-direction: column; gap: 6px; }
-.dist-col-title { font-size: 11px; font-weight: 700; color: var(--tx-2); margin-bottom: 4px; }
-.dist-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.dist-key { color: var(--tx-1); font-family: 'IBM Plex Mono', monospace; min-width: 90px; }
-.dist-bar-wrap { flex: 1; height: 6px; background: var(--bd); border-radius: 3px; overflow: hidden; }
-.dist-bar { height: 100%; background: var(--accent); border-radius: 3px; }
-.dist-cnt { color: var(--tx-2); font-weight: 600; min-width: 42px; text-align: right;
-  font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
-
 .btn-clear { padding: 5px 12px; background: var(--bg-2); border: 1px solid var(--bd);
   border-radius: var(--rs); color: var(--tx-2); font-size: 11px; cursor: pointer; }
-.btn-clear:hover { background: var(--bg-hover); color: var(--tx-1); }
+.btn-clear:hover { color: var(--tx-1); }
 
+.sec-title { font-size: 11px; font-weight: 700; color: var(--tx-muted);
+  text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 8px; }
+.sec-title:first-child { margin-top: 0; }
 
-/* ─────────────────────────────────────────────────────────
-   [2] {% block content %} 안, chart-card </div> 다음에 추가
-   ───────────────────────────────────────────────────────── */
+table.tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.tbl th { text-align: right; padding: 7px 12px; color: var(--tx-muted);
+  font-weight: 600; border-bottom: 1px solid var(--bd); font-size: 11px; }
+table.tbl th:first-child { text-align: left; }
+table.tbl td { text-align: right; padding: 7px 12px; color: var(--tx-1);
+  font-family: 'IBM Plex Mono', monospace; border-bottom: 1px solid rgba(255,255,255,0.04); }
+table.tbl td:first-child { text-align: left; color: var(--tx-2);
+  font-family: 'IBM Plex Mono', monospace; }
+table.tbl tr:hover td { background: var(--bg-2); }
 
-<div class="stats-card" id="js-stats-card" style="display:none;">
-  <div class="stats-head">
-    <span class="stats-title">선택 영역 분석</span>
-    <div style="display:flex;align-items:center;gap:10px;">
-      <span class="stats-count" id="js-stats-count"></span>
-      <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
+.dist-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="an-page">
+  <div>
+    <h1 class="an-title">산포 분석</h1>
+    <p class="an-sub">공정 파라미터 트렌드 및 산포 요인 분석</p>
+  </div>
+
+  <!-- 필터 -->
+  <div class="filter-panel">
+    <div class="filter-group">
+      <span class="filter-label">TECH</span>
+      <select class="filter-select" id="sel-tech">
+        <option value="">선택</option>
+        {% for t in tech_list %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">LOT_CD</span>
+      <select class="filter-select" id="sel-lot" disabled><option value="">-</option></select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">OPER</span>
+      <select class="filter-select" id="sel-oper" disabled><option value="">-</option></select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">PARAMETER (트렌드 Y축)</span>
+      <select class="filter-select" id="sel-param" disabled><option value="">-</option></select>
+    </div>
+    <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
+  </div>
+
+  <!-- 차트 2단: 트렌드 + Correlation -->
+  <div class="chart-row">
+    <!-- 트렌드 -->
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-title">Trend</span>
+        <div class="chart-ctrls">
+          <span class="mini-label">범례</span>
+          <select class="mini-select" id="sel-legend" onchange="drawTrend()">
+            {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="plot-area" id="js-trend"><div class="empty-hint">조회하면 트렌드가 표시됩니다.</div></div>
+    </div>
+
+    <!-- Correlation -->
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-title">Correlation</span>
+        <div class="chart-ctrls">
+          <span class="mini-label">X</span>
+          <select class="mini-select" id="sel-corr-x" onchange="drawCorr()"><option value="">-</option></select>
+          <span class="mini-label">Y</span>
+          <select class="mini-select" id="sel-corr-y" onchange="drawCorr()"><option value="">-</option></select>
+        </div>
+      </div>
+      <div class="plot-area" id="js-corr"><div class="empty-hint">X, Y축을 선택하면 상관 산점도가 표시됩니다.</div></div>
     </div>
   </div>
-  <div class="stats-hint">드래그한 영역의 웨이퍼들이 어떤 조건에서 진행됐는지 보여줍니다.</div>
 
-  <div class="sec-title">요인 분포</div>
-  <div class="dist-wrap" id="js-dist"></div>
+  <!-- 통계 (표) -->
+  <div class="stats-card" id="js-stats-card" style="display:none;">
+    <div class="stats-head">
+      <span class="stats-title">선택 영역 분석</span>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="stats-count" id="js-stats-count"></span>
+        <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
+      </div>
+    </div>
 
-  <div class="sec-title">측정값 통계</div>
-  <div class="stats-grid" id="js-stats-grid"></div>
+    <div class="sec-title">요인 분포</div>
+    <div class="dist-tables" id="js-dist"></div>
+
+    <div class="sec-title">측정값 통계</div>
+    <table class="tbl" id="js-stats-tbl">
+      <thead>
+        <tr><th>Parameter</th><th>Avg</th><th>Std</th><th>Min</th><th>Max</th></tr>
+      </thead>
+      <tbody id="js-stats-body"></tbody>
+    </table>
+  </div>
 </div>
 
+<script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
+<script>
+const API_OPTIONS = "{% url 'analysis-options' %}";
+const API_TREND   = "{% url 'analysis-trend' %}";
+const API_CORR    = "{% url 'analysis-corr' %}";
+const API_STATS   = "{% url 'analysis-stats' %}";
 
-/* ─────────────────────────────────────────────────────────
-   [3] <script> 안 — API_STATS 선언 추가 + onSelected/clearSelection 교체
-   ───────────────────────────────────────────────────────── */
+let trendData = [];
+let corrParams = [];       // 숫자 컬럼 목록 (correlation 축 선택지)
+let currentParam = '';
 
-// 다른 API 선언 옆에 추가
-const API_STATS = "{% url 'analysis-stats' %}";
+const selTech   = document.getElementById('sel-tech');
+const selLot    = document.getElementById('sel-lot');
+const selOper   = document.getElementById('sel-oper');
+const selParam  = document.getElementById('sel-param');
+const selLegend = document.getElementById('sel-legend');
+const selCorrX  = document.getElementById('sel-corr-x');
+const selCorrY  = document.getElementById('sel-corr-y');
+const btnRun    = document.getElementById('btn-run');
 
+async function postJSON(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) { alert(`API 오류 ${res.status}`); return {}; }
+  return res.json();
+}
 
-// 기존 onSelected / clearSelection 함수를 아래로 교체
+function fillSelect(sel, options) {
+  sel.innerHTML = '<option value="">선택</option>';
+  options.forEach(o => {
+    const opt = document.createElement('option');
+    opt.value = o.value; opt.textContent = o.label;
+    sel.appendChild(opt);
+  });
+}
+
+function resetFrom(level) {
+  const order = ['lot', 'oper', 'param'];
+  const map = {lot: selLot, oper: selOper, param: selParam};
+  let hit = false;
+  order.forEach(l => {
+    if (l === level) hit = true;
+    if (hit) { map[l].innerHTML = '<option value="">-</option>'; map[l].disabled = true; }
+  });
+  btnRun.disabled = true;
+}
+
+selTech.addEventListener('change', async () => {
+  resetFrom('lot');
+  if (!selTech.value) return;
+  const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: selTech.value});
+  fillSelect(selLot, (options||[]).map(o => ({value: o, label: o})));
+  selLot.disabled = false;
+});
+
+selLot.addEventListener('change', async () => {
+  resetFrom('oper');
+  if (!selLot.value) return;
+  const {options} = await postJSON(API_OPTIONS, {level: 'oper'});
+  fillSelect(selOper, options||[]);
+  selOper.disabled = false;
+});
+
+selOper.addEventListener('change', async () => {
+  resetFrom('param');
+  if (!selOper.value) return;
+  const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: selOper.value});
+  if (error) { alert('오류: ' + error); return; }
+  corrParams = options || [];
+  fillSelect(selParam, corrParams.map(o => ({value: o, label: o})));
+  // correlation 축 드롭박스도 채움
+  fillSelect(selCorrX, corrParams.map(o => ({value: o, label: o})));
+  fillSelect(selCorrY, corrParams.map(o => ({value: o, label: o})));
+  selParam.disabled = false;
+});
+
+selParam.addEventListener('change', () => { btnRun.disabled = !selParam.value; });
+
+// ── 조회 ────────────────────────────────────────
+async function runQuery() {
+  btnRun.disabled = true; btnRun.textContent = '조회중...';
+  try {
+    const {data, param, error} = await postJSON(API_TREND, {
+      oper_id: selOper.value, lot_cd: selLot.value, param: selParam.value,
+    });
+    if (error) { alert('오류: ' + error); return; }
+    trendData = data || [];
+    currentParam = param;
+    drawTrend();
+    // correlation 기본값: X=선택param, Y=두번째 컬럼
+    if (!selCorrX.value) selCorrX.value = param;
+    if (!selCorrY.value && corrParams.length > 1) {
+      selCorrY.value = corrParams.find(c => c !== param) || corrParams[0];
+    }
+    drawCorr();
+  } finally {
+    btnRun.disabled = false; btnRun.textContent = '조회';
+  }
+}
+
+// ── 공통 레이아웃 (흰 배경 기준) ─────────────────
+function baseLayout(xTitle, yTitle, titleText) {
+  return {
+    title: { text: titleText,
+      font: {family: 'Noto Sans KR, sans-serif', size: 14, color: '#333333'},
+      x: 0.5, xanchor: 'center', y: 0.98, yanchor: 'top' },
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {family: 'Noto Sans KR, sans-serif', color: '#666666', size: 12},
+    margin: {l: 60, r: 20, t: 50, b: 55},
+    xaxis: {title: {text: xTitle, font: {size: 12, color: '#666'}},
+      gridcolor: 'rgba(0,0,0,0.08)', griddash: 'dot', zeroline: false,
+      linecolor: 'rgba(0,0,0,0.15)', tickfont: {size: 11}},
+    yaxis: {title: {text: yTitle, font: {size: 12, color: '#666'}},
+      gridcolor: 'rgba(0,0,0,0.08)', griddash: 'dot', zeroline: false,
+      linecolor: 'rgba(0,0,0,0.15)', tickfont: {size: 11}},
+    dragmode: 'select', hovermode: 'closest',
+    legend: {orientation: 'h', x: 0.5, xanchor: 'center', y: -0.18, font: {size: 10}},
+    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
+      font: {family: 'Noto Sans KR', size: 11, color: '#333'}},
+  };
+}
+
+function groupByLegend(data, legendCol, xKey, yKey) {
+  const groups = {};
+  data.forEach(d => {
+    const key = (d[legendCol] === null || d[legendCol] === '') ? '(없음)' : d[legendCol];
+    if (!groups[key]) groups[key] = {x: [], y: [], ids: [], text: []};
+    groups[key].x.push(d[xKey]);
+    groups[key].y.push(d[yKey]);
+    groups[key].ids.push(d.id);
+    groups[key].text.push(`${d.LOT_ID} / WF${d.WF_ID}<br>${legendCol}: ${key}`);
+  });
+  return groups;
+}
+
+// ── 트렌드 ──────────────────────────────────────
+function drawTrend() {
+  if (!trendData.length) return;
+  const legendCol = selLegend.value;
+  const groups = groupByLegend(trendData, legendCol, 'date', 'val');
+
+  const traces = Object.entries(groups).map(([name, g]) => ({
+    x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
+    mode: 'markers', type: 'scattergl',
+    marker: {size: 8, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.25)'}},
+    hovertemplate: '%{text}<br><b>%{y:.2f}</b><extra></extra>',
+  }));
+
+  const title = `${selTech.value} · ${selLot.value} · ${currentParam}`;
+  const layout = baseLayout('DATE', currentParam, title);
+
+  // 스펙선 (임시: max/min/평균) — 나중에 getSpecLines만 교체
+  addSpecShapes(layout, trendData.map(d => d.val));
+
+  const div = document.getElementById('js-trend');
+  Plotly.newPlot(div, traces, layout,
+    {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
+
+  div.on('plotly_selected', (ev) => {
+    if (!ev || !ev.points || !ev.points.length) return;
+    onSelected(ev.points.map(p => p.customdata));
+  });
+  div.on('plotly_doubleclick', clearSelection);
+}
+
+// ── Correlation ─────────────────────────────────
+async function drawCorr() {
+  const xc = selCorrX.value, yc = selCorrY.value;
+  if (!xc || !yc || !selOper.value || !selLot.value) return;
+
+  const {data, error} = await postJSON(API_CORR, {
+    oper_id: selOper.value, lot_cd: selLot.value, x_col: xc, y_col: yc,
+  });
+  if (error) { alert('오류: ' + error); return; }
+  if (!data || !data.length) {
+    document.getElementById('js-corr').innerHTML = '<div class="empty-hint">데이터 없음</div>';
+    return;
+  }
+
+  const legendCol = selLegend.value;
+  const groups = groupByLegend(data, legendCol, 'x', 'y');
+
+  const traces = Object.entries(groups).map(([name, g]) => ({
+    x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
+    mode: 'markers', type: 'scattergl',
+    marker: {size: 8, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.25)'}},
+    hovertemplate: `%{text}<br>${xc}: %{x:.2f}<br>${yc}: %{y:.2f}<extra></extra>`,
+  }));
+
+  const layout = baseLayout(xc, yc, `${xc} vs ${yc}`);
+  const div = document.getElementById('js-corr');
+  Plotly.newPlot(div, traces, layout,
+    {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
+
+  div.on('plotly_selected', (ev) => {
+    if (!ev || !ev.points || !ev.points.length) return;
+    onSelected(ev.points.map(p => p.customdata));
+  });
+  div.on('plotly_doubleclick', clearSelection);
+}
+
+// ── 스펙선 (★ 실제 값 넣을 때 getSpecLines 만 수정) ──
+function getSpecLines(vals) {
+  // [나중에] 서버 스펙값으로 교체:
+  //   return {upper: s.upper, lower: s.lower, target: s.target};
+  const v = vals.filter(x => x !== null && !isNaN(x));
+  if (!v.length) return null;
+  return {
+    upper: Math.max(...v),
+    lower: Math.min(...v),
+    target: v.reduce((a,b) => a+b, 0) / v.length,
+  };
+}
+const SPEC_STYLE = {
+  upper:  {color: '#ef4444', dash: 'dash', label: 'Upper'},
+  lower:  {color: '#ef4444', dash: 'dash', label: 'Lower'},
+  target: {color: '#22c55e', dash: 'dot',  label: 'Target'},
+};
+function addSpecShapes(layout, vals) {
+  const spec = getSpecLines(vals);
+  if (!spec) return;
+  layout.shapes = []; layout.annotations = layout.annotations || [];
+  ['upper','target','lower'].forEach(k => {
+    const val = spec[k]; if (val == null || isNaN(val)) return;
+    const st = SPEC_STYLE[k];
+    layout.shapes.push({type: 'line', xref: 'paper', yref: 'y',
+      x0: 0, x1: 1, y0: val, y1: val,
+      line: {color: st.color, width: 1.4, dash: st.dash}, layer: 'below'});
+    layout.annotations.push({xref: 'paper', yref: 'y', x: 1, xanchor: 'right',
+      y: val, yanchor: 'bottom', text: `${st.label} ${val.toFixed(2)}`,
+      showarrow: false, font: {size: 10, color: st.color}});
+  });
+}
+
+// ── 드래그 통계 ─────────────────────────────────
 async function onSelected(ids) {
   const {count, stats, idle_dist, layer_dist, eqp_dist, error} =
-    await postJSON(API_STATS, { oper_id: selOper.value, ids: ids });
-
+    await postJSON(API_STATS, {oper_id: selOper.value, ids: ids});
   if (error) { console.error(error); return; }
 
   const card = document.getElementById('js-stats-card');
   card.style.display = 'block';
-  document.getElementById('js-stats-count').textContent = `${count}개 웨이퍼 선택됨`;
+  document.getElementById('js-stats-count').textContent = `${count}개 웨이퍼`;
 
-  // ── 요인 분포 (idle / 사전공정 / 장비) ──
-  const distHtml = [
-    distCol('Idle / Layer', idle_dist,  count),
-    distCol('사전 공정',     layer_dist, count),
-    distCol('장비',          eqp_dist,   count),
+  // 요인 분포 → 작은 표들
+  document.getElementById('js-dist').innerHTML = [
+    distTable('Idle / Layer', idle_dist),
+    distTable('사전 공정', layer_dist),
+    distTable('장비', eqp_dist),
   ].join('');
-  document.getElementById('js-dist').innerHTML = distHtml;
 
-  // ── 측정값 통계 ──
-  let gridHtml = '';
+  // 측정값 통계 → 표
+  let body = '';
   Object.entries(stats).forEach(([col, s]) => {
-    gridHtml += `<div class="stat-box">
-      <div class="stat-name">${col}</div>
-      <div class="stat-avg">${s.avg ?? '-'}</div>
-      <div class="stat-sub">σ ${s.std ?? '-'} · ${s.min ?? '-'} ~ ${s.max ?? '-'}</div>
-    </div>`;
+    body += `<tr><td>${col}</td><td>${s.avg ?? '-'}</td><td>${s.std ?? '-'}</td>
+             <td>${s.min ?? '-'}</td><td>${s.max ?? '-'}</td></tr>`;
   });
-  document.getElementById('js-stats-grid').innerHTML = gridHtml;
+  document.getElementById('js-stats-body').innerHTML = body;
 
-  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
-function distCol(title, rows, total) {
-  let html = `<div class="dist-col"><div class="dist-col-title">${title}</div>`;
-  (rows || []).slice(0, 6).forEach(r => {
-    const pct = total ? Math.round(r.count / total * 100) : 0;
-    html += `<div class="dist-row">
-      <span class="dist-key" title="${r.key}">${r.key}</span>
-      <span class="dist-bar-wrap"><span class="dist-bar" style="width:${pct}%"></span></span>
-      <span class="dist-cnt">${r.count} (${pct}%)</span>
-    </div>`;
+function distTable(title, rows) {
+  let h = `<div><div class="sec-title" style="margin-top:0">${title}</div>
+    <table class="tbl"><tbody>`;
+  (rows||[]).slice(0, 8).forEach(r => {
+    h += `<tr><td>${r.key}</td><td>${r.count}</td></tr>`;
   });
-  html += `</div>`;
-  return html;
+  h += `</tbody></table></div>`;
+  return h;
 }
 
 function clearSelection() {
-  const plotDiv = document.getElementById('js-plot');
-  if (plotDiv && plotDiv.data) {
-    Plotly.restyle(plotDiv, { selectedpoints: [null] });
-  }
-  const card = document.getElementById('js-stats-card');
-  if (card) card.style.display = 'none';
+  ['js-trend', 'js-corr'].forEach(id => {
+    const div = document.getElementById(id);
+    if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
+  });
+  document.getElementById('js-stats-card').style.display = 'none';
 }
+</script>
+{% endblock %}
