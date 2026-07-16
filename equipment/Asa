@@ -1,0 +1,54 @@
+def APCGetData(Fab, Lot_Code, Oper_Code, Recipe_ID_List, Days = None)
+
+  lake = lakes.LakeHouse(real_user_id = '')
+  if Days i None = :
+    Days = 30 
+  date_end = date.today()
+  diff_days = timedelta(days=Days)
+  date_start = date_end - diff_days
+  date_range = pd.date_range(start=date_start, end=date_end, freq='30D')
+
+  Fab = Fab.lower()
+  apc_df_merge = pd.DataFrame()
+
+  for i in range(len(date_range)-1):
+    dt_start = date_range[i].strftime("%Y%m%d")
+    dt_end = date_range[i+1].strftime("%Y%m%d")
+    mt_start = date_range[i].strftime("%Y%m")
+    mt_end = date_range[i+1].strftime("%Y%m")
+
+    query = f""" select distinct *
+                  from (
+                          select a.request_dtts, c.process_id, c.recipe_id, c.operation_id, c.lot_id, a.substrate_id, a.input_name, a.r2r_status,
+                                 a.input_value, b.item_value, RANK() over(partition by a.substrate_id order a.request_dtts DESC) r2r_rank, c.qty
+                                from lake_catalog.apc.apc.inquiry_hst_r2r_{Fab} A
+                                left join lake_catalog.apc.apc_inquiry_ext_hst_r2r_{Fab} on a.rawid = b.inquiry_hst_rawid
+                                left join lake_catalog.apc.apc_lot_hst_r2r_{Fab} C on A.lot_hst_rawid = c.rawid
+                                where a.dt between '{dt_start}' and '{dt_end}'
+                                and b.dt between '{dt_start}' and '{dt_end}'
+                                and c.mt between '{mt_start}' and '{mt_end}'
+                                and c.operation_id = '{Oper_Code}'
+                                and ( a.model_name like '%CMP% or a.model_name like '%KCC88% or a.model_name like '%KCC01%)
+                                and a.input_value is not null
+                                and b.item_name in ('FORMULA', 'PROCESS_OFFSET_MES_IDLE_FLAG_IDLE', 'IDLE_TIME', 'PROCESS_OFFSET_WAFER_SEQ')
+                                and c.lot_status = 'JobEnd'
+)D
+where d.r2r_rank=1
+"""
+if len(Recipe_ID_List) == 1 : 
+  Recipe_ID = Recipe_ID_List[0]
+  query += f"""
+                and recipe_id = '{Recipe_ID}'
+"""
+
+else : 
+  query += f"""
+                and recipe_id in {Recipe_ID_List}
+""""
+  starrokcs = lake.ensure_running(cluster_type = 'starrocks')
+  lake.auto_run_sync_paragraph(code=query)
+  apc_df = lake.get_rst().toPandas()
+  apc_df_merge = pd.concat([apc_df_merge, apc_df])
+
+return apc_df_merge
+            
