@@ -1,81 +1,113 @@
-# ============================================================
-# equipment/views.py 맨 아래에 추가
-# ============================================================
-# 파일 상단 import 확인 (없으면 추가):
-#   import json, re
-#   from django.shortcuts import render
-#   from django.http import JsonResponse
-#   from django.views.decorators.csrf import csrf_exempt
-#   from django.db import connections
-# ============================================================
+"""
+analysis_service.py 에 추가 — SRC pivot & APC 정리 & 머지
+────────────────────────────────────────────────────────
+SRC 컬럼(소문자):
+  lot_id, wf_id, substrate_id, main_eqp_id, param_nm, oper_id,
+  oper_det_desc, thk_value, end_tm, pre_eqp_id, pre_eqp_ch,
+  pre_oper_time, r2r_rank, rn
+"""
 
-import json
-import re
-from django.shortcuts import render
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.db import connections
-
-
-# ── 기준정보 ─────────────────────────────────────────────
-TECH_LOT_MAP = {
-    'LUCY': ['5E2', '5E9'],
-}
-
-OPER_LIST = [
-    ('OP100', 'BLC BUF NIT TOUCH CMP'),
+# 웨이퍼 1장당 하나인 값들 (pivot 후에도 유지)
+SRC_META_COLS = [
+    'lot_id', 'wf_id', 'substrate_id', 'main_eqp_id',
+    'oper_id', 'oper_det_desc', 'end_tm',
+    'pre_eqp_id', 'pre_eqp_ch', 'pre_oper_time',
 ]
 
-# ── 측정값이 아닌 메타 컬럼 (PARAMETER 후보에서 제외) ────
-META_COLS = {
-    'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
-    'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
-    'WF_ID', 'IDLE', 'PRE_LAYER',
-}
 
-
-def _an_table(oper_id):
-    return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
-
-
-def analysis_page(request):
-    """산포 분석 페이지"""
-    return render(request, 'equipment/analysis.html', {
-        'tech_list': list(TECH_LOT_MAP.keys()),
-    })
-
-
-@csrf_exempt
-def analysis_options(request):
+def pivot_src(df_src):
     """
-    종속 드롭박스 옵션.
-    body: {level: 'lot_cd'|'oper'|'param', tech, oper_id}
+    SRC long → wide.
+      before: substrate_id | param_nm | thk_value  (웨이퍼당 param 수만큼 행)
+      after : substrate_id | THK_AVG | POLISH_TIME | ...  (웨이퍼당 1행)
+
+    end_tm 이 param 별로 미세하게 다를 수 있어 index 에 넣지 않고,
+    메타는 substrate_id 기준 대표값(가장 이른 end_tm 행)으로 따로 추출 후 병합.
     """
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
+    if df_src is None or df_src.empty:
+        return pd.DataFrame()
 
-    body  = json.loads(request.body)
-    level = body.get('level')
+    df = df_src.copy()
+    df.columns = df.columns.str.lower()
 
-    if level == 'lot_cd':
-        return JsonResponse({'options': TECH_LOT_MAP.get(body.get('tech'), [])})
+    # 1) 측정값 pivot (substrate_id × param_nm)
+    wide = df.pivot_table(
+        index='substrate_id',
+        columns='param_nm',
+        values='thk_value',
+        aggfunc='first',        # rn=1 로 이미 유일하지만 방어
+    ).reset_index()
+    wide.columns.name = None
 
-    if level == 'oper':
-        return JsonResponse({'options': [
-            {'value': oid, 'label': f"{desc} ({oid})"} for oid, desc in OPER_LIST
-        ]})
+    # 2) 메타 컬럼 (웨이퍼당 1행) — end_tm 가장 이른 행 기준
+    meta_cols = [c for c in SRC_META_COLS if c in df.columns]
+    meta = (df.sort_values('end_tm')
+              .groupby('substrate_id', as_index=False)[meta_cols]
+              .first())
 
-    if level == 'param':
-        table = _an_table(body.get('oper_id'))
-        try:
-            with connections['analysis_db'].cursor() as cur:
-                cur.execute("""
-                    SELECT column_name FROM information_schema.columns
-                    WHERE table_name = %s ORDER BY ordinal_position
-                """, [table])
-                cols = [r[0].upper() for r in cur.fetchall()]
-            return JsonResponse({'options': [c for c in cols if c not in META_COLS]})
-        except Exception as e:
-            return JsonResponse({'options': [], 'error': str(e)})
+    # 3) 병합
+    out = meta.merge(wide, on='substrate_id', how='left')
+    return out
 
-    return JsonResponse({'options': []})
+
+def prepare_apc(df_apc):
+    """
+    APC long → 웨이퍼당 1행으로 정리.
+      - item_name/item_value 중 idle 정보만 추출 → 'idle' 컬럼
+      - input_name(APC param) 은 필요 시 pivot (현재는 값 미사용: input_value 불필요)
+      - 메타(process_id, recipe_id, operation_id, qty 등) 유지
+    """
+    if df_apc is None or df_apc.empty:
+        return pd.DataFrame()
+
+    df = df_apc.copy()
+    df.columns = df.columns.str.lower()
+
+    # idle 정보: item_value 에 idle / layer_change 등이 들어옴
+    #   ★ 실제 item_name/item_value 조합 확인 후 조건 조정 필요
+    idle_src = df[df['item_name'].isin(
+        ['IDLE_TIME', 'PROCESS_OFFSET_MES_IDLE_FLAG_IDLE']
+    )] if 'item_name' in df.columns else pd.DataFrame()
+
+    if not idle_src.empty:
+        idle = (idle_src.sort_values('request_dtts')
+                        .groupby('substrate_id', as_index=False)['item_value']
+                        .first()
+                        .rename(columns={'item_value': 'idle'}))
+    else:
+        idle = pd.DataFrame(columns=['substrate_id', 'idle'])
+
+    # 메타 (웨이퍼당 1행)
+    meta_cols = [c for c in ['substrate_id', 'lot_id', 'process_id', 'recipe_id',
+                             'operation_id', 'qty', 'request_dtts']
+                 if c in df.columns]
+    meta = (df.sort_values('request_dtts')
+              .groupby('substrate_id', as_index=False)[meta_cols]
+              .first())
+
+    out = meta.merge(idle, on='substrate_id', how='left')
+    return out
+
+
+def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
+    """
+    SRC(wide) + APC + MES 머지.
+      SRC ↔ APC : substrate_id (= lot_id.wf_id)
+      ↔ MES     : lot_id
+    """
+    if df_src_wide is None or df_src_wide.empty:
+        return pd.DataFrame()
+
+    df = df_src_wide.copy()
+
+    if df_apc_prep is not None and not df_apc_prep.empty:
+        # lot_id 중복 방지: APC 쪽 lot_id 는 제거하고 substrate_id 로만 조인
+        apc = df_apc_prep.drop(columns=[c for c in ['lot_id'] if c in df_apc_prep.columns])
+        df = df.merge(apc, on='substrate_id', how='inner')   # inner → rework 제외
+
+    if df_mes is not None and not df_mes.empty:
+        mes = df_mes.copy()
+        mes.columns = mes.columns.str.lower()
+        df = df.merge(mes, on='lot_id', how='left')
+
+    return df
