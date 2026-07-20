@@ -1,40 +1,39 @@
 """
-analysis_service.py 에 추가 — MES(LC, Layer Change) 조회
+analysis_service.py 에 넣을 MES(LC, Layer Change) 부분 최종본
 ────────────────────────────────────────────────────────
-원본 LCGetData 의 모델별 3중 분기를 설정(dict) + 공통 함수로 통합.
-모델이 늘어나면 MODEL_CH_CONFIG 에 한 줄만 추가하면 됨.
+※ import numpy as np 는 파일 맨 위 import 영역에 추가할 것
 """
-
-import numpy as np
-
 
 # ══════════════════════════════════════════════════════════
 # 모델별 챔버 설정
-#   chs      : 챔버 구분 목록 (None 이면 챔버 구분 없음)
-#   include  : 해당 챔버로 인정할 recipe_id 패턴 (정규식, OR)
-#   exclude  : 제외할 recipe_id 패턴 (정규식) — 없으면 None
-# ★ 모델 추가 시 여기만 수정
+#   recipe_id 끝자리로 챔버를 구분한다 (예: xxxxx_L, xxxxx_AB)
+#   include : 해당 챔버로 인정할 패턴(정규식). None 이면 챔버 구분 없음
+#   exclude : 제외 패턴. 끝자리 매칭($)이면 보통 불필요(None)
+# ★ 모델이 추가되면 여기에 한 줄만 넣으면 됨
 # ══════════════════════════════════════════════════════════
-MODEL_CH_CONFIG = {
-    'ELASTIC': {
-        'L': {'include': r'_L',        'exclude': r'_R$|_R_'},
-        'R': {'include': r'_R',        'exclude': r'_L$|_L_'},
-    },
-    'EBARA': {
-        'AB': {'include': r'_AB|_B',   'exclude': r'_CD|_PD'},
-        'CD': {'include': r'_CD|_D',   'exclude': r'_AB|_PB'},
-    },
-    'OPTA': {
-        None: {'include': None, 'exclude': None},    # 챔버 구분 없음
-    },
-    # KCT_NTA / KCT_NTH 는 확인 후 추가 (미정이면 OPTA 규칙 적용됨)
+_KCT_CH = {
+    'L': {'include': r'_L$',  'exclude': None},
+    'R': {'include': r'_R$',  'exclude': None},
 }
 
+MODEL_CH_CONFIG = {
+    'KCT_NTA': _KCT_CH,          # 구 ELASTIC
+    'KCT_NTH': _KCT_CH,
+    'EBARA': {
+        'AB': {'include': r'_AB$', 'exclude': None},
+        'CD': {'include': r'_CD$', 'exclude': None},
+    },
+    'OPTA': {
+        None: {'include': None, 'exclude': None},   # 챔버 구분 없음
+    },
+}
+
+# 설정에 없는 모델은 챔버 구분 없이 처리
 DEFAULT_CH_CONFIG = MODEL_CH_CONFIG['OPTA']
 
 
 def _derive_before_info(s):
-    """직전 recipe_id → 이전 layer 표기(LC_xxx) 생성"""
+    """직전 recipe_id → 이전 layer 표기(LC_xxx)"""
     parts = s.str.split('_')
     p0, p1, p2 = parts.str[0], parts.str[1], parts.str[2]
     three = 'LC_' + p0 + '_' + p1 + '_' + p2
@@ -43,7 +42,7 @@ def _derive_before_info(s):
 
 
 def _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_info):
-    """장비 1대 × 챔버 1개에 대한 layer change 추출"""
+    """장비 1대 × 챔버 1개의 layer change 추출"""
     d = lc_df[lc_df['eqp_id'] == eqp_id]
 
     if rule['include']:
@@ -59,9 +58,9 @@ def _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_info):
     if d.empty:
         return None
 
-    d['before_info']     = _derive_before_info(d['before_recipe_id'])
-    d['recipe_id_info']  = (d['recipe_id'].str.split('_').str[0] + '_' +
-                            d['recipe_id'].str.split('_').str[1])
+    d['before_info']    = _derive_before_info(d['before_recipe_id'])
+    d['recipe_id_info'] = (d['recipe_id'].str.split('_').str[0] + '_' +
+                           d['recipe_id'].str.split('_').str[1])
     d = d[d['recipe_id_info'] == recipe_info]
     if d.empty:
         return None
@@ -74,8 +73,10 @@ def _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_info):
 def fetch_mes(lake, cond, df_apc, days=30):
     """
     MES(LC) 조회 → layer change 정보.
-      cond   : get_oper_cond() 결과 (fab, recipe_list, eq_model 등)
-      df_apc : APC 조회 결과 (여기서 eqp_id 목록을 뽑음)
+      cond   : get_oper_cond() 결과 (fab, recipe_list, eq_model 필요)
+      df_apc : APC 조회 결과 (여기서 eqp_id 목록 추출)
+    반환: eqp_id, event_tm, recipe_id, lot_id, before_recipe_id,
+          before_info, recipe_id_info, eqp_ch, rank
     """
     if df_apc is None or df_apc.empty:
         return pd.DataFrame()
@@ -93,7 +94,7 @@ def fetch_mes(lake, cond, df_apc, days=30):
         return pd.DataFrame()
     eqp_in = "'" + "','".join(map(str, eqp_ids)) + "'"
 
-    # ── 조회 ────────────────────────────────────────────
+    # ── 조회 ──────────────────────────────────────────
     dfs = []
     for dt_s, dt_e, _, _ in _date_chunks(days):
         query = f"""
@@ -114,8 +115,8 @@ where dt between '{dt_s}' and '{dt_e}'
     lc_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
     lc_df.columns = lc_df.columns.str.lower()
 
-    # ── 모델별 챔버 규칙으로 layer change 추출 ──────────
-    model = str(cond.get('eq_model') or '').upper()
+    # ── 모델별 챔버 규칙 적용 ──────────────────────────
+    model    = str(cond.get('eq_model') or '').upper()
     ch_rules = MODEL_CH_CONFIG.get(model, DEFAULT_CH_CONFIG)
 
     out = []
