@@ -1,6 +1,5 @@
-
 """
-analysis_service.py — derive_idle 교체 + finalize_df 추가
+analysis_service.py — idle 파생 / OPTA 챔버 판정 / 저장용 정리
 ────────────────────────────────────────────────────────
 머지 결과(m)의 컬럼(소문자):
   lot_id, wf_id, substrate_id, main_eqp_id, oper_id, oper_det_desc,
@@ -10,14 +9,15 @@ analysis_service.py — derive_idle 교체 + finalize_df 추가
 """
 
 
+# ══════════════════════════════════════════════════════════
+# 1. idle_1~4 파생
+# ══════════════════════════════════════════════════════════
 def derive_idle(df):
     """
-    idle_1~4 파생.
-      APC의 idle 플래그는 그 lot 전체 웨이퍼에 동일하게 붙어옴
+    APC의 idle 플래그는 해당 lot 전체 웨이퍼에 동일하게 붙어온다.
       → "이 lot이 idle 직후인가"를 뜻하므로,
-        해당 lot의 웨이퍼를 시간순 정렬해 앞 4장에 idle_1~4 부여.
-      layer_change 는 lot 첫 웨이퍼에만 표기.
-      나머지는 빈 문자열.
+        lot 웨이퍼를 시간순 정렬해 앞 4장에 idle_1~4 부여.
+      layer_change 는 lot 첫 웨이퍼에만 표기, 나머지는 빈 문자열.
     """
     if df is None or df.empty:
         return df
@@ -32,9 +32,9 @@ def derive_idle(df):
     out = []
     for lot_id, g in df.groupby('lot_id', sort=False):
         g = g.sort_values(time_col).reset_index(drop=True)
-        flag = g['idle'].iloc[0]          # lot 전체가 동일 값
+        flag = g['idle'].iloc[0]           # lot 전체가 동일 값
 
-        g['idle'] = ''                    # 초기화 후 재부여
+        g['idle'] = ''                     # 초기화 후 재부여
         if flag.startswith('idle'):
             for i in range(min(4, len(g))):
                 g.loc[i, 'idle'] = f'idle_{i+1}'
@@ -47,7 +47,38 @@ def derive_idle(df):
 
 
 # ══════════════════════════════════════════════════════════
-# 저장 직전: 웹이 기대하는 컬럼명으로 정리
+# 2. OPTA 챔버 판정
+#    KCT/EBARA 는 recipe_id 로 판정(fetch_mes)되지만,
+#    OPTA 는 recipe 에 챔버 표기가 없어 param_nm 에서 _P3/_P4 를 추출한다.
+#    단, 아래 공정은 param 으로 판정 불가 → 고정값 사용.
+#    ★ 예외 공정이 늘면 여기만 수정 (추후 구닥스 컬럼으로 옮기는 것 권장)
+# ══════════════════════════════════════════════════════════
+OPTA_FIXED_CH = {
+    # 'OPER_ID값': 'P4',
+}
+
+
+def derive_opta_chamber(df_src, oper_id):
+    """substrate_id 별 OPTA 챔버(P3/P4) 판정 결과 반환"""
+    d = df_src.copy()
+    d.columns = d.columns.str.lower()
+
+    fixed = OPTA_FIXED_CH.get(str(oper_id))
+    if fixed:
+        out = d[['substrate_id']].drop_duplicates().copy()
+        out['eqp_ch_opta'] = fixed
+        return out
+
+    # thk 등 P 표기가 없는 param 은 NaN 으로 빠져 자동 제외됨
+    d['ch'] = d['param_nm'].str.extract(r'_(P\d)(?:_|$)')
+    return (d.dropna(subset=['ch'])
+              .groupby('substrate_id', as_index=False)['ch']
+              .first()
+              .rename(columns={'ch': 'eqp_ch_opta'}))
+
+
+# ══════════════════════════════════════════════════════════
+# 3. 저장 직전 정리
 # ══════════════════════════════════════════════════════════
 RENAME_MAP = {
     'end_tm':      'DATE',
@@ -65,13 +96,11 @@ DROP_COLS = [
 ]
 
 
-def finalize_df(df, cond):
+def finalize_df(df, cond, df_src=None):
     """
     머지+파생 결과를 저장 형태로 정리.
-      - 컬럼명 통일 (웹이 기대하는 이름)
-      - LOT_CD, EQ_MODEL 등 기준정보 컬럼 추가
-      - 불필요 컬럼 제거
-      - 전체 대문자화
+      - OPTA 면 param 기반 챔버 채우기 (df_src 필요)
+      - 컬럼명 통일 / 기준정보 컬럼 추가 / 불필요 컬럼 제거 / 대문자화
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -79,22 +108,27 @@ def finalize_df(df, cond):
     df = df.copy()
     df.columns = df.columns.str.lower()
 
-    # 불필요 컬럼 제거
-    df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
+    # ── OPTA 챔버 보강 ────────────────────────────────
+    if str(cond.get('eq_model', '')).upper() == 'OPTA' and df_src is not None:
+        ch = derive_opta_chamber(df_src, cond['oper_id'])
+        df = df.merge(ch, on='substrate_id', how='left')
+        if 'eqp_ch' not in df.columns:
+            df['eqp_ch'] = pd.NA
+        df['eqp_ch'] = (df['eqp_ch'].replace('', pd.NA)
+                                    .fillna(df['eqp_ch_opta']))
+        df = df.drop(columns=['eqp_ch_opta'])
 
-    # 이름 통일
+    # ── 정리 ──────────────────────────────────────────
+    df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
     df = df.rename(columns={k: v for k, v in RENAME_MAP.items() if k in df.columns})
 
-    # 기준정보 컬럼 추가
-    #   LOT_CD: lot_id 앞 3자리 (예: 5E2XXXX → 5E2)
+    # 기준정보 컬럼
     if 'lot_id' in df.columns:
         df['LOT_CD'] = df['lot_id'].astype(str).str[:3]
     df['EQP_MODEL'] = cond.get('eq_model', '')
 
-    # 나머지 대문자화
     df.columns = [c.upper() for c in df.columns]
 
-    # DATE 는 timestamp 로
     if 'DATE' in df.columns:
         df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
 
