@@ -1,135 +1,84 @@
 """
-analysis_service.py — idle 파생 / OPTA 챔버 판정 / 저장용 정리
-────────────────────────────────────────────────────────
-머지 결과(m)의 컬럼(소문자):
-  lot_id, wf_id, substrate_id, main_eqp_id, oper_id, oper_det_desc,
-  end_tm, pre_eqp_id, pre_eqp_ch, pre_oper_time,
-  <param 컬럼들...>, process_id, recipe_id, operation_id, qty,
-  request_dtts, idle, before_info, eqp_ch
+analysis_service.py 의 save_analysis_df 를 아래 두 함수로 통째로 교체.
+(기존 _pg_type / TEXT_COLS 는 지워도 되고 남겨둬도 무방)
 """
 
 
-# ══════════════════════════════════════════════════════════
-# 1. idle_1~4 파생
-# ══════════════════════════════════════════════════════════
-def derive_idle(df):
+def _pg_type_from_series(s):
     """
-    APC의 idle 플래그는 해당 lot 전체 웨이퍼에 동일하게 붙어온다.
-      → "이 lot이 idle 직후인가"를 뜻하므로,
-        lot 웨이퍼를 시간순 정렬해 앞 4장에 idle_1~4 부여.
-      layer_change 는 lot 첫 웨이퍼에만 표기, 나머지는 빈 문자열.
+    실제 데이터로 PG 타입 판정.
+    하드코딩 목록(TEXT_COLS)은 새 컬럼이 생길 때마다 누락되므로 값으로 판단한다.
     """
-    if df is None or df.empty:
-        return df
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return 'TIMESTAMP'
+    if pd.api.types.is_numeric_dtype(s):
+        return 'DOUBLE PRECISION'
 
-    df = df.copy()
-    if 'idle' not in df.columns:
-        df['idle'] = ''
-    df['idle'] = df['idle'].fillna('').astype(str).str.strip().str.lower()
-
-    time_col = 'end_tm' if 'end_tm' in df.columns else 'request_dtts'
-
-    out = []
-    for lot_id, g in df.groupby('lot_id', sort=False):
-        g = g.sort_values(time_col).reset_index(drop=True)
-        flag = g['idle'].iloc[0]           # lot 전체가 동일 값
-
-        g['idle'] = ''                     # 초기화 후 재부여
-        if flag.startswith('idle'):
-            for i in range(min(4, len(g))):
-                g.loc[i, 'idle'] = f'idle_{i+1}'
-        elif 'layer' in flag:
-            g.loc[0, 'idle'] = 'layer_change'
-
-        out.append(g)
-
-    return pd.concat(out, ignore_index=True)
+    nonnull = s.dropna()
+    if len(nonnull) == 0:
+        return 'VARCHAR(200)'
+    # 전부 숫자로 변환되면 숫자 컬럼, 하나라도 실패하면 텍스트
+    if pd.to_numeric(nonnull, errors='coerce').notna().all():
+        return 'DOUBLE PRECISION'
+    return 'VARCHAR(200)'
 
 
-# ══════════════════════════════════════════════════════════
-# 2. OPTA 챔버 판정
-#    KCT/EBARA 는 recipe_id 로 판정(fetch_mes)되지만,
-#    OPTA 는 recipe 에 챔버 표기가 없어 param_nm 에서 _P3/_P4 를 추출한다.
-#    단, 아래 공정은 param 으로 판정 불가 → 고정값 사용.
-#    ★ 예외 공정이 늘면 여기만 수정 (추후 구닥스 컬럼으로 옮기는 것 권장)
-# ══════════════════════════════════════════════════════════
-OPTA_FIXED_CH = {
-    # 'OPER_ID값': 'P4',
-}
-
-
-def derive_opta_chamber(df_src, oper_id):
-    """substrate_id 별 OPTA 챔버(P3/P4) 판정 결과 반환"""
-    d = df_src.copy()
-    d.columns = d.columns.str.lower()
-
-    fixed = OPTA_FIXED_CH.get(str(oper_id))
-    if fixed:
-        out = d[['substrate_id']].drop_duplicates().copy()
-        out['eqp_ch_opta'] = fixed
-        return out
-
-    # thk 등 P 표기가 없는 param 은 NaN 으로 빠져 자동 제외됨
-    d['ch'] = d['param_nm'].str.extract(r'_(P\d)(?:_|$)')
-    return (d.dropna(subset=['ch'])
-              .groupby('substrate_id', as_index=False)['ch']
-              .first()
-              .rename(columns={'ch': 'eqp_ch_opta'}))
-
-
-# ══════════════════════════════════════════════════════════
-# 3. 저장 직전 정리
-# ══════════════════════════════════════════════════════════
-RENAME_MAP = {
-    'end_tm':      'DATE',
-    'main_eqp_id': 'EQP_ID',
-    'eqp_ch':      'EQP_CH_ID',
-    'before_info': 'PRE_LAYER',
-    'oper_id':     'OPERATION_ID',
-    'idle':        'IDLE',
-}
-
-# 저장에서 제외할 컬럼 (조인 부산물 / 중복)
-DROP_COLS = [
-    'r2r_rank', 'rn', 'rank', 'recipe_id_info', 'before_recipe_id',
-    'pre_oper_time', 'request_dtts', 'event_tm', 'oper_det_desc',
-]
-
-
-def finalize_df(df, cond, df_src=None):
+def save_analysis_df(df, oper_id):
     """
-    머지+파생 결과를 저장 형태로 정리.
-      - OPTA 면 param 기반 챔버 채우기 (df_src 필요)
-      - 컬럼명 통일 / 기준정보 컬럼 추가 / 불필요 컬럼 제거 / 대문자화
+    최종 wide df → PostgreSQL 저장 (LOT_CD 단위 삭제 후 재적재)
+
+    [주의] CREATE TABLE IF NOT EXISTS 는 기존 테이블 구조를 바꾸지 않는다.
+           컬럼이나 타입이 바뀌었으면 먼저 DROP TABLE 할 것.
     """
     if df is None or df.empty:
-        return pd.DataFrame()
+        print(f"[{oper_id}] 저장 스킵 (빈 df)")
+        return
 
     df = df.copy()
-    df.columns = df.columns.str.lower()
+    df.columns = df.columns.str.upper()
 
-    # ── OPTA 챔버 보강 ────────────────────────────────
-    if str(cond.get('eq_model', '')).upper() == 'OPTA' and df_src is not None:
-        ch = derive_opta_chamber(df_src, cond['oper_id'])
-        df = df.merge(ch, on='substrate_id', how='left')
-        if 'eqp_ch' not in df.columns:
-            df['eqp_ch'] = pd.NA
-        df['eqp_ch'] = (df['eqp_ch'].replace('', pd.NA)
-                                    .fillna(df['eqp_ch_opta']))
-        df = df.drop(columns=['eqp_ch_opta'])
+    # 중복 컬럼 방어 (앞의 것만 유지)
+    df = df.loc[:, ~df.columns.duplicated()]
 
-    # ── 정리 ──────────────────────────────────────────
-    df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
-    df = df.rename(columns={k: v for k, v in RENAME_MAP.items() if k in df.columns})
+    table = _table_name(oper_id)
+    conn  = connections['analysis_db']
 
-    # 기준정보 컬럼
-    if 'lot_id' in df.columns:
-        df['LOT_CD'] = df['lot_id'].astype(str).str[:3]
-    df['EQP_MODEL'] = cond.get('eq_model', '')
+    # ── 컬럼 타입 판정 + 값 캐스팅 ──────────────────────
+    #    Lake 에서 숫자가 문자열로 넘어오는 경우가 있어 값도 함께 변환한다
+    col_types = {}
+    for c in df.columns:
+        if c in TIME_COLS:
+            t = 'TIMESTAMP'
+        else:
+            t = _pg_type_from_series(df[c])
+        col_types[c] = t
 
-    df.columns = [c.upper() for c in df.columns]
+        if t == 'DOUBLE PRECISION':
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+        elif t == 'TIMESTAMP':
+            df[c] = pd.to_datetime(df[c], errors='coerce')
 
-    if 'DATE' in df.columns:
-        df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+    # ── 테이블 생성 ────────────────────────────────────
+    col_defs = ["id BIGSERIAL PRIMARY KEY"] + \
+               [f'"{c}" {col_types[c]}' for c in df.columns]
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n  "
+                    + ",\n  ".join(col_defs) + "\n)")
+        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_lot  ON {table} ("LOT_CD")')
+        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_date ON {table} ("DATE")')
 
-    return df
+    # ── 적재 ───────────────────────────────────────────
+    df = df.astype(object).where(pd.notnull(df), None)
+
+    cols    = list(df.columns)
+    col_str = ", ".join(f'"{c}"' for c in cols)
+    data    = [tuple(r) for r in df.itertuples(index=False, name=None)]
+    lot_cds = df['LOT_CD'].dropna().unique().tolist() if 'LOT_CD' in df.columns else []
+
+    with conn.cursor() as cur:
+        for lc in lot_cds:
+            cur.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s', [lc])
+        execute_values(cur.cursor, f'INSERT INTO {table} ({col_str}) VALUES %s',
+                       data, page_size=1000)
+
+    print(f"[{oper_id}] 저장 완료 {len(df):,}행 (lot_cd: {lot_cds})")
