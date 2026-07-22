@@ -120,7 +120,7 @@
   font-size: var(--fs-md); font-weight: var(--fw-mid); }
 
 /* ══ 선택 결과: 요인분포 | 상관변수 나란히 ═══════════ */
-.result-row { display: grid; grid-template-columns: minmax(300px, 0.85fr) 1.35fr;
+.result-row { display: grid; grid-template-columns: minmax(340px, 1.05fr) 1fr;
   gap: 18px; align-items: start; }
 @media (max-width: 1100px) { .result-row { grid-template-columns: 1fr; } }
 
@@ -140,7 +140,8 @@
 .btn-clear:hover { color: var(--tx-1); border-color: var(--tx-muted); }
 
 /* 요인 분포 — 3열. 항목 타이포를 상관변수 표와 동일 규격으로 맞춤 */
-.factor-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+.factor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 0 0; }
 .fcol { border-left: 1px solid rgba(128,128,128,0.12); padding: 0 11px; min-width: 0; }
 .fcol:first-child { border-left: none; padding-left: 0; }
 .fcol-head { font-size: var(--fs-xs); font-weight: var(--fw-bold); color: var(--tx-muted);
@@ -626,11 +627,11 @@ async function onSelected(ids) {
 
   document.getElementById('js-result-row').style.display = 'grid';
   document.getElementById('js-stats-count').textContent = `${distRes.count} wf`;
-  document.getElementById('js-dist').innerHTML = [
-    factorCol('Idle',      sortIdleRows(distRes.idle_dist)),
-    factorCol('직전 공정', distRes.layer_dist),
-    factorCol('장비',      distRes.eqp_dist),
-  ].join('');
+  // 요인 항목은 서버(views.py FACTOR_COLS)가 정한다
+  document.getElementById('js-dist').innerHTML =
+    (distRes.factors || []).map(f =>
+      factorCol(f.label, f.col === 'IDLE' ? sortIdleRows(f.rows) : f.rows)
+    ).join('');
 
   const shown = topRanked.filter(r => r.r2 !== null && r.r2 >= R2_MIN);
   document.getElementById('js-r2-note').textContent = `R² ≥ ${R2_MIN}`;
