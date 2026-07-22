@@ -10,9 +10,10 @@
          (주석 안이라도 Django 가 파싱해서 TemplateSyntaxError)
 
   [수정 지점]
-    · 범례 항목    → views.py 의 LEGEND_OPTIONS
-    · 상관변수 개수 → views.py 의 TOP_N
-    · 실제 스펙값   → 아래 getSpecLines() 만 교체
+    · 범례 항목      → views.py 의 LEGEND_OPTIONS
+    · 상관변수 개수   → views.py 의 TOP_N
+    · R² 표시 하한선  → 아래 R2_MIN
+    · 실제 스펙값     → 아래 getSpecLines()
 ════════════════════════════════════════════════════════════
 #}
 
@@ -25,7 +26,7 @@
   --an-mono: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', 'Consolas', monospace;
 }
 
-.an-page { padding: 26px 30px 70px; display: flex; flex-direction: column; gap: 20px;
+.an-page { padding: 26px 30px 70px; display: flex; flex-direction: column; gap: 18px;
   font-family: var(--an-font); }
 .an-title { font-size: 20px; font-weight: 800; color: var(--tx-1); letter-spacing: -0.02em; }
 .an-sub { font-size: 13px; color: var(--tx-2); margin-top: 4px; }
@@ -63,50 +64,53 @@
 .plot-area { width: 100%; height: 430px; }
 .empty-hint { padding: 70px 20px; text-align: center; color: var(--tx-muted); font-size: 14px; }
 
-/* ── 요인 분포 (컴팩트 · 통계와 분리된 카드) ────────── */
-.factor-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: 14px;
-  padding: 14px 20px; }
-.factor-head { display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 10px; }
-.factor-head .ttl { font-size: 13px; font-weight: 800; color: var(--tx-1); }
-.factor-head .cnt { font-size: 12px; color: var(--accent); font-weight: 700; }
+/* ══ 선택 결과: 요인분포 | 상관변수  나란히 ══════════ */
+.result-row { display: grid; grid-template-columns: minmax(300px, 0.85fr) 1.35fr; gap: 18px;
+  align-items: start; }
+@media (max-width: 1100px) { .result-row { grid-template-columns: 1fr; } }
 
-.factor-line { display: flex; align-items: baseline; gap: 10px; padding: 5px 0;
-  border-top: 1px solid rgba(128,128,128,0.10); }
-.factor-line:first-of-type { border-top: none; }
-.factor-line .fl-key { flex: 0 0 68px; font-size: 11px; font-weight: 800;
-  color: var(--tx-muted); letter-spacing: .02em; }
-.factor-line .fl-vals { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { display: inline-flex; align-items: baseline; gap: 5px; padding: 2px 9px;
-  background: var(--bg-2); border: 1px solid var(--bd); border-radius: 20px;
-  font-size: 11.5px; }
-.chip .k { color: var(--tx-1); font-weight: 600; }
-.chip .v { color: var(--tx-2); font-family: var(--an-mono); font-weight: 700; }
-.chip.more { opacity: .55; }
-
-/* ── 통계 표 ─────────────────────────────────────── */
-.stats-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: 14px; padding: 20px 22px; }
-.stats-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.stats-title { font-size: 14px; font-weight: 800; color: var(--tx-1); letter-spacing: -0.01em; }
-.btn-clear { padding: 6px 14px; background: var(--bg-2); border: 1px solid var(--bd);
-  border-radius: 9px; color: var(--tx-2); font-size: 12px; cursor: pointer;
+.res-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: 14px;
+  padding: 16px 18px; }
+.res-head { display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px; gap: 10px; }
+.res-title { font-size: 13px; font-weight: 800; color: var(--tx-1); letter-spacing: -0.01em; }
+.res-note { font-size: 11px; color: var(--tx-muted); font-weight: 600; }
+.res-cnt { font-size: 12px; color: var(--accent); font-weight: 700; }
+.btn-clear { padding: 5px 12px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 8px; color: var(--tx-2); font-size: 11.5px; cursor: pointer;
   font-family: var(--an-font); font-weight: 600; }
 .btn-clear:hover { color: var(--tx-1); }
 
-.stat-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.stat-tbl th { text-align: right; padding: 8px 12px; color: var(--tx-muted);
-  font-weight: 700; border-bottom: 2px solid var(--bd); font-size: 11.5px;
-  position: sticky; top: 0; background: var(--bg-3); }
+/* 요인 분포 — 3열 */
+.factor-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+.fcol { border-left: 1px solid rgba(128,128,128,0.12); padding: 0 10px; }
+.fcol:first-child { border-left: none; padding-left: 0; }
+.fcol-head { font-size: 11px; font-weight: 800; color: var(--tx-muted);
+  letter-spacing: .02em; padding-bottom: 6px; margin-bottom: 5px;
+  border-bottom: 1.5px solid var(--bd); }
+.fitem { display: flex; justify-content: space-between; align-items: baseline;
+  gap: 8px; padding: 3px 0; font-size: 12px; }
+.fitem .k { color: var(--tx-1); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.fitem .v { color: var(--tx-2); font-family: var(--an-mono); font-weight: 700;
+  font-size: 11.5px; flex-shrink: 0; }
+.fitem.dim { opacity: .5; }
+
+/* 상관 변수 표 */
+.stat-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.stat-tbl th { text-align: right; padding: 6px 10px; color: var(--tx-muted);
+  font-weight: 700; border-bottom: 1.5px solid var(--bd); font-size: 11px; }
 .stat-tbl th:first-child { text-align: left; }
-.stat-tbl td { text-align: right; padding: 7px 12px; color: var(--tx-1);
-  font-family: var(--an-mono); border-bottom: 1px solid rgba(128,128,128,0.10); }
-.stat-tbl td:first-child { text-align: left; font-weight: 700; font-family: var(--an-font); }
+.stat-tbl td { text-align: right; padding: 5px 10px; color: var(--tx-1);
+  font-family: var(--an-mono); border-bottom: 1px solid rgba(128,128,128,0.09); }
+.stat-tbl td:first-child { text-align: left; font-weight: 700; font-family: var(--an-font);
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stat-tbl tr:hover td { background: var(--bg-2); }
-.stat-tbl .sel-val { color: #16a34a; font-weight: 700; }
-.stat-tbl .r2-val  { color: #0ea5e9; font-weight: 700; }
-.stat-tbl .delta-up   { color: #dc2626; }
-.stat-tbl .delta-down { color: #2563eb; }
-.stat-scroll { max-height: 520px; overflow-y: auto; }
+.stat-tbl .sel-val    { color: #16a34a; font-weight: 700; }
+.stat-tbl .r2-val     { color: #0ea5e9; font-weight: 700; }
+.stat-tbl .delta-up   { color: #dc2626; font-weight: 700; }
+.stat-tbl .delta-down { color: #2563eb; font-weight: 700; }
+.stat-empty { padding: 26px 10px; text-align: center; color: var(--tx-muted); font-size: 12px; }
 </style>
 {% endblock %}
 
@@ -170,33 +174,33 @@
     </div>
   </div>
 
-  <!-- 요인 분포 (컴팩트) -->
-  <div class="factor-card" id="js-factor-card" style="display:none;">
-    <div class="factor-head">
-      <span class="ttl">요인 분포</span>
-      <span class="cnt" id="js-stats-count"></span>
+  <!-- 선택 결과: 요인분포 | 상관변수 -->
+  <div class="result-row" id="js-result-row" style="display:none;">
+    <div class="res-card">
+      <div class="res-head">
+        <span class="res-title">요인 분포</span>
+        <span class="res-cnt" id="js-stats-count"></span>
+      </div>
+      <div class="factor-grid" id="js-dist"></div>
     </div>
-    <div id="js-dist"></div>
-  </div>
 
-  <!-- 상관 변수 통계 -->
-  <div class="stats-card" id="js-stats-card" style="display:none;">
-    <div class="stats-head">
-      <span class="stats-title">주요 상관 변수 · 전체 vs 선택</span>
-      <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
-    </div>
-    <div class="stat-scroll">
+    <div class="res-card">
+      <div class="res-head">
+        <span class="res-title">주요 상관 변수
+          <span class="res-note" id="js-r2-note"></span>
+        </span>
+        <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
+      </div>
       <table class="stat-tbl">
         <thead>
           <tr>
             <th>변수</th><th>R²</th>
-            <th>전체 avg</th><th>전체 med</th>
-            <th>선택 avg</th><th>선택 med</th>
-            <th>Δ avg</th>
+            <th>전체 avg</th><th>선택 avg</th><th>Δ</th>
           </tr>
         </thead>
         <tbody id="js-stat-body"></tbody>
       </table>
+      <div class="stat-empty" id="js-stat-empty" style="display:none;"></div>
     </div>
   </div>
 </div>
@@ -214,11 +218,16 @@ const API_BOX_SEL   = "{% url 'analysis-box-sel' %}";
 
 const AN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
 
+/* ★ R² 표시 하한선 — 이 값 미만인 변수는 표에서 제외 */
+const R2_MIN = 0.2;
+
+/* 요인 분포에서 열당 최대 표시 개수 */
+const FACTOR_MAX = 8;
+
 let trendData    = [];
 let corrParams   = [];
 let currentParam = '';
 let topRanked    = [];
-let lastSelIds   = null;      // 범례 변경 시 선택 유지용
 
 const selTech   = document.getElementById('sel-tech');
 const selLot    = document.getElementById('sel-lot');
@@ -355,8 +364,7 @@ function baseLayout(xTitle, yTitle, titleText) {
       gridcolor: 'rgba(0,0,0,0.07)', griddash: 'dot', zeroline: false,
       linecolor: 'rgba(0,0,0,0.15)', tickfont: {size: 12}},
     dragmode: 'select', hovermode: 'closest',
-    // 값이 한 종류뿐이면 트레이스가 1개가 되는데,
-    // Plotly 는 그 경우 범례를 자동으로 숨긴다 → 명시적으로 켠다
+    // 값이 한 종류뿐이면 트레이스가 1개인데, Plotly 는 그때 범례를 자동으로 숨긴다
     showlegend: true,
     legend: {orientation: 'h', x: 0.5, xanchor: 'center', y: -0.2, font: {size: 11}},
     hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
@@ -516,57 +524,60 @@ function addSpecShapes(layout, vals) {
 
 /* ── 드래그 선택 → 통계 ────────────────────────── */
 async function onSelected(ids) {
-  lastSelIds = ids;
-
   const distRes = await postJSON(API_STATS, {oper_id: selOper.value, ids: ids});
   if (distRes.error) { console.error(distRes.error); return; }
 
-  document.getElementById('js-factor-card').style.display = 'block';
+  document.getElementById('js-result-row').style.display = 'grid';
   document.getElementById('js-stats-count').textContent = `${distRes.count}개 웨이퍼`;
   document.getElementById('js-dist').innerHTML = [
-    factorLine('Idle',     distRes.idle_dist),
-    factorLine('사전공정', distRes.layer_dist),
-    factorLine('장비',     distRes.eqp_dist),
+    factorCol('Idle',      distRes.idle_dist),
+    factorCol('직전 공정', distRes.layer_dist),
+    factorCol('장비',      distRes.eqp_dist),
   ].join('');
 
-  if (!topRanked.length) {
-    document.getElementById('js-stats-card').style.display = 'none';
+  // R² 하한선 이상만
+  const shown = topRanked.filter(r => r.r2 !== null && r.r2 >= R2_MIN);
+  document.getElementById('js-r2-note').textContent = `R² ≥ ${R2_MIN}`;
+
+  const tbody = document.getElementById('js-stat-body');
+  const empty = document.getElementById('js-stat-empty');
+
+  if (!shown.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    empty.textContent = `R² ${R2_MIN} 이상인 변수가 없습니다.`;
     return;
   }
+  empty.style.display = 'none';
 
-  const topCols = topRanked.map(r => r.col);
-  const boxRes  = await postJSON(API_BOX_SEL, {oper_id: selOper.value, ids: ids, cols: topCols});
-  const boxSel  = boxRes.box_sel || {};
-
-  document.getElementById('js-stats-card').style.display = 'block';
-  fillStatTable(topRanked, boxSel);
+  const boxRes = await postJSON(API_BOX_SEL, {
+    oper_id: selOper.value, ids: ids, cols: shown.map(r => r.col),
+  });
+  fillStatTable(shown, boxRes.box_sel || {});
 }
 
-/* 요인 분포 한 줄 (칩 형태로 압축) */
-function factorLine(title, rows) {
+/* 요인 분포 한 열 (세로 목록) */
+function factorCol(title, rows) {
   const list = rows || [];
-  const MAX  = 6;
-  let chips = list.slice(0, MAX).map(r =>
-    `<span class="chip"><span class="k">${r.key}</span><span class="v">${r.count}</span></span>`
+  let items = list.slice(0, FACTOR_MAX).map(r =>
+    `<div class="fitem"><span class="k" title="${r.key}">${r.key}</span>` +
+    `<span class="v">${r.count}</span></div>`
   ).join('');
-  if (list.length > MAX) {
-    chips += `<span class="chip more">+${list.length - MAX}</span>`;
+  if (list.length > FACTOR_MAX) {
+    items += `<div class="fitem dim"><span class="k">외 ${list.length - FACTOR_MAX}종</span><span class="v"></span></div>`;
   }
-  if (!chips) chips = `<span class="chip more">데이터 없음</span>`;
-  return `<div class="factor-line">
-            <span class="fl-key">${title}</span>
-            <span class="fl-vals">${chips}</span>
-          </div>`;
+  if (!items) items = `<div class="fitem dim"><span class="k">없음</span><span class="v"></span></div>`;
+  return `<div class="fcol"><div class="fcol-head">${title}</div>${items}</div>`;
 }
 
-/* 상관 변수 통계 표 (숫자만 · 소수점 1자리) */
+/* 상관 변수 표 (숫자만 · 소수점 1자리) */
 function fillStatTable(ranked, boxSel) {
   let body = '';
   ranked.forEach(r => {
     const a = r.box_all || {};
     const s = boxSel[r.col] || {};
 
-    // 선택 영역이 전체 대비 얼마나 벗어났는지
+    // 선택 영역이 전체 평균 대비 얼마나 벗어났는지
     let deltaCell = '<td>-</td>';
     if (a.avg !== null && a.avg !== undefined && s.avg !== null && s.avg !== undefined) {
       const d   = s.avg - a.avg;
@@ -576,12 +587,10 @@ function fillStatTable(ranked, boxSel) {
     }
 
     body += `<tr>
-      <td>${r.col}</td>
+      <td title="${r.col}">${r.col}</td>
       <td class="r2-val">${fmt3(r.r2)}</td>
       <td>${fmt1(a.avg)}</td>
-      <td>${fmt1(a.med)}</td>
       <td class="sel-val">${fmt1(s.avg)}</td>
-      <td class="sel-val">${fmt1(s.med)}</td>
       ${deltaCell}
     </tr>`;
   });
@@ -589,13 +598,11 @@ function fillStatTable(ranked, boxSel) {
 }
 
 function clearSelection() {
-  lastSelIds = null;
   ['js-trend', 'js-corr'].forEach(id => {
     const div = document.getElementById(id);
     if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
   });
-  document.getElementById('js-factor-card').style.display = 'none';
-  document.getElementById('js-stats-card').style.display = 'none';
+  document.getElementById('js-result-row').style.display = 'none';
 }
 </script>
 {% endblock %}
