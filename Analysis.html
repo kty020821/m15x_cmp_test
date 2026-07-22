@@ -13,37 +13,91 @@
     · 범례 항목      → views.py 의 LEGEND_OPTIONS
     · 상관변수 개수   → views.py 의 TOP_N
     · R² 표시 하한선  → 아래 R2_MIN
+    · Idle 표시 순서  → 아래 IDLE_ORDER
     · 실제 스펙값     → 아래 getSpecLines()
 ════════════════════════════════════════════════════════════
 #}
 
 {% block extra_css %}
 <style>
+/* ══════════════════════════════════════════════════
+   디자인 토큰 — 폰트 크기·굵기·모서리를 한 곳에서 관리
+   차트(Plotly) 쪽 CF 상수와 같은 값으로 맞춰둔다
+   ══════════════════════════════════════════════════ */
 :root {
   --an-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
              'Segoe UI Rounded', 'Segoe UI', 'Noto Sans KR', 'Malgun Gothic',
              'Helvetica Neue', sans-serif;
   --an-mono: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', 'Consolas', monospace;
+
+  --fs-xs:  11px;   /* 헤더 라벨 */
+  --fs-sm:  12px;   /* 표·목록 본문 */
+  --fs-md:  13px;   /* 입력 컨트롤 */
+  --fs-lg:  14px;   /* 카드 제목 */
+  --fs-xl:  20px;   /* 페이지 제목 */
+
+  --fw-mid:   600;
+  --fw-bold:  700;
+  --fw-heavy: 800;
+
+  --r-sm: 10px;
+  --r-md: 12px;
+  --r-lg: 16px;
 }
 
-.an-page { padding: 26px 30px 70px; display: flex; flex-direction: column; gap: 18px;
-  font-family: var(--an-font); }
-.an-title { font-size: 20px; font-weight: 800; color: var(--tx-1); letter-spacing: -0.02em; }
-.an-sub { font-size: 13px; color: var(--tx-2); margin-top: 4px; }
+/* 입력 요소는 폰트가 상속되지 않으므로 명시적으로 지정 */
+.an-page, .an-page input, .an-page select, .an-page button, .an-page table {
+  font-family: var(--an-font);
+}
+
+.an-page { padding: 26px 30px 70px; display: flex; flex-direction: column; gap: 18px; }
+.an-title { font-size: var(--fs-xl); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.02em; }
+.an-sub { font-size: var(--fs-md); font-weight: var(--fw-mid); color: var(--tx-2); margin-top: 4px; }
 
 /* ── 필터 ────────────────────────────────────────── */
-.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: 14px;
+.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r-lg);
   padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
-.filter-group { display: flex; flex-direction: column; gap: 6px; min-width: 165px; }
-.filter-label { font-size: 12px; font-weight: 700; color: var(--tx-muted); letter-spacing: .02em; }
-.filter-select { padding: 9px 12px; background: var(--bg-2); border: 1px solid var(--bd);
-  border-radius: 10px; color: var(--tx-1); font-size: 14px; outline: none; cursor: pointer;
-  font-family: var(--an-font); transition: border-color .15s; }
-.filter-select:focus { border-color: var(--accent); }
+.filter-group { display: flex; flex-direction: column; gap: 7px; min-width: 168px; }
+.filter-label { font-size: var(--fs-xs); font-weight: var(--fw-heavy); color: var(--tx-muted);
+  letter-spacing: .03em; }
+
+/* 드롭박스
+   appearance 를 지우지 않으면 OS 기본 각진 외형과 기본 폰트가 그대로 남는다.
+   기본 화살표도 함께 사라지므로 배경 SVG 로 직접 그린다. */
+.filter-select, .mini-select {
+  appearance: none; -webkit-appearance: none; -moz-appearance: none;
+  font-family: var(--an-font);
+  color: var(--tx-1);
+  background-color: var(--bg-2);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  border: 1px solid var(--bd);
+  cursor: pointer; outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.filter-select {
+  font-size: var(--fs-md); font-weight: var(--fw-mid);
+  padding: 10px 34px 10px 13px; border-radius: var(--r-md);
+  background-position: right 12px center; background-size: 12px;
+}
+.mini-select {
+  font-size: var(--fs-sm); font-weight: var(--fw-mid);
+  padding: 7px 28px 7px 11px; border-radius: var(--r-sm);
+  background-position: right 9px center; background-size: 11px;
+}
+.filter-select:hover, .mini-select:hover { border-color: var(--tx-muted); }
+.filter-select:focus, .mini-select:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10);
+}
 .filter-select:disabled { opacity: .4; cursor: not-allowed; }
-.btn-run { padding: 10px 30px; background: var(--accent); border: none; border-radius: 10px;
-  color: #000; font-size: 14px; font-weight: 800; cursor: pointer; font-family: var(--an-font);
-  transition: opacity .15s; }
+.filter-select option, .mini-select option {
+  font-family: var(--an-font); font-size: var(--fs-md);
+}
+
+.btn-run { padding: 11px 32px; background: var(--accent); border: none; border-radius: var(--r-md);
+  color: #000; font-size: var(--fs-md); font-weight: var(--fw-heavy);
+  cursor: pointer; transition: opacity .15s; }
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
 
@@ -51,66 +105,77 @@
 .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 @media (max-width: 1200px) { .chart-row { grid-template-columns: 1fr; } }
 
-.chart-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: 14px; padding: 18px; }
+.chart-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 18px; }
 .chart-head { display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
-.chart-title { font-size: 15px; font-weight: 800; color: var(--tx-1); letter-spacing: -0.01em; }
-.chart-title .r2badge { font-size: 13px; font-weight: 700; color: var(--accent);
-  margin-left: 10px; font-family: var(--an-mono); }
-.chart-ctrls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.mini-label { font-size: 12px; color: var(--tx-2); font-weight: 600; }
-.mini-select { padding: 6px 11px; background: var(--bg-2); border: 1px solid var(--bd);
-  border-radius: 9px; color: var(--tx-1); font-size: 13px; cursor: pointer; font-family: var(--an-font); }
+.chart-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.01em; }
+.chart-title .r2badge { font-size: var(--fs-sm); font-weight: var(--fw-bold);
+  color: var(--accent); margin-left: 10px; font-family: var(--an-mono); }
+.chart-ctrls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.mini-label { font-size: var(--fs-xs); color: var(--tx-2); font-weight: var(--fw-bold); }
 .plot-area { width: 100%; height: 430px; }
-.empty-hint { padding: 70px 20px; text-align: center; color: var(--tx-muted); font-size: 14px; }
+.empty-hint { padding: 70px 20px; text-align: center; color: var(--tx-muted);
+  font-size: var(--fs-md); font-weight: var(--fw-mid); }
 
-/* ══ 선택 결과: 요인분포 | 상관변수  나란히 ══════════ */
-.result-row { display: grid; grid-template-columns: minmax(300px, 0.85fr) 1.35fr; gap: 18px;
-  align-items: start; }
+/* ══ 선택 결과: 요인분포 | 상관변수 나란히 ═══════════ */
+.result-row { display: grid; grid-template-columns: minmax(300px, 0.85fr) 1.35fr;
+  gap: 18px; align-items: start; }
 @media (max-width: 1100px) { .result-row { grid-template-columns: 1fr; } }
 
-.res-card { background: var(--bg-3); border: 1px solid var(--bd); border-radius: 14px;
-  padding: 16px 18px; }
+.res-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 16px 18px; }
 .res-head { display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 12px; gap: 10px; }
-.res-title { font-size: 13px; font-weight: 800; color: var(--tx-1); letter-spacing: -0.01em; }
-.res-note { font-size: 11px; color: var(--tx-muted); font-weight: 600; }
-.res-cnt { font-size: 12px; color: var(--accent); font-weight: 700; }
-.btn-clear { padding: 5px 12px; background: var(--bg-2); border: 1px solid var(--bd);
-  border-radius: 8px; color: var(--tx-2); font-size: 11.5px; cursor: pointer;
-  font-family: var(--an-font); font-weight: 600; }
-.btn-clear:hover { color: var(--tx-1); }
+.res-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.01em; }
+.res-note { font-size: var(--fs-xs); color: var(--tx-muted); font-weight: var(--fw-bold);
+  font-family: var(--an-mono); margin-left: 6px; }
+.res-cnt { font-size: var(--fs-sm); color: var(--accent); font-weight: var(--fw-bold);
+  font-family: var(--an-mono); }
+.btn-clear { padding: 6px 13px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-sm); color: var(--tx-2); font-size: var(--fs-xs);
+  font-weight: var(--fw-bold); cursor: pointer; transition: color .15s, border-color .15s; }
+.btn-clear:hover { color: var(--tx-1); border-color: var(--tx-muted); }
 
-/* 요인 분포 — 3열 */
+/* 요인 분포 — 3열. 항목 타이포를 상관변수 표와 동일 규격으로 맞춤 */
 .factor-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
-.fcol { border-left: 1px solid rgba(128,128,128,0.12); padding: 0 10px; }
+.fcol { border-left: 1px solid rgba(128,128,128,0.12); padding: 0 11px; min-width: 0; }
 .fcol:first-child { border-left: none; padding-left: 0; }
-.fcol-head { font-size: 11px; font-weight: 800; color: var(--tx-muted);
-  letter-spacing: .02em; padding-bottom: 6px; margin-bottom: 5px;
+.fcol-head { font-size: var(--fs-xs); font-weight: var(--fw-bold); color: var(--tx-muted);
+  letter-spacing: .03em; padding-bottom: 7px; margin-bottom: 4px;
   border-bottom: 1.5px solid var(--bd); }
 .fitem { display: flex; justify-content: space-between; align-items: baseline;
-  gap: 8px; padding: 3px 0; font-size: 12px; }
-.fitem .k { color: var(--tx-1); overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; }
-.fitem .v { color: var(--tx-2); font-family: var(--an-mono); font-weight: 700;
-  font-size: 11.5px; flex-shrink: 0; }
-.fitem.dim { opacity: .5; }
+  gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(128,128,128,0.09); }
+.fitem:last-child { border-bottom: none; }
+/* ↓ 상관변수 표의 '변수' 셀과 동일 */
+.fitem .k { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--tx-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ↓ 상관변수 표의 숫자 셀과 동일 */
+.fitem .v { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--tx-2);
+  font-family: var(--an-mono); flex-shrink: 0; }
+.fitem.dim .k { font-weight: var(--fw-mid); color: var(--tx-muted); }
 
 /* 상관 변수 표 */
-.stat-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
-.stat-tbl th { text-align: right; padding: 6px 10px; color: var(--tx-muted);
-  font-weight: 700; border-bottom: 1.5px solid var(--bd); font-size: 11px; }
+.stat-tbl { width: 100%; border-collapse: collapse; }
+.stat-tbl th { text-align: right; padding: 7px 10px; color: var(--tx-muted);
+  font-size: var(--fs-xs); font-weight: var(--fw-bold); letter-spacing: .02em;
+  border-bottom: 1.5px solid var(--bd); }
 .stat-tbl th:first-child { text-align: left; }
 .stat-tbl td { text-align: right; padding: 5px 10px; color: var(--tx-1);
-  font-family: var(--an-mono); border-bottom: 1px solid rgba(128,128,128,0.09); }
-.stat-tbl td:first-child { text-align: left; font-weight: 700; font-family: var(--an-font);
+  font-size: var(--fs-sm); font-weight: var(--fw-bold); font-family: var(--an-mono);
+  border-bottom: 1px solid rgba(128,128,128,0.09); }
+.stat-tbl td:first-child { text-align: left; font-family: var(--an-font);
   max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat-tbl tr:last-child td { border-bottom: none; }
 .stat-tbl tr:hover td { background: var(--bg-2); }
-.stat-tbl .sel-val    { color: #16a34a; font-weight: 700; }
-.stat-tbl .r2-val     { color: #0ea5e9; font-weight: 700; }
-.stat-tbl .delta-up   { color: #dc2626; font-weight: 700; }
-.stat-tbl .delta-down { color: #2563eb; font-weight: 700; }
-.stat-empty { padding: 26px 10px; text-align: center; color: var(--tx-muted); font-size: 12px; }
+.stat-tbl .sel-val    { color: #16a34a; }
+.stat-tbl .r2-val     { color: #0ea5e9; }
+.stat-tbl .delta-up   { color: #dc2626; }
+.stat-tbl .delta-down { color: #2563eb; }
+.stat-empty { padding: 26px 10px; text-align: center; color: var(--tx-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-mid); }
 </style>
 {% endblock %}
 
@@ -174,7 +239,7 @@
     </div>
   </div>
 
-  <!-- 선택 결과: 요인분포 | 상관변수 -->
+  <!-- 선택 결과 -->
   <div class="result-row" id="js-result-row" style="display:none;">
     <div class="res-card">
       <div class="res-head">
@@ -186,9 +251,7 @@
 
     <div class="res-card">
       <div class="res-head">
-        <span class="res-title">주요 상관 변수
-          <span class="res-note" id="js-r2-note"></span>
-        </span>
+        <span class="res-title">주요 상관 변수<span class="res-note" id="js-r2-note"></span></span>
         <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
       </div>
       <table class="stat-tbl">
@@ -216,12 +279,25 @@ const API_STATS     = "{% url 'analysis-stats' %}";
 const API_CORR_RANK = "{% url 'analysis-corr-rank' %}";
 const API_BOX_SEL   = "{% url 'analysis-box-sel' %}";
 
+/* ══════════════════════════════════════════════════
+   차트 타이포 — 위 CSS 토큰과 같은 값
+   ══════════════════════════════════════════════════ */
 const AN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
+const CF = {
+  title:     {family: AN_FONT, size: 14, color: '#2a2a2a'},   /* .chart-title */
+  axisTitle: {family: AN_FONT, size: 12, color: '#555'},
+  tick:      {family: AN_FONT, size: 11, color: '#666'},
+  legend:    {family: AN_FONT, size: 11, color: '#555'},
+  hover:     {family: AN_FONT, size: 12, color: '#333'},
+};
 
 /* ★ R² 표시 하한선 — 이 값 미만인 변수는 표에서 제외 */
 const R2_MIN = 0.2;
 
-/* 요인 분포에서 열당 최대 표시 개수 */
+/* ★ Idle 표시 순서 (목록에 없는 값은 뒤에 건수순으로) */
+const IDLE_ORDER = ['Normal', 'idle_1', 'idle_2', 'idle_3', 'idle_4', 'layer_change'];
+
+/* 요인 분포 열당 최대 표시 개수 */
 const FACTOR_MAX = 8;
 
 let trendData    = [];
@@ -239,11 +315,15 @@ const selCorrY  = document.getElementById('sel-corr-y');
 const btnRun    = document.getElementById('btn-run');
 
 /* ── 숫자 포맷 ─────────────────────────────────── */
-function fmt1(v) {   // 통계치: 소수점 1자리
+function fmt1(v) {   // 통계치
   if (v === null || v === undefined || isNaN(v)) return '-';
   return Number(v).toFixed(1);
 }
-function fmt3(v) {   // R²: 1자리로는 변별이 안 되어 3자리 유지
+function fmt2(v) {   // 회귀 계수
+  if (v === null || v === undefined || isNaN(v)) return '-';
+  return Number(v).toFixed(2);
+}
+function fmt3(v) {   // R² (1자리로는 변별이 안 되어 3자리 유지)
   if (v === null || v === undefined || isNaN(v)) return '-';
   return Number(v).toFixed(3);
 }
@@ -313,7 +393,6 @@ selOper.addEventListener('change', async () => {
 
 selParam.addEventListener('change', () => { btnRun.disabled = !selParam.value; });
 
-/* 범례를 바꾸면 두 차트 모두 다시 그린다 */
 function onLegendChange() {
   drawTrend();
   drawCorr();
@@ -351,24 +430,22 @@ async function runQuery() {
 /* ── 차트 공통 ─────────────────────────────────── */
 function baseLayout(xTitle, yTitle, titleText) {
   return {
-    title: { text: titleText,
-      font: {family: AN_FONT, size: 15, color: '#2a2a2a'},
-      x: 0.5, xanchor: 'center', y: 0.98, yanchor: 'top' },
+    title: { text: `<b>${titleText}</b>`, font: CF.title,
+             x: 0.5, xanchor: 'center', y: 0.98, yanchor: 'top' },
     paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-    font: {family: AN_FONT, color: '#555', size: 13},
+    font: {family: AN_FONT, color: '#555', size: 12},
     margin: {l: 62, r: 20, t: 52, b: 58},
-    xaxis: {title: {text: xTitle, font: {size: 13, color: '#555'}},
+    xaxis: {title: {text: xTitle, font: CF.axisTitle}, tickfont: CF.tick,
       gridcolor: 'rgba(0,0,0,0.07)', griddash: 'dot', zeroline: false,
-      linecolor: 'rgba(0,0,0,0.15)', tickfont: {size: 12}},
-    yaxis: {title: {text: yTitle, font: {size: 13, color: '#555'}},
+      linecolor: 'rgba(0,0,0,0.15)'},
+    yaxis: {title: {text: yTitle, font: CF.axisTitle}, tickfont: CF.tick,
       gridcolor: 'rgba(0,0,0,0.07)', griddash: 'dot', zeroline: false,
-      linecolor: 'rgba(0,0,0,0.15)', tickfont: {size: 12}},
+      linecolor: 'rgba(0,0,0,0.15)'},
     dragmode: 'select', hovermode: 'closest',
     // 값이 한 종류뿐이면 트레이스가 1개인데, Plotly 는 그때 범례를 자동으로 숨긴다
     showlegend: true,
-    legend: {orientation: 'h', x: 0.5, xanchor: 'center', y: -0.2, font: {size: 11}},
-    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
-      font: {family: AN_FONT, size: 12, color: '#333'}},
+    legend: {orientation: 'h', x: 0.5, xanchor: 'center', y: -0.2, font: CF.legend},
+    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd', font: CF.hover},
   };
 }
 
@@ -393,18 +470,38 @@ function groupByLegend(data, legendCol, xKey, yKey) {
   return groups;
 }
 
+/* IDLE 범례는 Normal → idle_1..4 순으로 */
+function orderedLegendKeys(legendCol, groups) {
+  const keys = Object.keys(groups);
+  if (legendCol !== 'IDLE') return keys.sort();
+  return keys.sort((a, b) => {
+    const ia = IDLE_ORDER.indexOf(a), ib = IDLE_ORDER.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+function markerTrace(name, g) {
+  return {
+    x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
+    mode: 'markers', type: 'scattergl',
+    marker: {size: 9, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.22)'}},
+  };
+}
+
 /* ── Trend ─────────────────────────────────────── */
 function drawTrend() {
   if (!trendData.length) return;
   const legendCol = selLegend.value;
   const groups = groupByLegend(trendData, legendCol, 'date', 'val');
 
-  const traces = Object.entries(groups).map(([name, g]) => ({
-    x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
-    mode: 'markers', type: 'scattergl',
-    marker: {size: 9, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.22)'}},
-    hovertemplate: '%{text}<br><b>%{y:.2f}</b><extra></extra>',
-  }));
+  const traces = orderedLegendKeys(legendCol, groups).map(name => {
+    const t = markerTrace(name, groups[name]);
+    t.hovertemplate = '%{text}<br><b>%{y:.2f}</b><extra></extra>';
+    return t;
+  });
 
   const title  = `${selTech.value} · ${selLot.value} · ${currentParam}`;
   const layout = baseLayout('DATE', currentParam, title);
@@ -432,7 +529,7 @@ async function drawCorr() {
   if (error) { alert('오류: ' + error); return; }
 
   document.getElementById('js-corr-r2').textContent =
-    (r2 !== null && r2 !== undefined) ? `R² = ${r2}` : '';
+    (r2 !== null && r2 !== undefined) ? `R² = ${fmt3(r2)}` : '';
 
   if (!data || !data.length) {
     document.getElementById('js-corr').innerHTML = '<div class="empty-hint">데이터 없음</div>';
@@ -442,33 +539,33 @@ async function drawCorr() {
   const legendCol = selLegend.value;
   const groups = groupByLegend(data, legendCol, 'x', 'y');
 
-  const traces = Object.entries(groups).map(([name, g]) => ({
-    x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
-    mode: 'markers', type: 'scattergl',
-    marker: {size: 9, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.22)'}},
-    hovertemplate: `%{text}<br>${xc}: %{x:.2f}<br>${yc}: %{y:.2f}<extra></extra>`,
-  }));
+  const traces = orderedLegendKeys(legendCol, groups).map(name => {
+    const t = markerTrace(name, groups[name]);
+    t.hovertemplate = `%{text}<br>${xc}: %{x:.2f}<br>${yc}: %{y:.2f}<extra></extra>`;
+    return t;
+  });
 
   const layout = baseLayout(xc, yc, `${xc} vs ${yc}`);
 
   if (trend) {
-    // SVG scatter 는 WebGL(scattergl) 산점도 위에 그려진다
+    // 추세선은 SVG scatter 라 WebGL 산점도보다 위 레이어에 그려진다
     traces.push({
       x: trend.x, y: trend.y, mode: 'lines', type: 'scatter',
-      name: '추세선', line: {color: '#ef4444', width: 2.4},
+      name: '추세선',
+      line: {color: '#ef4444', width: 2.2, dash: 'dash'},
       hoverinfo: 'skip', showlegend: true,
     });
 
-    // 추세선 끝에 1차식 표기
+    // 추세선 끝에 1차식 (소수점 2자리)
     const sign = trend.intercept >= 0 ? '+' : '−';
-    const eq   = `y = ${trend.slope} x ${sign} ${Math.abs(trend.intercept)}`;
+    const eq   = `y = ${fmt2(trend.slope)}x ${sign} ${fmt2(Math.abs(trend.intercept))}`;
     layout.annotations = (layout.annotations || []).concat([{
       x: trend.x[1], y: trend.y[1], xref: 'x', yref: 'y',
-      text: eq, showarrow: false,
+      text: `<b>${eq}</b>`, showarrow: false,
       xanchor: 'right', yanchor: trend.slope >= 0 ? 'top' : 'bottom',
       xshift: -4, yshift: trend.slope >= 0 ? -6 : 6,
-      font: {family: AN_FONT, size: 12, color: '#ef4444'},
-      bgcolor: 'rgba(255,255,255,0.82)', borderpad: 3,
+      font: {family: AN_FONT, size: 11, color: '#ef4444'},
+      bgcolor: 'rgba(255,255,255,0.85)', borderpad: 3,
     }]);
   }
 
@@ -511,13 +608,13 @@ function addSpecShapes(layout, vals) {
     layout.shapes.push({
       type:'line', xref:'paper', yref:'y', x0:0, x1:1, y0:val, y1:val,
       line:{color:st.color, width:1.6, dash:st.dash},
-      layer:'above',                      // ← 산점도에 가려지지 않게
+      layer:'above',                      // 산점도에 가려지지 않게
     });
     layout.annotations.push({
       xref:'paper', yref:'y', x:1, xanchor:'right', y:val, yanchor:'bottom',
-      text:`${st.label} ${val.toFixed(1)}`, showarrow:false,
-      font:{size:11, color:st.color},
-      bgcolor:'rgba(255,255,255,0.8)', borderpad:2,
+      text:`<b>${st.label} ${fmt1(val)}</b>`, showarrow:false,
+      font:{family: AN_FONT, size:11, color:st.color},
+      bgcolor:'rgba(255,255,255,0.85)', borderpad:2,
     });
   });
 }
@@ -528,14 +625,13 @@ async function onSelected(ids) {
   if (distRes.error) { console.error(distRes.error); return; }
 
   document.getElementById('js-result-row').style.display = 'grid';
-  document.getElementById('js-stats-count').textContent = `${distRes.count}개 웨이퍼`;
+  document.getElementById('js-stats-count').textContent = `${distRes.count} wf`;
   document.getElementById('js-dist').innerHTML = [
-    factorCol('Idle',      distRes.idle_dist),
+    factorCol('Idle',      sortIdleRows(distRes.idle_dist)),
     factorCol('직전 공정', distRes.layer_dist),
     factorCol('장비',      distRes.eqp_dist),
   ].join('');
 
-  // R² 하한선 이상만
   const shown = topRanked.filter(r => r.r2 !== null && r.r2 >= R2_MIN);
   document.getElementById('js-r2-note').textContent = `R² ≥ ${R2_MIN}`;
 
@@ -556,7 +652,18 @@ async function onSelected(ids) {
   fillStatTable(shown, boxRes.box_sel || {});
 }
 
-/* 요인 분포 한 열 (세로 목록) */
+/* Idle 분포를 IDLE_ORDER 순으로 */
+function sortIdleRows(rows) {
+  return [...(rows || [])].sort((a, b) => {
+    const ia = IDLE_ORDER.indexOf(a.key), ib = IDLE_ORDER.indexOf(b.key);
+    if (ia === -1 && ib === -1) return b.count - a.count;
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+/* 요인 분포 한 열 */
 function factorCol(title, rows) {
   const list = rows || [];
   let items = list.slice(0, FACTOR_MAX).map(r =>
@@ -570,14 +677,13 @@ function factorCol(title, rows) {
   return `<div class="fcol"><div class="fcol-head">${title}</div>${items}</div>`;
 }
 
-/* 상관 변수 표 (숫자만 · 소수점 1자리) */
+/* 상관 변수 표 */
 function fillStatTable(ranked, boxSel) {
   let body = '';
   ranked.forEach(r => {
     const a = r.box_all || {};
     const s = boxSel[r.col] || {};
 
-    // 선택 영역이 전체 평균 대비 얼마나 벗어났는지
     let deltaCell = '<td>-</td>';
     if (a.avg !== null && a.avg !== undefined && s.avg !== null && s.avg !== undefined) {
       const d   = s.avg - a.avg;
