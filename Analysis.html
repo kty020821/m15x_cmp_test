@@ -1,14 +1,24 @@
-async function postJSON(url, payload) {
-  const res = await fetch(url, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    let msg = `API 오류 ${res.status}`;
-    try { const j = await res.json(); if (j.error) msg += `\n\n${j.error}`; } catch (e) {}
-    alert(msg);
-    console.error(msg);
-    return {};
-  }
-  return res.json();
+# PG 숫자 타입 (정확 일치로 판정 — 부분문자열 매칭은 오탐 발생)
+NUMERIC_TYPES = {
+    'smallint', 'integer', 'bigint',
+    'decimal', 'numeric', 'real', 'double precision',
 }
+
+
+def _fetch_numeric_cols(table):
+    """테이블의 숫자형 측정값 컬럼 목록"""
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_name = %s ORDER BY ordinal_position
+        """, [table])
+        rows = cur.fetchall()
+
+    out = []
+    for name, dtype in rows:
+        up = name.upper()
+        if up in META_COLS:
+            continue
+        if dtype.lower() in NUMERIC_TYPES:
+            out.append(up)
+    return out
