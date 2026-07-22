@@ -1,47 +1,30 @@
-@csrf_exempt
-def analysis_corr_rank(request):
-    """트렌드 param 기준 R² 상위 5개 + 각 변수의 전체 분포"""
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
+def _f(v):
+    return round(float(v), 3) if v is not None else None
 
-    body    = json.loads(request.body)
-    oper_id = body.get('oper_id')
-    lot_cd  = body.get('lot_cd')
-    base    = body.get('base_col')
-    table   = _an_table(oper_id)
 
-    if not base or not re.match(r'^[0-9A-Za-z_]+$', base):
-        return JsonResponse({'error': '잘못된 base_col'}, status=400)
+def _box_stats_sql(cols, from_where):
+    """지정 컬럼들의 min/q1/median/q3/max/avg 를 한 번에 계산하는 SQL 생성"""
+    parts = []
+    for c in cols:
+        parts += [
+            f'MIN("{c}")',
+            f'PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY "{c}")',
+            f'PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY "{c}")',
+            f'PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "{c}")',
+            f'MAX("{c}")',
+            f'AVG("{c}")',
+        ]
+    return f'SELECT {", ".join(parts)} FROM {from_where}'
 
-    try:
-        num_cols = [c for c in _fetch_numeric_cols(table) if c != base]
-        if not num_cols:
-            return JsonResponse({'base': base, 'ranked': []})
 
-        corr_parts = [f'CORR("{base}", "{c}")' for c in num_cols]
-        with connections['analysis_db'].cursor() as cur:
-            cur.execute(
-                f'SELECT {", ".join(corr_parts)} FROM {table} WHERE "LOT_CD" = %s',
-                [lot_cd])
-            crow = cur.fetchone()
-
-        r2 = []
-        for i, c in enumerate(num_cols):
-            v = crow[i]
-            if v is not None:
-                r2.append((c, round(v * v, 4)))
-        r2.sort(key=lambda x: x[1], reverse=True)
-        top5     = r2[:5]
-        top_cols = [c for c, _ in top5]
-
-        box_all = {}
-        if top_cols:
-            sql = _box_stats_sql(top_cols, f'{table} WHERE "LOT_CD" = %s')
-            with connections['analysis_db'].cursor() as cur:
-                cur.execute(sql, [lot_cd])
-                box_all = _unpack_box(cur.fetchone(), top_cols)
-
-        ranked = [{'col': c, 'r2': v, 'box_all': box_all.get(c)} for c, v in top5]
-        return JsonResponse({'base': base, 'ranked': ranked})
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+def _unpack_box(row, cols):
+    """_box_stats_sql 결과 한 행을 컬럼별 dict 로 분해"""
+    out, j = {}, 0
+    for c in cols:
+        out[c] = {
+            'min': _f(row[j]),     'q1':  _f(row[j + 1]),
+            'med': _f(row[j + 2]), 'q3':  _f(row[j + 3]),
+            'max': _f(row[j + 4]), 'avg': _f(row[j + 5]),
+        }
+        j += 6
+    return out
