@@ -1,30 +1,27 @@
-def _f(v):
-    return round(float(v), 3) if v is not None else None
+@csrf_exempt
+def analysis_box_selected(request):
+    """드래그로 선택한 영역의 박스플롯 통계"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
 
+    body    = json.loads(request.body)
+    oper_id = body.get('oper_id')
+    ids     = body.get('ids', [])
+    cols    = [c for c in body.get('cols', []) if re.match(r'^[0-9A-Za-z_]+$', c)]
+    table   = _an_table(oper_id)
 
-def _box_stats_sql(cols, from_where):
-    """지정 컬럼들의 min/q1/median/q3/max/avg 를 한 번에 계산하는 SQL 생성"""
-    parts = []
-    for c in cols:
-        parts += [
-            f'MIN("{c}")',
-            f'PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY "{c}")',
-            f'PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY "{c}")',
-            f'PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "{c}")',
-            f'MAX("{c}")',
-            f'AVG("{c}")',
-        ]
-    return f'SELECT {", ".join(parts)} FROM {from_where}'
+    if not ids or not cols:
+        return JsonResponse({'count': 0, 'box_sel': {}})
 
+    try:
+        ph  = ",".join(["%s"] * len(ids))
+        sql = _box_stats_sql(cols, f'{table} WHERE id IN ({ph})')
+        with connections['analysis_db'].cursor() as cur:
+            cur.execute(sql, ids)
+            box_sel = _unpack_box(cur.fetchone(), cols)
+            cur.execute(f'SELECT COUNT(*) FROM {table} WHERE id IN ({ph})', ids)
+            count = cur.fetchone()[0]
 
-def _unpack_box(row, cols):
-    """_box_stats_sql 결과 한 행을 컬럼별 dict 로 분해"""
-    out, j = {}, 0
-    for c in cols:
-        out[c] = {
-            'min': _f(row[j]),     'q1':  _f(row[j + 1]),
-            'med': _f(row[j + 2]), 'q3':  _f(row[j + 3]),
-            'max': _f(row[j + 4]), 'avg': _f(row[j + 5]),
-        }
-        j += 6
-    return out
+        return JsonResponse({'count': count, 'box_sel': box_sel})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
