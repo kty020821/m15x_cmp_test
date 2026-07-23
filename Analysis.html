@@ -6,13 +6,19 @@
 ════════════════════════════════════════════════════════════
   산포 분석 페이지
 
+  화면 흐름
+    STEP 1  대상 선택      공정·파라미터 검색 후 조회
+    STEP 2  구간 지정      트렌드에서 문제 영역 드래그
+    STEP 3  원인 분석      요인 편중 · 소모품 수명 · AI 해석
+
   [주의] 이 파일 안에 인자 없는 url 태그를 쓰지 말 것
          (주석 안이라도 Django 가 파싱해서 TemplateSyntaxError)
 
   [수정 지점]
-    · 범례 항목      → views.py 의 LEGEND_OPTIONS
-    · 상관변수 개수   → views.py 의 TOP_N
-    · R² 표시 하한선  → 아래 R2_MIN
+    · 범례 항목       → views.py 의 LEGEND_OPTIONS
+    · 요인 분포 항목   → views.py 의 FACTOR_COLS
+    · Part 수명 컬럼  → views.py 의 PART_LIFE_COLS
+    · LLM 연결        → views.py 의 _call_company_llm()
     · Idle 표시 순서  → 아래 IDLE_ORDER
     · 실제 스펙값     → 아래 getSpecLines()
 ════════════════════════════════════════════════════════════
@@ -21,8 +27,7 @@
 {% block extra_css %}
 <style>
 /* ══════════════════════════════════════════════════
-   디자인 토큰 — 폰트 크기·굵기·모서리를 한 곳에서 관리
-   차트(Plotly) 쪽 CF 상수와 같은 값으로 맞춰둔다
+   디자인 토큰 — 차트(JS 의 CF 상수)와 같은 값으로 유지
    ══════════════════════════════════════════════════ */
 :root {
   --an-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
@@ -30,11 +35,11 @@
              'Helvetica Neue', sans-serif;
   --an-mono: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', 'Consolas', monospace;
 
-  --fs-xs:  11px;   /* 헤더 라벨 */
-  --fs-sm:  12px;   /* 표·목록 본문 */
-  --fs-md:  13px;   /* 입력 컨트롤 */
-  --fs-lg:  14px;   /* 카드 제목 */
-  --fs-xl:  20px;   /* 페이지 제목 */
+  --fs-xs:  11px;
+  --fs-sm:  12px;
+  --fs-md:  13px;
+  --fs-lg:  14px;
+  --fs-xl:  20px;
 
   --fw-mid:   600;
   --fw-bold:  700;
@@ -43,57 +48,110 @@
   --r-sm: 10px;
   --r-md: 12px;
   --r-lg: 16px;
+
+  --ok:   #16a34a;
+  --warn: #dc2626;
+  --info: #0ea5e9;
 }
 
-/* 입력 요소는 폰트가 상속되지 않으므로 명시적으로 지정 */
 .an-page, .an-page input, .an-page select, .an-page button, .an-page table {
   font-family: var(--an-font);
 }
 
-.an-page { padding: 26px 30px 70px; display: flex; flex-direction: column; gap: 18px; }
+.an-page { padding: 26px 30px 80px; display: flex; flex-direction: column; gap: 6px; }
 .an-title { font-size: var(--fs-xl); font-weight: var(--fw-heavy); color: var(--tx-1);
   letter-spacing: -0.02em; }
-.an-sub { font-size: var(--fs-md); font-weight: var(--fw-mid); color: var(--tx-2); margin-top: 4px; }
+.an-sub { font-size: var(--fs-md); font-weight: var(--fw-mid); color: var(--tx-2);
+  margin: 4px 0 16px; }
+
+/* ══ 단계 ═══════════════════════════════════════════ */
+.step { position: relative; padding-left: 34px; padding-bottom: 22px; }
+.step:last-child { padding-bottom: 0; }
+/* 단계를 잇는 세로선 */
+.step::before { content: ''; position: absolute; left: 11px; top: 26px; bottom: 0;
+  width: 2px; background: var(--bd); }
+.step:last-child::before { display: none; }
+
+.step-num { position: absolute; left: 0; top: 0; width: 24px; height: 24px;
+  border-radius: 50%; display: grid; place-items: center;
+  font-size: var(--fs-xs); font-weight: var(--fw-heavy);
+  background: var(--bg-2); color: var(--tx-muted); border: 1px solid var(--bd);
+  transition: background .2s, color .2s, border-color .2s; }
+.step-head { display: flex; align-items: center; gap: 10px; min-height: 24px;
+  margin-bottom: 11px; flex-wrap: wrap; }
+.step-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.01em; }
+.step-desc { font-size: var(--fs-xs); font-weight: var(--fw-mid); color: var(--tx-muted); }
+.step-body { transition: opacity .2s; }
+
+.step[data-state="locked"] .step-body { opacity: .38; pointer-events: none;
+  filter: saturate(.35); }
+.step[data-state="active"] .step-num { background: var(--accent); color: #000;
+  border-color: transparent; }
+.step[data-state="done"]   .step-num { background: rgba(22,163,74,.14); color: var(--ok);
+  border-color: rgba(22,163,74,.38); }
+.step[data-state="done"]::before { background: rgba(22,163,74,.28); }
 
 /* ── 필터 ────────────────────────────────────────── */
 .filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r-lg);
   padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
-.filter-group { display: flex; flex-direction: column; gap: 7px; min-width: 168px; }
+.filter-group { display: flex; flex-direction: column; gap: 7px; min-width: 178px; }
 .filter-label { font-size: var(--fs-xs); font-weight: var(--fw-heavy); color: var(--tx-muted);
   letter-spacing: .03em; }
 
-/* 드롭박스
-   appearance 를 지우지 않으면 OS 기본 각진 외형과 기본 폰트가 그대로 남는다.
-   기본 화살표도 함께 사라지므로 배경 SVG 로 직접 그린다. */
+/* appearance 를 지우지 않으면 OS 기본 각진 외형이 남는다 */
 .filter-select, .mini-select {
   appearance: none; -webkit-appearance: none; -moz-appearance: none;
-  font-family: var(--an-font);
-  color: var(--tx-1);
-  background-color: var(--bg-2);
+  font-family: var(--an-font); color: var(--tx-1); background-color: var(--bg-2);
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat;
-  border: 1px solid var(--bd);
-  cursor: pointer; outline: none;
-  transition: border-color .15s, box-shadow .15s;
+  background-repeat: no-repeat; border: 1px solid var(--bd);
+  cursor: pointer; outline: none; transition: border-color .15s, box-shadow .15s;
 }
-.filter-select {
-  font-size: var(--fs-md); font-weight: var(--fw-mid);
+.filter-select { font-size: var(--fs-md); font-weight: var(--fw-mid);
   padding: 10px 34px 10px 13px; border-radius: var(--r-md);
-  background-position: right 12px center; background-size: 12px;
-}
-.mini-select {
-  font-size: var(--fs-sm); font-weight: var(--fw-mid);
+  background-position: right 12px center; background-size: 12px; }
+.mini-select { font-size: var(--fs-sm); font-weight: var(--fw-mid);
   padding: 7px 28px 7px 11px; border-radius: var(--r-sm);
-  background-position: right 9px center; background-size: 11px;
-}
+  background-position: right 9px center; background-size: 11px; }
 .filter-select:hover, .mini-select:hover { border-color: var(--tx-muted); }
 .filter-select:focus, .mini-select:focus {
-  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10);
-}
+  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
 .filter-select:disabled { opacity: .4; cursor: not-allowed; }
-.filter-select option, .mini-select option {
-  font-family: var(--an-font); font-size: var(--fs-md);
+.filter-select option, .mini-select option { font-family: var(--an-font); font-size: var(--fs-md); }
+
+/* ── 검색형 드롭박스 ─────────────────────────────── */
+.ss { position: relative; }
+.ss-input {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--an-font); font-size: var(--fs-md); font-weight: var(--fw-mid);
+  color: var(--tx-1); background-color: var(--bg-2);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 12px;
+  border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 10px 34px 10px 13px; outline: none; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
 }
+.ss-input::placeholder { color: var(--tx-muted); font-weight: var(--fw-mid); }
+.ss-input:hover:not(:disabled) { border-color: var(--tx-muted); }
+.ss-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
+.ss-input:disabled { opacity: .4; cursor: not-allowed; }
+.ss.mini .ss-input { font-size: var(--fs-sm); padding: 7px 26px 7px 11px;
+  border-radius: var(--r-sm); background-position: right 9px center; background-size: 11px; }
+
+.ss-panel { position: absolute; z-index: 40; top: calc(100% + 5px); left: 0; right: 0;
+  background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r-md);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.14); padding: 5px; max-height: 268px;
+  overflow-y: auto; display: none; }
+.ss-panel.open { display: block; }
+.ss-opt { padding: 7px 11px; border-radius: 8px; cursor: pointer;
+  font-size: var(--fs-sm); font-weight: var(--fw-mid); color: var(--tx-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ss-opt:hover, .ss-opt.active { background: var(--bg-2); }
+.ss-opt.chosen { font-weight: var(--fw-bold); color: var(--accent); }
+.ss-opt mark { background: rgba(255, 210, 60, 0.35); color: inherit;
+  border-radius: 3px; padding: 0 1px; }
+.ss-none { padding: 12px 11px; text-align: center; color: var(--tx-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-mid); }
 
 .btn-run { padding: 11px 32px; background: var(--accent); border: none; border-radius: var(--r-md);
   color: #000; font-size: var(--fs-md); font-weight: var(--fw-heavy);
@@ -116,12 +174,14 @@
 .chart-ctrls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .mini-label { font-size: var(--fs-xs); color: var(--tx-2); font-weight: var(--fw-bold); }
 .plot-area { width: 100%; height: 430px; }
-.empty-hint { padding: 70px 20px; text-align: center; color: var(--tx-muted);
-  font-size: var(--fs-md); font-weight: var(--fw-mid); }
+/* 빈 상태는 문구 없이 옅은 자리만 */
+.plot-area:empty { border-radius: var(--r-md);
+  background: repeating-linear-gradient(45deg,
+    rgba(128,128,128,0.035) 0 10px, transparent 10px 20px); }
 
-/* ══ 선택 결과: 요인분포 | 상관변수 나란히 ═══════════ */
-.result-row { display: grid; grid-template-columns: minmax(340px, 1.05fr) 1fr;
-  gap: 18px; align-items: start; }
+/* ══ 결과: 요인 편중 | 소모품 수명 ═══════════════════ */
+.result-row { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1fr);
+  gap: 18px; align-items: start; margin-bottom: 18px; }
 @media (max-width: 1100px) { .result-row { grid-template-columns: 1fr; } }
 
 .res-card { background: var(--bg-3); border: 1px solid var(--bd);
@@ -131,7 +191,7 @@
 .res-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
   letter-spacing: -0.01em; }
 .res-note { font-size: var(--fs-xs); color: var(--tx-muted); font-weight: var(--fw-bold);
-  font-family: var(--an-mono); margin-left: 6px; }
+  margin-left: 6px; }
 .res-cnt { font-size: var(--fs-sm); color: var(--accent); font-weight: var(--fw-bold);
   font-family: var(--an-mono); }
 .btn-clear { padding: 6px 13px; background: var(--bg-2); border: 1px solid var(--bd);
@@ -139,9 +199,8 @@
   font-weight: var(--fw-bold); cursor: pointer; transition: color .15s, border-color .15s; }
 .btn-clear:hover { color: var(--tx-1); border-color: var(--tx-muted); }
 
-/* 요인 분포 — 3열. 항목 타이포를 상관변수 표와 동일 규격으로 맞춤 */
-.factor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
-  gap: 0 0; }
+/* 요인 분포 */
+.factor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 0; }
 .fcol { border-left: 1px solid rgba(128,128,128,0.12); padding: 0 11px; min-width: 0; }
 .fcol:first-child { border-left: none; padding-left: 0; }
 .fcol-head { font-size: var(--fs-xs); font-weight: var(--fw-bold); color: var(--tx-muted);
@@ -150,33 +209,70 @@
 .fitem { display: flex; justify-content: space-between; align-items: baseline;
   gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(128,128,128,0.09); }
 .fitem:last-child { border-bottom: none; }
-/* ↓ 상관변수 표의 '변수' 셀과 동일 */
 .fitem .k { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--tx-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* ↓ 상관변수 표의 숫자 셀과 동일 */
 .fitem .v { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--tx-2);
   font-family: var(--an-mono); flex-shrink: 0; }
 .fitem.dim .k { font-weight: var(--fw-mid); color: var(--tx-muted); }
+/* 전체 대비 몰려 있는 항목 */
+.fitem.hot .k { color: var(--warn); }
+.fitem.hot .v { color: var(--warn); }
+.lift-tag { font-size: 10px; font-weight: var(--fw-heavy); color: var(--warn);
+  background: rgba(220,38,38,.12); border-radius: 20px; padding: 1px 5px;
+  margin-left: 4px; font-family: var(--an-mono); }
 
-/* 상관 변수 표 */
-.stat-tbl { width: 100%; border-collapse: collapse; }
-.stat-tbl th { text-align: right; padding: 7px 10px; color: var(--tx-muted);
-  font-size: var(--fs-xs); font-weight: var(--fw-bold); letter-spacing: .02em;
-  border-bottom: 1.5px solid var(--bd); }
-.stat-tbl th:first-child { text-align: left; }
-.stat-tbl td { text-align: right; padding: 5px 10px; color: var(--tx-1);
-  font-size: var(--fs-sm); font-weight: var(--fw-bold); font-family: var(--an-mono);
-  border-bottom: 1px solid rgba(128,128,128,0.09); }
-.stat-tbl td:first-child { text-align: left; font-family: var(--an-font);
-  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stat-tbl tr:last-child td { border-bottom: none; }
-.stat-tbl tr:hover td { background: var(--bg-2); }
-.stat-tbl .sel-val    { color: #16a34a; }
-.stat-tbl .r2-val     { color: #0ea5e9; }
-.stat-tbl .delta-up   { color: #dc2626; }
-.stat-tbl .delta-down { color: #2563eb; }
-.stat-empty { padding: 26px 10px; text-align: center; color: var(--tx-muted);
-  font-size: var(--fs-sm); font-weight: var(--fw-mid); }
+/* 소모품 수명 */
+.pl-item { padding: 11px 0; border-bottom: 1px solid rgba(128,128,128,0.10); }
+.pl-item:last-child { border-bottom: none; }
+.pl-item:first-child { padding-top: 2px; }
+.pl-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.pl-name { font-size: var(--fs-sm); font-weight: var(--fw-heavy); color: var(--tx-1);
+  min-width: 42px; }
+.pl-phase { font-size: var(--fs-xs); font-weight: var(--fw-heavy); padding: 2px 8px;
+  border-radius: 20px; letter-spacing: .02em; }
+.pl-phase.p-early { background: rgba(37,99,235,0.13); color: #2563eb; }
+.pl-phase.p-mid   { background: rgba(22,163,74,0.13); color: var(--ok); }
+.pl-phase.p-late  { background: rgba(220,38,38,0.13); color: var(--warn); }
+.pl-val { margin-left: auto; font-family: var(--an-mono); font-size: var(--fs-sm);
+  font-weight: var(--fw-bold); color: var(--tx-1); }
+.pl-val .sub { color: var(--tx-muted); font-weight: var(--fw-mid); font-size: var(--fs-xs); }
+.pl-track { position: relative; height: 22px; border-radius: 7px;
+  background: var(--bg-2); border: 1px solid var(--bd); overflow: hidden; }
+.pl-track::before, .pl-track::after { content: ''; position: absolute; top: 0; bottom: 0;
+  width: 1px; background: rgba(128,128,128,0.28); }
+.pl-track::before { left: 33.33%; }
+.pl-track::after  { left: 66.66%; }
+.pl-band { position: absolute; top: 0; bottom: 0; background: rgba(34,197,94,0.26);
+  border-left: 1px solid rgba(22,163,74,0.5); border-right: 1px solid rgba(22,163,74,0.5);
+  min-width: 2px; }
+.pl-mark { position: absolute; top: -2px; bottom: -2px; width: 2.5px;
+  background: var(--ok); border-radius: 2px; transform: translateX(-1.25px); }
+.pl-scale { display: flex; justify-content: space-between; margin-top: 4px;
+  font-size: 10px; font-weight: var(--fw-mid); color: var(--tx-muted);
+  font-family: var(--an-mono); }
+.pl-empty { padding: 26px 10px; text-align: center; color: var(--tx-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-mid); line-height: 1.6; }
+
+/* ── AI 분석 ─────────────────────────────────────── */
+.ai-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 16px 18px; }
+.btn-ai { padding: 9px 20px; background: var(--accent); border: none;
+  border-radius: var(--r-sm); color: #000; font-size: var(--fs-sm);
+  font-weight: var(--fw-heavy); cursor: pointer; transition: opacity .15s; }
+.btn-ai:hover { opacity: .85; }
+.btn-ai:disabled { opacity: .45; cursor: not-allowed; }
+.ai-out { margin-top: 14px; font-size: var(--fs-md); line-height: 1.75; color: var(--tx-1); }
+.ai-out h3 { font-size: var(--fs-sm); font-weight: var(--fw-heavy); color: var(--accent);
+  margin: 16px 0 5px; letter-spacing: .01em; }
+.ai-out h3:first-child { margin-top: 0; }
+.ai-out p { margin: 0 0 7px; }
+.ai-out strong { font-weight: var(--fw-heavy); }
+.ai-note { font-size: var(--fs-xs); font-weight: var(--fw-mid); color: var(--tx-muted);
+  margin-top: 12px; line-height: 1.6; }
+.ai-fallback { border: 1px dashed var(--bd); border-radius: var(--r-md);
+  padding: 12px 14px; margin-top: 12px; background: var(--bg-2);
+  font-family: var(--an-mono); font-size: var(--fs-sm); line-height: 1.65;
+  color: var(--tx-2); white-space: pre-wrap; }
 </style>
 {% endblock %}
 
@@ -187,86 +283,112 @@
     <p class="an-sub">공정 파라미터 트렌드 및 산포 요인 분석</p>
   </div>
 
-  <!-- 필터 -->
-  <div class="filter-panel">
-    <div class="filter-group">
-      <span class="filter-label">TECH</span>
-      <select class="filter-select" id="sel-tech">
-        <option value="">선택</option>
-        {% for t in tech_list %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
-      </select>
+  <!-- ══ STEP 1 ══════════════════════════════════ -->
+  <section class="step" id="step-1" data-state="active">
+    <div class="step-num">1</div>
+    <div class="step-head">
+      <span class="step-title">대상 선택</span>
+      <span class="step-desc">공정과 파라미터를 검색해 조회합니다</span>
     </div>
-    <div class="filter-group">
-      <span class="filter-label">LOT_CD</span>
-      <select class="filter-select" id="sel-lot" disabled><option value="">-</option></select>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">OPER</span>
-      <select class="filter-select" id="sel-oper" disabled><option value="">-</option></select>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">PARAMETER (트렌드 Y축)</span>
-      <select class="filter-select" id="sel-param" disabled><option value="">-</option></select>
-    </div>
-    <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
-  </div>
-
-  <!-- 차트 2단 -->
-  <div class="chart-row">
-    <div class="chart-card">
-      <div class="chart-head">
-        <span class="chart-title">Trend</span>
-        <div class="chart-ctrls">
-          <span class="mini-label">범례</span>
-          <select class="mini-select" id="sel-legend" onchange="onLegendChange()">
-            {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
+    <div class="step-body">
+      <div class="filter-panel">
+        <div class="filter-group">
+          <span class="filter-label">TECH</span>
+          <select class="filter-select" id="sel-tech">
+            <option value="">선택</option>
+            {% for t in tech_list %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
           </select>
         </div>
+        <div class="filter-group">
+          <span class="filter-label">LOT_CD</span>
+          <select class="filter-select" id="sel-lot" disabled><option value="">-</option></select>
+        </div>
+        <div class="filter-group" style="min-width:250px;">
+          <span class="filter-label">OPER</span>
+          <div class="ss" id="ss-oper"></div>
+        </div>
+        <div class="filter-group" style="min-width:230px;">
+          <span class="filter-label">PARAMETER</span>
+          <div class="ss" id="ss-param"></div>
+        </div>
+        <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
       </div>
-      <div class="plot-area" id="js-trend"><div class="empty-hint">조회하면 트렌드가 표시됩니다.</div></div>
     </div>
+  </section>
 
-    <div class="chart-card">
-      <div class="chart-head">
-        <span class="chart-title">Correlation <span class="r2badge" id="js-corr-r2"></span></span>
-        <div class="chart-ctrls">
-          <span class="mini-label">X</span>
-          <select class="mini-select" id="sel-corr-x" onchange="drawCorr()"><option value="">-</option></select>
-          <span class="mini-label">Y</span>
-          <select class="mini-select" id="sel-corr-y" onchange="drawCorr()"><option value="">-</option></select>
+  <!-- ══ STEP 2 ══════════════════════════════════ -->
+  <section class="step" id="step-2" data-state="locked">
+    <div class="step-num">2</div>
+    <div class="step-head">
+      <span class="step-title">문제 구간 지정</span>
+      <span class="step-desc">트렌드에서 이상 구간을 드래그하면 오른쪽 차트에도 함께 표시됩니다</span>
+    </div>
+    <div class="step-body">
+      <div class="chart-row">
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="chart-title">Trend</span>
+            <div class="chart-ctrls">
+              <span class="mini-label">범례</span>
+              <select class="mini-select" id="sel-legend" onchange="onLegendChange()">
+                {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="plot-area" id="js-trend"></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="chart-title">Correlation <span class="r2badge" id="js-corr-r2"></span></span>
+            <div class="chart-ctrls">
+              <span class="mini-label">X</span>
+              <div class="ss mini" id="ss-corr-x" style="width:150px;"></div>
+              <span class="mini-label">Y</span>
+              <div class="ss mini" id="ss-corr-y" style="width:150px;"></div>
+            </div>
+          </div>
+          <div class="plot-area" id="js-corr"></div>
         </div>
       </div>
-      <div class="plot-area" id="js-corr"><div class="empty-hint">X, Y축을 선택하면 상관 산점도가 표시됩니다.</div></div>
     </div>
-  </div>
+  </section>
 
-  <!-- 선택 결과 -->
-  <div class="result-row" id="js-result-row" style="display:none;">
-    <div class="res-card">
-      <div class="res-head">
-        <span class="res-title">요인 분포</span>
-        <span class="res-cnt" id="js-stats-count"></span>
-      </div>
-      <div class="factor-grid" id="js-dist"></div>
+  <!-- ══ STEP 3 ══════════════════════════════════ -->
+  <section class="step" id="step-3" data-state="locked">
+    <div class="step-num">3</div>
+    <div class="step-head">
+      <span class="step-title">원인 분석</span>
+      <span class="step-desc">선택 구간에 몰려 있는 조건과 소모품 수명 구간을 확인합니다</span>
     </div>
+    <div class="step-body">
+      <div class="result-row">
+        <div class="res-card">
+          <div class="res-head">
+            <span class="res-title">요인 분포<span class="res-note" id="js-lift-note"></span></span>
+            <span class="res-cnt" id="js-stats-count"></span>
+          </div>
+          <div class="factor-grid" id="js-dist"></div>
+        </div>
 
-    <div class="res-card">
-      <div class="res-head">
-        <span class="res-title">주요 상관 변수<span class="res-note" id="js-r2-note"></span></span>
-        <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
+        <div class="res-card">
+          <div class="res-head">
+            <span class="res-title">소모품 수명 구간<span class="res-note">선택 영역 위치</span></span>
+            <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
+          </div>
+          <div id="js-partlife"></div>
+        </div>
       </div>
-      <table class="stat-tbl">
-        <thead>
-          <tr>
-            <th>변수</th><th>R²</th>
-            <th>전체 avg</th><th>선택 avg</th><th>Δ</th>
-          </tr>
-        </thead>
-        <tbody id="js-stat-body"></tbody>
-      </table>
-      <div class="stat-empty" id="js-stat-empty" style="display:none;"></div>
+
+      <div class="ai-card">
+        <div class="res-head">
+          <span class="res-title">AI 원인 분석<span class="res-note">통계 요약을 해석합니다</span></span>
+          <button class="btn-ai" id="btn-ai" onclick="runInsight()">분석 실행</button>
+        </div>
+        <div class="ai-out" id="js-ai-out"></div>
+      </div>
     </div>
-  </div>
+  </section>
 </div>
 
 <!-- Plotly: 사내망 CDN 차단 → static 직접 서빙 -->
@@ -277,25 +399,20 @@ const API_OPTIONS   = "{% url 'analysis-options' %}";
 const API_TREND     = "{% url 'analysis-trend' %}";
 const API_CORR      = "{% url 'analysis-corr' %}";
 const API_STATS     = "{% url 'analysis-stats' %}";
-const API_CORR_RANK = "{% url 'analysis-corr-rank' %}";
-const API_BOX_SEL   = "{% url 'analysis-box-sel' %}";
+const API_PART_LIFE = "{% url 'analysis-part-life' %}";
+const API_INSIGHT   = "{% url 'analysis-insight' %}";
 
-/* ══════════════════════════════════════════════════
-   차트 타이포 — 위 CSS 토큰과 같은 값
-   ══════════════════════════════════════════════════ */
+/* 차트 타이포 — 위 CSS 토큰과 같은 값 */
 const AN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
 const CF = {
-  title:     {family: AN_FONT, size: 14, color: '#2a2a2a'},   /* .chart-title */
+  title:     {family: AN_FONT, size: 14, color: '#2a2a2a'},
   axisTitle: {family: AN_FONT, size: 12, color: '#555'},
   tick:      {family: AN_FONT, size: 11, color: '#666'},
   legend:    {family: AN_FONT, size: 11, color: '#555'},
   hover:     {family: AN_FONT, size: 12, color: '#333'},
 };
 
-/* ★ R² 표시 하한선 — 이 값 미만인 변수는 표에서 제외 */
-const R2_MIN = 0.2;
-
-/* ★ Idle 표시 순서 (목록에 없는 값은 뒤에 건수순으로) */
+/* ★ Idle 표시 순서 (목록에 없는 값은 뒤에 건수순) */
 const IDLE_ORDER = ['Normal', 'idle_1', 'idle_2', 'idle_3', 'idle_4', 'layer_change'];
 
 /* 요인 분포 열당 최대 표시 개수 */
@@ -304,29 +421,36 @@ const FACTOR_MAX = 8;
 let trendData    = [];
 let corrParams   = [];
 let currentParam = '';
-let topRanked    = [];
+let selectedIds  = null;
 
 const selTech   = document.getElementById('sel-tech');
 const selLot    = document.getElementById('sel-lot');
-const selOper   = document.getElementById('sel-oper');
-const selParam  = document.getElementById('sel-param');
 const selLegend = document.getElementById('sel-legend');
-const selCorrX  = document.getElementById('sel-corr-x');
-const selCorrY  = document.getElementById('sel-corr-y');
 const btnRun    = document.getElementById('btn-run');
+const btnAi     = document.getElementById('btn-ai');
+
+/* ── 단계 상태 ─────────────────────────────────── */
+function setStep(n, state) {
+  const el = document.getElementById('step-' + n);
+  if (el) el.dataset.state = state;
+}
 
 /* ── 숫자 포맷 ─────────────────────────────────── */
-function fmt1(v) {   // 통계치
+function fmt1(v) {
   if (v === null || v === undefined || isNaN(v)) return '-';
   return Number(v).toFixed(1);
 }
-function fmt2(v) {   // 회귀 계수
+function fmt2(v) {
   if (v === null || v === undefined || isNaN(v)) return '-';
   return Number(v).toFixed(2);
 }
-function fmt3(v) {   // R² (1자리로는 변별이 안 되어 3자리 유지)
+function fmt3(v) {
   if (v === null || v === undefined || isNaN(v)) return '-';
   return Number(v).toFixed(3);
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
 async function postJSON(url, payload) {
@@ -343,7 +467,119 @@ async function postJSON(url, payload) {
   return res.json();
 }
 
-function fillSelect(sel, options) {
+/* ══════════════════════════════════════════════════
+   검색형 드롭박스
+   입력한 문자가 포함된 항목만 추려서 보여준다
+   ══════════════════════════════════════════════════ */
+class SearchSelect {
+  constructor(rootId, {placeholder = '검색', onChange = null} = {}) {
+    this.root = document.getElementById(rootId);
+    this.onChange = onChange;
+    this.options = [];
+    this.value = '';
+    this.label = '';
+    this.activeIdx = -1;
+
+    this.root.innerHTML =
+      `<input class="ss-input" type="text" placeholder="${placeholder}" autocomplete="off" disabled>
+       <div class="ss-panel"></div>`;
+    this.input = this.root.querySelector('.ss-input');
+    this.panel = this.root.querySelector('.ss-panel');
+
+    this.input.addEventListener('focus', () => { this.input.select(); this.open(''); });
+    this.input.addEventListener('input', () => this.open(this.input.value));
+    this.input.addEventListener('keydown', (e) => this.onKey(e));
+    document.addEventListener('mousedown', (e) => {
+      if (!this.root.contains(e.target)) this.close(true);
+    });
+  }
+
+  setOptions(list) {
+    this.options = list || [];
+    this.setValue('', '');
+    this.input.disabled = this.options.length === 0;
+    this.input.placeholder = this.options.length ? '검색 또는 선택' : '-';
+  }
+
+  setValue(v, label) {
+    this.value = v || '';
+    this.label = label || '';
+    this.input.value = this.label;
+    if (this.onChange) this.onChange(this.value);
+  }
+
+  filtered(q) {
+    const s = (q || '').trim().toLowerCase();
+    if (!s) return this.options;
+    return this.options.filter(o => o.label.toLowerCase().includes(s));
+  }
+
+  open(q) {
+    const list = this.filtered(q);
+    this.activeIdx = -1;
+    if (!list.length) {
+      this.panel.innerHTML = `<div class="ss-none">일치하는 항목 없음</div>`;
+    } else {
+      const s = (q || '').trim();
+      this.panel.innerHTML = list.map((o, i) => {
+        let html = esc(o.label);
+        if (s) {                              // 일치 구간 강조
+          const idx = o.label.toLowerCase().indexOf(s.toLowerCase());
+          if (idx >= 0) {
+            html = esc(o.label.slice(0, idx)) +
+                   '<mark>' + esc(o.label.slice(idx, idx + s.length)) + '</mark>' +
+                   esc(o.label.slice(idx + s.length));
+          }
+        }
+        const chosen = o.value === this.value ? ' chosen' : '';
+        return `<div class="ss-opt${chosen}" data-i="${i}" title="${esc(o.label)}">${html}</div>`;
+      }).join('');
+      this.panel.querySelectorAll('.ss-opt').forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          const o = list[Number(el.dataset.i)];
+          this.setValue(o.value, o.label);
+          this.close();
+        });
+      });
+    }
+    this.panel.classList.add('open');
+    this._list = list;
+  }
+
+  close(restore) {
+    this.panel.classList.remove('open');
+    if (restore) this.input.value = this.label;   // 검색어만 치고 나가면 되돌림
+  }
+
+  onKey(e) {
+    const list = this._list || [];
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!this.panel.classList.contains('open')) { this.open(this.input.value); return; }
+      this.activeIdx += (e.key === 'ArrowDown' ? 1 : -1);
+      if (this.activeIdx < 0) this.activeIdx = list.length - 1;
+      if (this.activeIdx >= list.length) this.activeIdx = 0;
+      this.panel.querySelectorAll('.ss-opt').forEach((el, i) =>
+        el.classList.toggle('active', i === this.activeIdx));
+      const act = this.panel.querySelector('.ss-opt.active');
+      if (act) act.scrollIntoView({block: 'nearest'});
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const i = this.activeIdx >= 0 ? this.activeIdx : (list.length === 1 ? 0 : -1);
+      if (i >= 0) { this.setValue(list[i].value, list[i].label); this.close(); }
+    } else if (e.key === 'Escape') {
+      this.close(true); this.input.blur();
+    }
+  }
+}
+
+const ssOper  = new SearchSelect('ss-oper',   {placeholder: '-', onChange: onOperChange});
+const ssParam = new SearchSelect('ss-param',  {placeholder: '-', onChange: onParamChange});
+const ssCorrX = new SearchSelect('ss-corr-x', {placeholder: '-', onChange: () => drawCorr()});
+const ssCorrY = new SearchSelect('ss-corr-y', {placeholder: '-', onChange: () => drawCorr()});
+
+function fillNativeSelect(sel, options) {
   sel.innerHTML = '<option value="">선택</option>';
   options.forEach(o => {
     const opt = document.createElement('option');
@@ -352,77 +588,62 @@ function fillSelect(sel, options) {
   });
 }
 
-function resetFrom(level) {
-  const order = ['lot', 'oper', 'param'];
-  const map = {lot: selLot, oper: selOper, param: selParam};
-  let hit = false;
-  order.forEach(l => {
-    if (l === level) hit = true;
-    if (hit) { map[l].innerHTML = '<option value="">-</option>'; map[l].disabled = true; }
-  });
-  btnRun.disabled = true;
-}
-
 /* ── 종속 드롭박스 ─────────────────────────────── */
 selTech.addEventListener('change', async () => {
-  resetFrom('lot');
+  selLot.innerHTML = '<option value="">-</option>'; selLot.disabled = true;
+  ssOper.setOptions([]); ssParam.setOptions([]);
   if (!selTech.value) return;
   const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: selTech.value});
-  fillSelect(selLot, (options||[]).map(o => ({value: o, label: o})));
+  fillNativeSelect(selLot, (options||[]).map(o => ({value: o, label: o})));
   selLot.disabled = false;
 });
 
 selLot.addEventListener('change', async () => {
-  resetFrom('oper');
+  ssOper.setOptions([]); ssParam.setOptions([]);
   if (!selLot.value) return;
   const {options} = await postJSON(API_OPTIONS, {level: 'oper'});
-  fillSelect(selOper, options||[]);
-  selOper.disabled = false;
+  ssOper.setOptions(options || []);
 });
 
-selOper.addEventListener('change', async () => {
-  resetFrom('param');
-  if (!selOper.value) return;
-  const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: selOper.value});
+async function onOperChange(v) {
+  ssParam.setOptions([]); ssCorrX.setOptions([]); ssCorrY.setOptions([]);
+  btnRun.disabled = true;
+  if (!v) return;
+  const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: v});
   if (error) { alert('오류: ' + error); return; }
   corrParams = options || [];
-  fillSelect(selParam, corrParams.map(o => ({value: o, label: o})));
-  fillSelect(selCorrX, corrParams.map(o => ({value: o, label: o})));
-  fillSelect(selCorrY, corrParams.map(o => ({value: o, label: o})));
-  selParam.disabled = false;
-});
-
-selParam.addEventListener('change', () => { btnRun.disabled = !selParam.value; });
-
-function onLegendChange() {
-  drawTrend();
-  drawCorr();
+  const opts = corrParams.map(o => ({value: o, label: o}));
+  ssParam.setOptions(opts);
+  ssCorrX.setOptions(opts);
+  ssCorrY.setOptions(opts);
 }
 
-/* ── 조회 ──────────────────────────────────────── */
+function onParamChange(v) { btnRun.disabled = !v; }
+function onLegendChange() { drawTrend(); drawCorr(); }
+
+/* ── 조회 (STEP 1 → 2) ─────────────────────────── */
 async function runQuery() {
   btnRun.disabled = true; btnRun.textContent = '조회중...';
   try {
     const {data, param, error} = await postJSON(API_TREND, {
-      oper_id: selOper.value, lot_cd: selLot.value, param: selParam.value,
+      oper_id: ssOper.value, lot_cd: selLot.value, param: ssParam.value,
     });
     if (error) { alert('오류: ' + error); return; }
     trendData = data || [];
     currentParam = param;
     drawTrend();
 
-    if (!selCorrX.value) selCorrX.value = param;
-    if (!selCorrY.value && corrParams.length > 1) {
-      selCorrY.value = corrParams.find(c => c !== param) || corrParams[0];
+    if (!ssCorrX.value) ssCorrX.setValue(param, param);
+    if (!ssCorrY.value && corrParams.length > 1) {
+      const other = corrParams.find(c => c !== param) || corrParams[0];
+      ssCorrY.setValue(other, other);
     }
     drawCorr();
 
-    const rankRes = await postJSON(API_CORR_RANK, {
-      oper_id: selOper.value, lot_cd: selLot.value, base_col: selParam.value,
-    });
-    topRanked = rankRes.ranked || [];
-
     clearSelection();
+    setStep(1, 'done');
+    setStep(2, 'active');
+    document.getElementById('step-2').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   } finally {
     btnRun.disabled = false; btnRun.textContent = '조회';
   }
@@ -450,7 +671,6 @@ function baseLayout(xTitle, yTitle, titleText) {
   };
 }
 
-/* 범례값 표기: IDLE 의 빈 값은 Normal */
 function legendLabel(col, val) {
   if (val === null || val === undefined || val === '') {
     return col === 'IDLE' ? 'Normal' : '(없음)';
@@ -471,7 +691,6 @@ function groupByLegend(data, legendCol, xKey, yKey) {
   return groups;
 }
 
-/* IDLE 범례는 Normal → idle_1..4 순으로 */
 function orderedLegendKeys(legendCol, groups) {
   const keys = Object.keys(groups);
   if (legendCol !== 'IDLE') return keys.sort();
@@ -489,6 +708,7 @@ function markerTrace(name, g) {
     x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
     mode: 'markers', type: 'scattergl',
     marker: {size: 9, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.22)'}},
+    unselected: {marker: {opacity: 0.12}},
   };
 }
 
@@ -514,18 +734,20 @@ function drawTrend() {
 
   div.on('plotly_selected', (ev) => {
     if (!ev || !ev.points || !ev.points.length) return;
-    onSelected(ev.points.map(p => p.customdata));
+    const ids = ev.points.map(p => p.customdata);
+    highlightIn('js-corr', ids);          // 상관 차트에도 같은 웨이퍼 표시
+    onSelected(ids);
   });
   div.on('plotly_doubleclick', clearSelection);
 }
 
-/* ── Correlation (R² + 추세선 + 함수식) ─────────── */
+/* ── Correlation ───────────────────────────────── */
 async function drawCorr() {
-  const xc = selCorrX.value, yc = selCorrY.value;
-  if (!xc || !yc || !selOper.value || !selLot.value) return;
+  const xc = ssCorrX.value, yc = ssCorrY.value;
+  if (!xc || !yc || !ssOper.value || !selLot.value) return;
 
   const {data, r2, trend, error} = await postJSON(API_CORR, {
-    oper_id: selOper.value, lot_cd: selLot.value, x_col: xc, y_col: yc,
+    oper_id: ssOper.value, lot_cd: selLot.value, x_col: xc, y_col: yc,
   });
   if (error) { alert('오류: ' + error); return; }
 
@@ -533,7 +755,7 @@ async function drawCorr() {
     (r2 !== null && r2 !== undefined) ? `R² = ${fmt3(r2)}` : '';
 
   if (!data || !data.length) {
-    document.getElementById('js-corr').innerHTML = '<div class="empty-hint">데이터 없음</div>';
+    document.getElementById('js-corr').innerHTML = '';
     return;
   }
 
@@ -549,15 +771,13 @@ async function drawCorr() {
   const layout = baseLayout(xc, yc, `${xc} vs ${yc}`);
 
   if (trend) {
-    // 추세선은 SVG scatter 라 WebGL 산점도보다 위 레이어에 그려진다
+    // SVG scatter 는 WebGL 산점도보다 위 레이어에 그려진다
     traces.push({
       x: trend.x, y: trend.y, mode: 'lines', type: 'scatter',
-      name: '추세선',
-      line: {color: '#ef4444', width: 2.2, dash: 'dash'},
+      name: '추세선', line: {color: '#ef4444', width: 2.2, dash: 'dash'},
       hoverinfo: 'skip', showlegend: true,
     });
 
-    // 추세선 끝에 1차식 (소수점 2자리)
     const sign = trend.intercept >= 0 ? '+' : '−';
     const eq   = `y = ${fmt2(trend.slope)}x ${sign} ${fmt2(Math.abs(trend.intercept))}`;
     layout.annotations = (layout.annotations || []).concat([{
@@ -574,17 +794,39 @@ async function drawCorr() {
   Plotly.newPlot(div, traces, layout,
     {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
 
+  // 이미 선택된 구간이 있으면 다시 그린 뒤에도 유지
+  if (selectedIds) highlightIn('js-corr', selectedIds);
+
   div.on('plotly_selected', (ev) => {
     if (!ev || !ev.points || !ev.points.length) return;
-    onSelected(ev.points.map(p => p.customdata));
+    const ids = ev.points.map(p => p.customdata);
+    highlightIn('js-trend', ids);         // 트렌드에도 같은 웨이퍼 표시
+    onSelected(ids);
   });
   div.on('plotly_doubleclick', clearSelection);
 }
 
 /* ══════════════════════════════════════════════════
+   차트 간 교차 표시
+   한쪽에서 드래그한 웨이퍼를 다른 차트에서도 강조
+   (customdata 없는 추세선 트레이스는 건너뜀)
+   ══════════════════════════════════════════════════ */
+function highlightIn(divId, ids) {
+  const div = document.getElementById(divId);
+  if (!div || !div.data || !div.data.length) return;
+  const want = new Set(ids);
+  const sel = div.data.map(tr => {
+    if (!tr.customdata) return null;      // null = 선택 표시 안 함
+    const pts = [];
+    tr.customdata.forEach((id, i) => { if (want.has(id)) pts.push(i); });
+    return pts;
+  });
+  Plotly.restyle(div, {selectedpoints: sel});
+}
+
+/* ══════════════════════════════════════════════════
    스펙선
    ★ 실제 Upper/Lower/Target 이 생기면 이 함수만 교체
-     (현재는 데이터 max/min/mean 을 임시 사용)
    ══════════════════════════════════════════════════ */
 function getSpecLines(vals) {
   const v = vals.filter(x => x !== null && !isNaN(x));
@@ -608,8 +850,7 @@ function addSpecShapes(layout, vals) {
     const st = SPEC_STYLE[k];
     layout.shapes.push({
       type:'line', xref:'paper', yref:'y', x0:0, x1:1, y0:val, y1:val,
-      line:{color:st.color, width:1.6, dash:st.dash},
-      layer:'above',                      // 산점도에 가려지지 않게
+      line:{color:st.color, width:1.6, dash:st.dash}, layer:'above',
     });
     layout.annotations.push({
       xref:'paper', yref:'y', x:1, xanchor:'right', y:val, yanchor:'bottom',
@@ -620,40 +861,33 @@ function addSpecShapes(layout, vals) {
   });
 }
 
-/* ── 드래그 선택 → 통계 ────────────────────────── */
+/* ── 구간 선택 (STEP 2 → 3) ────────────────────── */
 async function onSelected(ids) {
-  const distRes = await postJSON(API_STATS, {oper_id: selOper.value, ids: ids});
-  if (distRes.error) { console.error(distRes.error); return; }
+  selectedIds = ids;
+  setStep(2, 'done');
+  setStep(3, 'active');
 
-  document.getElementById('js-result-row').style.display = 'grid';
-  document.getElementById('js-stats-count').textContent = `${distRes.count} wf`;
-  // 요인 항목은 서버(views.py FACTOR_COLS)가 정한다
-  document.getElementById('js-dist').innerHTML =
-    (distRes.factors || []).map(f =>
-      factorCol(f.label, f.col === 'IDLE' ? sortIdleRows(f.rows) : f.rows)
-    ).join('');
+  document.getElementById('js-ai-out').innerHTML = '';
+  btnAi.disabled = false;
 
-  const shown = topRanked.filter(r => r.r2 !== null && r.r2 >= R2_MIN);
-  document.getElementById('js-r2-note').textContent = `R² ≥ ${R2_MIN}`;
-
-  const tbody = document.getElementById('js-stat-body');
-  const empty = document.getElementById('js-stat-empty');
-
-  if (!shown.length) {
-    tbody.innerHTML = '';
-    empty.style.display = 'block';
-    empty.textContent = `R² ${R2_MIN} 이상인 변수가 없습니다.`;
-    return;
+  const distRes = await postJSON(API_STATS, {oper_id: ssOper.value, ids: ids});
+  if (!distRes.error) {
+    document.getElementById('js-stats-count').textContent = `${distRes.count} wf`;
+    // 요인 항목은 서버(views.py FACTOR_COLS)가 정한다
+    document.getElementById('js-dist').innerHTML =
+      (distRes.factors || []).map(f =>
+        factorCol(f.label, f.col === 'IDLE' ? sortIdleRows(f.rows) : f.rows)
+      ).join('');
   }
-  empty.style.display = 'none';
 
-  const boxRes = await postJSON(API_BOX_SEL, {
-    oper_id: selOper.value, ids: ids, cols: shown.map(r => r.col),
+  const plRes = await postJSON(API_PART_LIFE, {
+    oper_id: ssOper.value, lot_cd: selLot.value, ids: ids,
   });
-  fillStatTable(shown, boxRes.box_sel || {});
+  renderPartLife(plRes.parts || []);
+
+  document.getElementById('step-3').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
-/* Idle 분포를 IDLE_ORDER 순으로 */
 function sortIdleRows(rows) {
   return [...(rows || [])].sort((a, b) => {
     const ia = IDLE_ORDER.indexOf(a.key), ib = IDLE_ORDER.indexOf(b.key);
@@ -664,52 +898,153 @@ function sortIdleRows(rows) {
   });
 }
 
-/* 요인 분포 한 열 */
 function factorCol(title, rows) {
   const list = rows || [];
   let items = list.slice(0, FACTOR_MAX).map(r =>
-    `<div class="fitem"><span class="k" title="${r.key}">${r.key}</span>` +
+    `<div class="fitem"><span class="k" title="${esc(r.key)}">${esc(r.key)}</span>` +
     `<span class="v">${r.count}</span></div>`
   ).join('');
   if (list.length > FACTOR_MAX) {
     items += `<div class="fitem dim"><span class="k">외 ${list.length - FACTOR_MAX}종</span><span class="v"></span></div>`;
   }
   if (!items) items = `<div class="fitem dim"><span class="k">없음</span><span class="v"></span></div>`;
-  return `<div class="fcol"><div class="fcol-head">${title}</div>${items}</div>`;
+  return `<div class="fcol"><div class="fcol-head">${esc(title)}</div>${items}</div>`;
 }
 
-/* 상관 변수 표 */
-function fillStatTable(ranked, boxSel) {
-  let body = '';
-  ranked.forEach(r => {
-    const a = r.box_all || {};
-    const s = boxSel[r.col] || {};
+/* 소모품 수명 — 선택 영역이 전체 수명 중 어디에 있는지 */
+function renderPartLife(parts) {
+  const box = document.getElementById('js-partlife');
 
-    let deltaCell = '<td>-</td>';
-    if (a.avg !== null && a.avg !== undefined && s.avg !== null && s.avg !== undefined) {
-      const d   = s.avg - a.avg;
-      const cls = d > 0 ? 'delta-up' : (d < 0 ? 'delta-down' : '');
-      const sgn = d > 0 ? '+' : '';
-      deltaCell = `<td class="${cls}">${sgn}${fmt1(d)}</td>`;
+  if (!parts.length) {
+    box.innerHTML = `<div class="pl-empty">
+      수명 컬럼을 찾지 못했습니다.<br>
+      views.py 의 PART_LIFE_COLS 에 실제 컬럼명을 지정해 주세요.
+    </div>`;
+    return;
+  }
+
+  const PHASE_CLS = {'초기': 'p-early', '중기': 'p-mid', '말기': 'p-late'};
+
+  box.innerHTML = parts.map(p => {
+    const pMin  = (p.pos.min ?? p.pos.avg) * 100;
+    const pMax  = (p.pos.max ?? p.pos.avg) * 100;
+    const pAvg  = p.pos.avg * 100;
+    const width = Math.max(pMax - pMin, 0.8);
+
+    return `<div class="pl-item">
+      <div class="pl-top">
+        <span class="pl-name">${esc(p.label)}</span>
+        <span class="pl-phase ${PHASE_CLS[p.phase] || ''}">${p.phase}</span>
+        <span class="pl-val">${fmt1(p.sel.avg)}
+          <span class="sub">/ ${fmt1(p.all.min)}~${fmt1(p.all.max)}</span></span>
+      </div>
+      <div class="pl-track" title="${esc(p.col)}">
+        <div class="pl-band" style="left:${pMin}%;width:${width}%"></div>
+        <div class="pl-mark" style="left:${pAvg}%"></div>
+      </div>
+      <div class="pl-scale"><span>초기</span><span>중기</span><span>말기</span></div>
+    </div>`;
+  }).join('');
+}
+
+/* ══════════════════════════════════════════════════
+   AI 원인 분석
+   서버가 편중도를 계산해 요약을 만들고, LLM 은 그 요약만 해석한다.
+   (원본 웨이퍼 데이터는 LLM 으로 넘어가지 않는다)
+   ══════════════════════════════════════════════════ */
+async function runInsight() {
+  if (!selectedIds) return;
+  const out = document.getElementById('js-ai-out');
+  btnAi.disabled = true; btnAi.textContent = '분석중...';
+  out.innerHTML = '';
+
+  try {
+    const res = await postJSON(API_INSIGHT, {
+      oper_id: ssOper.value, lot_cd: selLot.value,
+      param: ssParam.value, ids: selectedIds,
+    });
+    if (res.error) { out.innerHTML = `<p>${esc(res.error)}</p>`; return; }
+
+    // 편중된 요인을 요인 분포 표에도 반영
+    markHotFactors(res.summary);
+
+    let html = '';
+    if (res.answer) {
+      html += mdToHtml(res.answer);
+    } else {
+      // LLM 미연결이어도 편중도 요약은 그대로 쓸모가 있다
+      html += `<p>${esc(res.llm_error || 'LLM 응답이 없습니다.')}</p>`;
+      html += `<div class="ai-fallback">${esc(res.prompt || '')}</div>`;
     }
+    html += `<div class="ai-note">
+      원본 웨이퍼 데이터는 전송되지 않습니다. 위 통계 요약만 분석에 사용됩니다.
+    </div>`;
+    out.innerHTML = html;
+  } finally {
+    btnAi.disabled = false; btnAi.textContent = '분석 실행';
+  }
+}
 
-    body += `<tr>
-      <td title="${r.col}">${r.col}</td>
-      <td class="r2-val">${fmt3(r.r2)}</td>
-      <td>${fmt1(a.avg)}</td>
-      <td class="sel-val">${fmt1(s.avg)}</td>
-      ${deltaCell}
-    </tr>`;
+/* 편중된 항목(전체 대비 몰려 있는 값)을 요인 분포에서 강조 */
+function markHotFactors(summary) {
+  if (!summary || !summary.factors) return;
+  const hot = new Map();
+  summary.factors.forEach(f => {
+    f.rows.forEach(r => { if (r.flag) hot.set(`${f.label}|${r.key}`, r.lift); });
   });
-  document.getElementById('js-stat-body').innerHTML = body;
+  if (!hot.size) {
+    document.getElementById('js-lift-note').textContent = '몰린 조건 없음';
+    return;
+  }
+  document.getElementById('js-lift-note').textContent = `편중 ${hot.size}건`;
+
+  document.querySelectorAll('#js-dist .fcol').forEach(col => {
+    const label = col.querySelector('.fcol-head').textContent;
+    col.querySelectorAll('.fitem').forEach(it => {
+      const k = it.querySelector('.k');
+      if (!k) return;
+      const lift = hot.get(`${label}|${k.textContent}`);
+      if (lift) {
+        it.classList.add('hot');
+        if (!it.querySelector('.lift-tag')) {
+          const tag = document.createElement('span');
+          tag.className = 'lift-tag';
+          tag.textContent = `×${lift}`;
+          k.appendChild(tag);
+        }
+      }
+    });
+  });
+}
+
+/* 아주 단순한 마크다운 변환 (## 제목, **강조**, 줄바꿈) */
+function mdToHtml(md) {
+  return esc(md)
+    .split('\n')
+    .map(line => {
+      const t = line.trim();
+      if (!t) return '';
+      if (t.startsWith('## ')) return `<h3>${t.slice(3)}</h3>`;
+      if (t.startsWith('# '))  return `<h3>${t.slice(2)}</h3>`;
+      return `<p>${t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</p>`;
+    })
+    .join('');
 }
 
 function clearSelection() {
+  selectedIds = null;
   ['js-trend', 'js-corr'].forEach(id => {
     const div = document.getElementById(id);
     if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
   });
-  document.getElementById('js-result-row').style.display = 'none';
+  document.getElementById('js-dist').innerHTML = '';
+  document.getElementById('js-partlife').innerHTML = '';
+  document.getElementById('js-ai-out').innerHTML = '';
+  document.getElementById('js-stats-count').textContent = '';
+  document.getElementById('js-lift-note').textContent = '';
+  btnAi.disabled = true;
+  setStep(3, 'locked');
+  if (trendData.length) setStep(2, 'active');
 }
 </script>
 {% endblock %}
