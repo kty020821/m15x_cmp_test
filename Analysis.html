@@ -9,7 +9,7 @@
   화면 흐름
     STEP 1  대상 선택      공정·파라미터 검색 후 조회
     STEP 2  구간 지정      트렌드에서 문제 영역 드래그
-    STEP 3  원인 분석      요인 편중 · 소모품 수명 · AI 해석
+    STEP 3  원인 분석      요인 편중 · AI 해석
 
   [주의] 이 파일 안에 인자 없는 url 태그를 쓰지 말 것
          (주석 안이라도 Django 가 파싱해서 TemplateSyntaxError)
@@ -17,7 +17,6 @@
   [수정 지점]
     · 범례 항목       → views.py 의 LEGEND_OPTIONS
     · 요인 분포 항목   → views.py 의 FACTOR_COLS
-    · Part 수명 컬럼  → views.py 의 PART_LIFE_COLS
     · LLM 연결        → views.py 의 _call_company_llm()
     · Idle 표시 순서  → 아래 IDLE_ORDER
     · 실제 스펙값     → 아래 getSpecLines()
@@ -179,11 +178,7 @@
   background: repeating-linear-gradient(45deg,
     rgba(128,128,128,0.035) 0 10px, transparent 10px 20px); }
 
-/* ══ 결과: 요인 편중 | 소모품 수명 ═══════════════════ */
-.result-row { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1fr);
-  gap: 18px; align-items: start; margin-bottom: 18px; }
-@media (max-width: 1100px) { .result-row { grid-template-columns: 1fr; } }
-
+/* ══ 결과 ═══════════════════════════════════════════ */
 .res-card { background: var(--bg-3); border: 1px solid var(--bd);
   border-radius: var(--r-lg); padding: 16px 18px; }
 .res-head { display: flex; align-items: center; justify-content: space-between;
@@ -220,38 +215,6 @@
 .lift-tag { font-size: 10px; font-weight: var(--fw-heavy); color: var(--warn);
   background: rgba(220,38,38,.12); border-radius: 20px; padding: 1px 5px;
   margin-left: 4px; font-family: var(--an-mono); }
-
-/* 소모품 수명 */
-.pl-item { padding: 11px 0; border-bottom: 1px solid rgba(128,128,128,0.10); }
-.pl-item:last-child { border-bottom: none; }
-.pl-item:first-child { padding-top: 2px; }
-.pl-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
-.pl-name { font-size: var(--fs-sm); font-weight: var(--fw-heavy); color: var(--tx-1);
-  min-width: 42px; }
-.pl-phase { font-size: var(--fs-xs); font-weight: var(--fw-heavy); padding: 2px 8px;
-  border-radius: 20px; letter-spacing: .02em; }
-.pl-phase.p-early { background: rgba(37,99,235,0.13); color: #2563eb; }
-.pl-phase.p-mid   { background: rgba(22,163,74,0.13); color: var(--ok); }
-.pl-phase.p-late  { background: rgba(220,38,38,0.13); color: var(--warn); }
-.pl-val { margin-left: auto; font-family: var(--an-mono); font-size: var(--fs-sm);
-  font-weight: var(--fw-bold); color: var(--tx-1); }
-.pl-val .sub { color: var(--tx-muted); font-weight: var(--fw-mid); font-size: var(--fs-xs); }
-.pl-track { position: relative; height: 22px; border-radius: 7px;
-  background: var(--bg-2); border: 1px solid var(--bd); overflow: hidden; }
-.pl-track::before, .pl-track::after { content: ''; position: absolute; top: 0; bottom: 0;
-  width: 1px; background: rgba(128,128,128,0.28); }
-.pl-track::before { left: 33.33%; }
-.pl-track::after  { left: 66.66%; }
-.pl-band { position: absolute; top: 0; bottom: 0; background: rgba(34,197,94,0.26);
-  border-left: 1px solid rgba(22,163,74,0.5); border-right: 1px solid rgba(22,163,74,0.5);
-  min-width: 2px; }
-.pl-mark { position: absolute; top: -2px; bottom: -2px; width: 2.5px;
-  background: var(--ok); border-radius: 2px; transform: translateX(-1.25px); }
-.pl-scale { display: flex; justify-content: space-between; margin-top: 4px;
-  font-size: 10px; font-weight: var(--fw-mid); color: var(--tx-muted);
-  font-family: var(--an-mono); }
-.pl-empty { padding: 26px 10px; text-align: center; color: var(--tx-muted);
-  font-size: var(--fs-sm); font-weight: var(--fw-mid); line-height: 1.6; }
 
 /* ── AI 분석 ─────────────────────────────────────── */
 .ai-card { background: var(--bg-3); border: 1px solid var(--bd);
@@ -359,25 +322,18 @@
     <div class="step-num">3</div>
     <div class="step-head">
       <span class="step-title">원인 분석</span>
-      <span class="step-desc">선택 구간에 몰려 있는 조건과 소모품 수명 구간을 확인합니다</span>
+      <span class="step-desc">선택 구간에 몰려 있는 조건을 찾아냅니다</span>
     </div>
     <div class="step-body">
-      <div class="result-row">
-        <div class="res-card">
-          <div class="res-head">
-            <span class="res-title">요인 분포<span class="res-note" id="js-lift-note"></span></span>
+      <div class="res-card" style="margin-bottom:18px;">
+        <div class="res-head">
+          <span class="res-title">요인 분포<span class="res-note" id="js-lift-note"></span></span>
+          <div style="display:flex;align-items:center;gap:12px;">
             <span class="res-cnt" id="js-stats-count"></span>
-          </div>
-          <div class="factor-grid" id="js-dist"></div>
-        </div>
-
-        <div class="res-card">
-          <div class="res-head">
-            <span class="res-title">소모품 수명 구간<span class="res-note">선택 영역 위치</span></span>
             <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
           </div>
-          <div id="js-partlife"></div>
         </div>
+        <div class="factor-grid" id="js-dist"></div>
       </div>
 
       <div class="ai-card">
@@ -399,7 +355,6 @@ const API_OPTIONS   = "{% url 'analysis-options' %}";
 const API_TREND     = "{% url 'analysis-trend' %}";
 const API_CORR      = "{% url 'analysis-corr' %}";
 const API_STATS     = "{% url 'analysis-stats' %}";
-const API_PART_LIFE = "{% url 'analysis-part-life' %}";
 const API_INSIGHT   = "{% url 'analysis-insight' %}";
 
 /* 차트 타이포 — 위 CSS 토큰과 같은 값 */
@@ -880,11 +835,6 @@ async function onSelected(ids) {
       ).join('');
   }
 
-  const plRes = await postJSON(API_PART_LIFE, {
-    oper_id: ssOper.value, lot_cd: selLot.value, ids: ids,
-  });
-  renderPartLife(plRes.parts || []);
-
   document.getElementById('step-3').scrollIntoView({behavior: 'smooth', block: 'nearest'});
 }
 
@@ -909,42 +859,6 @@ function factorCol(title, rows) {
   }
   if (!items) items = `<div class="fitem dim"><span class="k">없음</span><span class="v"></span></div>`;
   return `<div class="fcol"><div class="fcol-head">${esc(title)}</div>${items}</div>`;
-}
-
-/* 소모품 수명 — 선택 영역이 전체 수명 중 어디에 있는지 */
-function renderPartLife(parts) {
-  const box = document.getElementById('js-partlife');
-
-  if (!parts.length) {
-    box.innerHTML = `<div class="pl-empty">
-      수명 컬럼을 찾지 못했습니다.<br>
-      views.py 의 PART_LIFE_COLS 에 실제 컬럼명을 지정해 주세요.
-    </div>`;
-    return;
-  }
-
-  const PHASE_CLS = {'초기': 'p-early', '중기': 'p-mid', '말기': 'p-late'};
-
-  box.innerHTML = parts.map(p => {
-    const pMin  = (p.pos.min ?? p.pos.avg) * 100;
-    const pMax  = (p.pos.max ?? p.pos.avg) * 100;
-    const pAvg  = p.pos.avg * 100;
-    const width = Math.max(pMax - pMin, 0.8);
-
-    return `<div class="pl-item">
-      <div class="pl-top">
-        <span class="pl-name">${esc(p.label)}</span>
-        <span class="pl-phase ${PHASE_CLS[p.phase] || ''}">${p.phase}</span>
-        <span class="pl-val">${fmt1(p.sel.avg)}
-          <span class="sub">/ ${fmt1(p.all.min)}~${fmt1(p.all.max)}</span></span>
-      </div>
-      <div class="pl-track" title="${esc(p.col)}">
-        <div class="pl-band" style="left:${pMin}%;width:${width}%"></div>
-        <div class="pl-mark" style="left:${pAvg}%"></div>
-      </div>
-      <div class="pl-scale"><span>초기</span><span>중기</span><span>말기</span></div>
-    </div>`;
-  }).join('');
 }
 
 /* ══════════════════════════════════════════════════
@@ -1038,7 +952,6 @@ function clearSelection() {
     if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
   });
   document.getElementById('js-dist').innerHTML = '';
-  document.getElementById('js-partlife').innerHTML = '';
   document.getElementById('js-ai-out').innerHTML = '';
   document.getElementById('js-stats-count').textContent = '';
   document.getElementById('js-lift-note').textContent = '';
