@@ -98,25 +98,6 @@
 .filter-label { font-size: var(--fs-xs); font-weight: var(--fw-heavy); color: var(--tx-muted);
   letter-spacing: .03em; }
 
-/* appearance 를 지우지 않으면 OS 기본 각진 외형이 남는다 */
-.filter-select, .mini-select {
-  appearance: none; -webkit-appearance: none; -moz-appearance: none;
-  font-family: var(--an-font); color: var(--tx-1); background-color: var(--bg-2);
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat; border: 1px solid var(--bd);
-  cursor: pointer; outline: none; transition: border-color .15s, box-shadow .15s;
-}
-.filter-select { font-size: var(--fs-md); font-weight: var(--fw-mid);
-  padding: 10px 34px 10px 13px; border-radius: var(--r-md);
-  background-position: right 12px center; background-size: 12px; }
-.mini-select { font-size: var(--fs-sm); font-weight: var(--fw-mid);
-  padding: 7px 28px 7px 11px; border-radius: var(--r-sm);
-  background-position: right 9px center; background-size: 11px; }
-.filter-select:hover, .mini-select:hover { border-color: var(--tx-muted); }
-.filter-select:focus, .mini-select:focus {
-  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
-.filter-select:disabled { opacity: .4; cursor: not-allowed; }
-.filter-select option, .mini-select option { font-family: var(--an-font); font-size: var(--fs-md); }
 
 /* ── 검색형 드롭박스 ─────────────────────────────── */
 .ss { position: relative; }
@@ -173,6 +154,8 @@
 .chart-ctrls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .mini-label { font-size: var(--fs-xs); color: var(--tx-2); font-weight: var(--fw-bold); }
 .plot-area { width: 100%; height: 430px; }
+/* 차트 안 모든 글자(제목·축·눈금·범례·주석) 굵게 */
+.plot-area .main-svg text { font-weight: var(--fw-bold) !important; }
 /* 빈 상태는 문구 없이 옅은 자리만 */
 .plot-area:empty { border-radius: var(--r-md);
   background: repeating-linear-gradient(45deg,
@@ -257,14 +240,15 @@
       <div class="filter-panel">
         <div class="filter-group">
           <span class="filter-label">TECH</span>
-          <select class="filter-select" id="sel-tech">
-            <option value="">선택</option>
+          <div class="ss" id="ss-tech"></div>
+          {# 옵션 공급용 — 화면에는 보이지 않음 #}
+          <select id="raw-tech" hidden>
             {% for t in tech_list %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
           </select>
         </div>
         <div class="filter-group">
           <span class="filter-label">LOT_CD</span>
-          <select class="filter-select" id="sel-lot" disabled><option value="">-</option></select>
+          <div class="ss" id="ss-lot"></div>
         </div>
         <div class="filter-group" style="min-width:250px;">
           <span class="filter-label">OPER</span>
@@ -293,7 +277,8 @@
             <span class="chart-title">Trend</span>
             <div class="chart-ctrls">
               <span class="mini-label">범례</span>
-              <select class="mini-select" id="sel-legend" onchange="onLegendChange()">
+              <div class="ss mini" id="ss-legend" style="width:132px;"></div>
+              <select id="raw-legend" hidden>
                 {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
               </select>
             </div>
@@ -378,11 +363,8 @@ let corrParams   = [];
 let currentParam = '';
 let selectedIds  = null;
 
-const selTech   = document.getElementById('sel-tech');
-const selLot    = document.getElementById('sel-lot');
-const selLegend = document.getElementById('sel-legend');
-const btnRun    = document.getElementById('btn-run');
-const btnAi     = document.getElementById('btn-ai');
+const btnRun = document.getElementById('btn-run');
+const btnAi  = document.getElementById('btn-ai');
 
 /* ── 단계 상태 ─────────────────────────────────── */
 function setStep(n, state) {
@@ -529,36 +511,44 @@ class SearchSelect {
   }
 }
 
-const ssOper  = new SearchSelect('ss-oper',   {placeholder: '-', onChange: onOperChange});
-const ssParam = new SearchSelect('ss-param',  {placeholder: '-', onChange: onParamChange});
-const ssCorrX = new SearchSelect('ss-corr-x', {placeholder: '-', onChange: () => drawCorr()});
-const ssCorrY = new SearchSelect('ss-corr-y', {placeholder: '-', onChange: () => drawCorr()});
-
-function fillNativeSelect(sel, options) {
-  sel.innerHTML = '<option value="">선택</option>';
-  options.forEach(o => {
-    const opt = document.createElement('option');
-    opt.value = o.value; opt.textContent = o.label;
-    sel.appendChild(opt);
-  });
+/* 숨겨둔 select 에서 옵션을 읽어온다 (템플릿이 채워준 값) */
+function optsFromSelect(id) {
+  const el = document.getElementById(id);
+  if (!el) return [];
+  return Array.from(el.options)
+    .filter(o => o.value)
+    .map(o => ({value: o.value, label: o.textContent.trim()}));
 }
 
-/* ── 종속 드롭박스 ─────────────────────────────── */
-selTech.addEventListener('change', async () => {
-  selLot.innerHTML = '<option value="">-</option>'; selLot.disabled = true;
-  ssOper.setOptions([]); ssParam.setOptions([]);
-  if (!selTech.value) return;
-  const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: selTech.value});
-  fillNativeSelect(selLot, (options||[]).map(o => ({value: o, label: o})));
-  selLot.disabled = false;
-});
+const ssTech   = new SearchSelect('ss-tech',   {placeholder: '선택', onChange: onTechChange});
+const ssLot    = new SearchSelect('ss-lot',    {placeholder: '-',   onChange: onLotChange});
+const ssOper   = new SearchSelect('ss-oper',   {placeholder: '-',   onChange: onOperChange});
+const ssParam  = new SearchSelect('ss-param',  {placeholder: '-',   onChange: onParamChange});
+const ssCorrX  = new SearchSelect('ss-corr-x', {placeholder: '-',   onChange: () => drawCorr()});
+const ssCorrY  = new SearchSelect('ss-corr-y', {placeholder: '-',   onChange: () => drawCorr()});
+const ssLegend = new SearchSelect('ss-legend', {placeholder: '-',   onChange: onLegendChange});
 
-selLot.addEventListener('change', async () => {
+ssTech.setOptions(optsFromSelect('raw-tech'));
+
+// 범례는 항상 하나가 선택돼 있어야 한다
+const legendOpts = optsFromSelect('raw-legend');
+ssLegend.setOptions(legendOpts);
+if (legendOpts.length) ssLegend.setValue(legendOpts[0].value, legendOpts[0].label);
+
+/* ── 종속 드롭박스 ─────────────────────────────── */
+async function onTechChange(v) {
+  ssLot.setOptions([]); ssOper.setOptions([]); ssParam.setOptions([]);
+  if (!v) return;
+  const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: v});
+  ssLot.setOptions((options || []).map(o => ({value: o, label: o})));
+}
+
+async function onLotChange(v) {
   ssOper.setOptions([]); ssParam.setOptions([]);
-  if (!selLot.value) return;
+  if (!v) return;
   const {options} = await postJSON(API_OPTIONS, {level: 'oper'});
   ssOper.setOptions(options || []);
-});
+}
 
 async function onOperChange(v) {
   ssParam.setOptions([]); ssCorrX.setOptions([]); ssCorrY.setOptions([]);
@@ -581,7 +571,7 @@ async function runQuery() {
   btnRun.disabled = true; btnRun.textContent = '조회중...';
   try {
     const {data, param, error} = await postJSON(API_TREND, {
-      oper_id: ssOper.value, lot_cd: selLot.value, param: ssParam.value,
+      oper_id: ssOper.value, lot_cd: ssLot.value, param: ssParam.value,
     });
     if (error) { alert('오류: ' + error); return; }
     trendData = data || [];
@@ -670,7 +660,7 @@ function markerTrace(name, g) {
 /* ── Trend ─────────────────────────────────────── */
 function drawTrend() {
   if (!trendData.length) return;
-  const legendCol = selLegend.value;
+  const legendCol = ssLegend.value;
   const groups = groupByLegend(trendData, legendCol, 'date', 'val');
 
   const traces = orderedLegendKeys(legendCol, groups).map(name => {
@@ -679,7 +669,7 @@ function drawTrend() {
     return t;
   });
 
-  const title  = `${selTech.value} · ${selLot.value} · ${currentParam}`;
+  const title  = `${ssTech.value} · ${ssLot.value} · ${currentParam}`;
   const layout = baseLayout('DATE', currentParam, title);
   addSpecShapes(layout, trendData.map(d => d.val));
 
@@ -699,10 +689,10 @@ function drawTrend() {
 /* ── Correlation ───────────────────────────────── */
 async function drawCorr() {
   const xc = ssCorrX.value, yc = ssCorrY.value;
-  if (!xc || !yc || !ssOper.value || !selLot.value) return;
+  if (!xc || !yc || !ssOper.value || !ssLot.value) return;
 
   const {data, r2, trend, error} = await postJSON(API_CORR, {
-    oper_id: ssOper.value, lot_cd: selLot.value, x_col: xc, y_col: yc,
+    oper_id: ssOper.value, lot_cd: ssLot.value, x_col: xc, y_col: yc,
   });
   if (error) { alert('오류: ' + error); return; }
 
@@ -714,7 +704,7 @@ async function drawCorr() {
     return;
   }
 
-  const legendCol = selLegend.value;
+  const legendCol = ssLegend.value;
   const groups = groupByLegend(data, legendCol, 'x', 'y');
 
   const traces = orderedLegendKeys(legendCol, groups).map(name => {
@@ -759,6 +749,11 @@ async function drawCorr() {
     onSelected(ids);
   });
   div.on('plotly_doubleclick', clearSelection);
+
+  // 범례로 항목을 켜고 끄면 추세선과 R² 를 다시 계산한다
+  // (이벤트는 표시 상태가 바뀌기 전에 발생하므로 다음 틱에 처리)
+  div.on('plotly_legendclick',       () => { setTimeout(recalcCorrTrend, 0); return true; });
+  div.on('plotly_legenddoubleclick', () => { setTimeout(recalcCorrTrend, 0); return true; });
 }
 
 /* ══════════════════════════════════════════════════
@@ -777,6 +772,98 @@ function highlightIn(divId, ids) {
     return pts;
   });
   Plotly.restyle(div, {selectedpoints: sel});
+}
+
+/* ══════════════════════════════════════════════════
+   추세선 재계산
+   범례를 클릭해 특정 항목을 숨기면 Plotly 는 해당 트레이스를
+   visible:'legendonly' 로 바꾼다. 서버 회귀값은 전체 기준이므로,
+   화면에 보이는 점만 모아 클라이언트에서 다시 계산한다.
+   ══════════════════════════════════════════════════ */
+function visiblePoints(div) {
+  const xs = [], ys = [];
+  (div.data || []).forEach(tr => {
+    if (!tr.customdata) return;                       // 추세선 트레이스 제외
+    if (tr.visible === 'legendonly' || tr.visible === false) return;
+    const n = Math.min(tr.x.length, tr.y.length);
+    for (let i = 0; i < n; i++) {
+      const x = Number(tr.x[i]), y = Number(tr.y[i]);
+      if (tr.x[i] == null || tr.y[i] == null || isNaN(x) || isNaN(y)) continue;
+      xs.push(x); ys.push(y);
+    }
+  });
+  return {xs, ys};
+}
+
+/* 최소제곱 직선 + R² (점이 많아도 안전하도록 한 번만 순회) */
+function linReg(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+
+  let sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+  let xmin = Infinity, xmax = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = xs[i], y = ys[i];
+    sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
+    if (x < xmin) xmin = x;
+    if (x > xmax) xmax = x;
+  }
+  const dx = n * sxx - sx * sx;
+  if (dx === 0) return null;                          // x 가 전부 같은 값
+
+  const slope     = (n * sxy - sx * sy) / dx;
+  const intercept = (sy - slope * sx) / n;
+  const dy        = n * syy - sy * sy;
+  const r         = dy === 0 ? 0 : (n * sxy - sx * sy) / Math.sqrt(dx * dy);
+
+  return {slope, intercept, r2: r * r, n, xmin, xmax};
+}
+
+function trendAnnotation(fit) {
+  const sign = fit.intercept >= 0 ? '+' : '−';
+  const eq   = `y = ${fmt2(fit.slope)}x ${sign} ${fmt2(Math.abs(fit.intercept))}`;
+  return {
+    x: fit.xmax, y: fit.slope * fit.xmax + fit.intercept, xref: 'x', yref: 'y',
+    text: `<b>${eq}</b>`, showarrow: false,
+    xanchor: 'right', yanchor: fit.slope >= 0 ? 'top' : 'bottom',
+    xshift: -4, yshift: fit.slope >= 0 ? -6 : 6,
+    font: {family: AN_FONT, size: 11, color: '#ef4444'},
+    bgcolor: 'rgba(255,255,255,0.85)', borderpad: 3,
+  };
+}
+
+function recalcCorrTrend() {
+  const div = document.getElementById('js-corr');
+  if (!div || !div.data || !div.data.length) return;
+
+  const ti = div.data.findIndex(t => t.name === '추세선');
+  if (ti < 0) return;
+
+  const badge = document.getElementById('js-corr-r2');
+  const {xs, ys} = visiblePoints(div);
+  const fit = linReg(xs, ys);
+
+  // 숨긴 항목이 있으면 표시에 표기
+  const total  = (div.data.filter(t => t.customdata) || []).length;
+  const shown  = (div.data.filter(t => t.customdata &&
+                   t.visible !== 'legendonly' && t.visible !== false) || []).length;
+  const partial = shown < total;
+
+  if (!fit) {                                          // 점이 부족하면 선을 숨김
+    Plotly.restyle(div, {x: [[]], y: [[]]}, [ti]);
+    Plotly.relayout(div, {annotations: []});
+    badge.textContent = '';
+    return;
+  }
+
+  Plotly.restyle(div, {
+    x: [[fit.xmin, fit.xmax]],
+    y: [[fit.slope * fit.xmin + fit.intercept,
+         fit.slope * fit.xmax + fit.intercept]],
+  }, [ti]);
+  Plotly.relayout(div, {annotations: [trendAnnotation(fit)]});
+
+  badge.textContent = `R² = ${fmt3(fit.r2)}` + (partial ? ` · ${fit.n}점` : '');
 }
 
 /* ══════════════════════════════════════════════════
@@ -874,7 +961,7 @@ async function runInsight() {
 
   try {
     const res = await postJSON(API_INSIGHT, {
-      oper_id: ssOper.value, lot_cd: selLot.value,
+      oper_id: ssOper.value, lot_cd: ssLot.value,
       param: ssParam.value, ids: selectedIds,
     });
     if (res.error) { out.innerHTML = `<p>${esc(res.error)}</p>`; return; }
