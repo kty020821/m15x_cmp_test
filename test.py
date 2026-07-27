@@ -1,824 +1,838 @@
 """
-equipment/analysis_service.py
 ════════════════════════════════════════════════════════════
-산포 분석 데이터 적재 파이프라인
-
-  APC / SRC / MES(LC) 조회 (Lake·StarRocks)
-      → SRC pivot(long→wide) / APC 압축 / MES lot단위 정리
-      → 머지
-      → idle_1~4 파생, EQP_CH_ID 결정
-      → PostgreSQL 저장
-
-실행: 루트의 run_analysis_load.py (사내 스케줄러가 호출)
-
+equipment/views_analysis.py
 ────────────────────────────────────────────────────────────
-[★ 사용 전 확인]
-  1. 아래 import 에 사내 모듈(lakes, goodDocsGetData) 실제 경로 입력
-  2. OPTA_FIXED_CH 에 챔버 고정 공정의 oper_id 입력
-  3. settings.py 의 DATABASES['analysis_db'] 설정 필요
+산포 분석 페이지의 화면 + API 전체
+
+  화면 흐름
+    STEP 1  대상 선택   TECH → LOT_CD → OPER → PARAMETER
+    STEP 2  구간 지정   트렌드에서 드래그 (상관 차트에 교차 표시)
+    STEP 3  원인 분석   요인 편중 + AI 해석
+
+  설계 원칙
+    · 통계 계산은 전부 PostgreSQL 이 담당하고, 웹은 그리기만 한다
+    · LLM 에는 원본 행을 넘기지 않는다. 코드가 만든 요약만 넘긴다
+
+  [사용법]
+    이 파일을 그대로 두고 views.py 에서 가져다 쓰거나,
+    내용을 views.py 에 붙여넣어도 된다.
+    별도 파일로 둘 경우 urls.py 에서 이 모듈을 import 할 것.
+
+  [설정 지점]
+    LEGEND_OPTIONS  차트 범례 후보
+    FACTOR_COLS     요인 분포 항목
+    LIFT_MIN        편중 판정 기준
+    LLM_SYSTEM      LLM 프롬프트
+
+    TECH / LOT_CD 목록은 equipment/tech_map.py 에서 관리한다.
+    OPER 목록은 구닥스 공정명 + 적재된 테이블에서 자동 생성한다.
 ════════════════════════════════════════════════════════════
 """
 
+import json
 import re
-import pandas as pd
-import numpy as np
-from datetime import date, timedelta
+from math import ceil
+
+import requests
+from django.conf import settings
+from django.shortcuts import render
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from django.db import connections
-from psycopg2.extras import execute_values
 
-# ★ 사내 모듈 — 기존 코드에서 쓰던 import 문을 그대로 넣을 것
-# from ??? import lakes
-# from ??? import goodDocsGetData
+from . import tech_map
+from . import analysis_service as svc
 
 
 # ══════════════════════════════════════════════════════════
-# 0. Lake 공통
+# 1. 기준정보
 # ══════════════════════════════════════════════════════════
-def get_lake():
-    """Lake(StarRocks) 연결. 공정 여러 개 돌 때 한 번만 만들어 재사용."""
-    lake = lakes.LakeHouse(real_user_id='')
-    lake.ensure_running(cluster_type='starrocks')
-    return lake
-
-
-def run_query(lake, query):
-    lake.auto_run_sync_paragraph(code=query)
-    return lake.get_rst().toPandas()
-
-
-def _date_chunks(days=30, freq='30D'):
-    """조회 기간을 (dt_start, dt_end, mt_start, mt_end) 단위로 분할"""
-    date_end   = date.today()
-    date_start = date_end - timedelta(days=days)
-    rng = pd.date_range(start=date_start, end=date_end, freq=freq)
-    if len(rng) < 2 or rng[-1].date() < date_end:
-        rng = rng.append(pd.DatetimeIndex([pd.Timestamp(date_end)]))
-    return [
-        (rng[i].strftime("%Y%m%d"), rng[i + 1].strftime("%Y%m%d"),
-         rng[i].strftime("%Y%m"),   rng[i + 1].strftime("%Y%m"))
-        for i in range(len(rng) - 1)
-    ]
-
-
-def _recipe_cond(recipe_list, col='recipe_id'):
-    """recipe 1개면 =, 여러 개면 IN"""
-    rl = [r for r in recipe_list if r]
-    if not rl:
-        return ""
-    if len(rl) == 1:
-        return f"and {col} = '{rl[0]}'"
-    return f"and {col} in (" + ",".join(f"'{r}'" for r in rl) + ")"
-
-
-def _recipe_like_cond(recipe_list, col='eqp_recipe_id'):
-    """
-    여러 레시피를 prefix(LIKE) 로 OR 조합.
-
-    구닥스 RECIPE_ID 는 확장자가 붙기도 하고(.CAS), 실제 장비에서는
-    파생 레시피가 돌기도 해서 접두 일치로 비교한다.
-    챔버가 다른 레시피(_AB / _CD)는 구닥스에 각각 등록하면 여기서 모두 조회된다.
-    """
-    bases = []
-    for r in recipe_list:
-        if not r:
-            continue
-        b = str(r).split('.')[0]          # 확장자 제거
-        if b not in bases:
-            bases.append(b)
-    if not bases:
-        return ""
-    ors = " or ".join(f"{col} like '{b}%'" for b in bases)
-    return f"and ({ors})"
-
-
-def _param_tuple(param_list):
-    """구닥스 PARAM 목록 → SQL IN 용 튜플 문자열"""
-    params = [str(p) for p in param_list if p]
-    if not params:
-        return "('')"
-    return "(" + ",".join(f"'{p}'" for p in params) + ")"
-
-
-# ══════════════════════════════════════════════════════════
-# 1. 기준정보 (구닥스)
-#    컬럼(대문자, PARAM 마다 1행 · 나머지 값 반복):
-#      FAB, LOT_CD, OPER_ID, OPER_DESC, EQ_MODEL, RECIPE_ID,
-#      PARAM, PRE_OPER_ID, PRE_OPER_DESC, PRE_OPER_PARAM
-# ══════════════════════════════════════════════════════════
-def get_config():
-    return goodDocsGetData().dropna(axis=0)
-
-
-def get_oper_list(df_info):
-    """공정 단위 목록 (OPER_ID 별 대표 1행)"""
-    return df_info.drop_duplicates(subset=['OPER_ID'])
-
-
-# 모델별 챔버 파라미터 대칭 규칙
-#   (좌 접두사, 우 접두사) — 좌를 등록하면 우를 자동 생성한다.
-#   접두사 뒤에는 숫자가 붙을 수 있고(PL1), 그 뒤 나머지는 그대로 유지.
-#     EBARA: PA=PC, PB=PD   (PA_03_TIME → PC_03_TIME)
-#     KCT  : PL=PR          (PL_4_TIME → PR_4_TIME, PL1_4_TIME → PR1_4_TIME)
-CHAMBER_TWINS = {
-    'EBARA':   [('PA', 'PC'), ('PB', 'PD')],
-    'KCT_NTA': [('PL', 'PR')],
-    'KCT_NTH': [('PL', 'PR')],
-}
-
-
-def _expand_chamber_params(param_list, model):
-    """
-    챔버 파라미터 자동 확장.
-    구닥스에 한쪽(PA/PB 또는 PL)만 등록해도 짝(PC/PD 또는 PR)을 채운다.
-
-    접두사 바로 뒤가 '숫자들 + _' 형태일 때만 확장한다.
-      PL_4_TIME  → 접두사 PL, 뒤 _4_TIME       → PR_4_TIME
-      PL1_4_TIME → 접두사 PL, 숫자 1, 뒤 _4_TIME → PR1_4_TIME
-    PART_CNT, PADCNT 처럼 접두사 뒤가 문자면 건드리지 않는다.
-    """
-    twins = CHAMBER_TWINS.get(str(model).upper())
-    if not twins:
-        return param_list
-
-    out  = list(param_list)
-    have = set(str(p) for p in param_list)
-
-    for p in param_list:
-        s = str(p)
-        for left, right in twins:
-            # 접두사 + (선택적 숫자) + _ + 나머지
-            m = re.match(rf'^{left}(\d*)_(.+)$', s, re.IGNORECASE)
-            if m:
-                twin = f"{right}{m.group(1)}_{m.group(2)}"
-                if twin not in have:
-                    out.append(twin)
-                    have.add(twin)
-                break
-    return out
-
-
-def get_oper_cond(df_info, oper_id):
-    """한 공정의 조회 조건 묶음"""
-    sub   = df_info[df_info['OPER_ID'] == oper_id]
-    first = sub.iloc[0]
-
-    # 챔버 파라미터 자동 확장 (EBARA: PA/PB→PC/PD, KCT: PL→PR)
-    param_list = _expand_chamber_params(
-        sub['PARAM'].unique().tolist(), first['EQ_MODEL'])
-
-    return {
-        'fab':            str(first['FAB']).lower(),      # 테이블명에 소문자로 들어감
-        'lot_cd_list':    sub['LOT_CD'].unique().tolist(),
-        'oper_id':        oper_id,
-        'oper_desc':      first['OPER_DESC'],
-        'eq_model':       first['EQ_MODEL'],
-        'recipe_list':    sub['RECIPE_ID'].unique().tolist(),
-        'param_list':     param_list,
-        'pre_oper_id':    first['PRE_OPER_ID'],
-        'pre_oper_desc':  first['PRE_OPER_DESC'],
-        'pre_oper_param': first['PRE_OPER_PARAM'],
-    }
-
-
-# ══════════════════════════════════════════════════════════
-# 2. APC 조회
-#    idle / layer_change 플래그 + APC 파라미터
-#    ※ c.eqp_id 필수 (a 에는 없음)
-# ══════════════════════════════════════════════════════════
-def fetch_apc(lake, cond, days=30):
-    fab = cond['fab']
-    dfs = []
-
-    for dt_s, dt_e, mt_s, mt_e in _date_chunks(days):
-        query = f"""
-select distinct *
-from (
-    select a.request_dtts, c.process_id, c.recipe_id, c.operation_id,
-           c.lot_id, c.eqp_id, a.substrate_id, a.input_name, a.r2r_status,
-           a.input_value, b.item_value,
-           RANK() over(partition by a.substrate_id order by a.request_dtts DESC) r2r_rank,
-           c.qty
-    from lake_catalog.apc.apc_inquiry_hst_r2r_{fab} a
-    left join lake_catalog.apc.apc_inquiry_ext_hst_r2r_{fab} b
-           on a.rawid = b.inquiry_hst_rawid
-    left join lake_catalog.apc.apc_lot_hst_r2r_{fab} c
-           on a.lot_hst_rawid = c.rawid
-    where a.dt between '{dt_s}' and '{dt_e}'
-      and b.dt between '{dt_s}' and '{dt_e}'
-      and c.mt between '{mt_s}' and '{mt_e}'
-      and c.operation_id = '{cond['oper_id']}'
-      and ( a.model_name like '%CMP%'
-         or a.model_name like '%KCC88%'
-         or a.model_name like '%KCC01%' )
-      and a.input_value is not null
-      and b.item_name in ('FORMULA', 'PROCESS_OFFSET_MES_IDLE_FLAG_IDLE',
-                          'IDLE_TIME', 'PROCESS_OFFSET_WAFER_SEQ')
-      and c.lot_status = 'JobEnd'
-) d
-where d.r2r_rank = 1
-{_recipe_cond(cond['recipe_list'])}
-"""
-        df = run_query(lake, query)
-        if df is not None and not df.empty:
-            dfs.append(df)
-
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True).drop_duplicates()
-
-
-# ══════════════════════════════════════════════════════════
-# 3. SRC 조회
-#    측정값(long) + 사전공정 장비/챔버
-#    ※ lot 조건은 right(lot_cd, 3) — 3자리 (5E2). 2자리로 하면 0행!
-# ══════════════════════════════════════════════════════════
-def fetch_src(lake, cond, days=30):
-    fab      = cond['fab']
-    oper_id  = cond['oper_id']
-    pre_oper = str(cond.get('pre_oper_id') or '')
-    param_in = _param_tuple(cond['param_list'])
-
-    recipe_list = [r for r in cond['recipe_list'] if r]
-    # 챔버 확장(_AB/_CD) 등 여러 레시피를 모두 조회한다
-    recipe_cond = _recipe_like_cond(recipe_list, 'c.eqp_recipe_id')
-    pre_oper_r1 = pre_oper[:-1] if pre_oper else ''
-
-    dfs = []
-    for lot_code in cond['lot_cd_list']:
-        for dt_s, dt_e, mt_s, mt_e in _date_chunks(days):
-            dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
-            dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
-
-            query = f"""
-WITH src AS (
-    select a.lot_id, a.wf_id,
-           concat(CAST(a.alias_lot_id as VARCHAR), '.', CAST(a.wf_id as VARCHAR)) as substrate_id,
-           a.main_eqp_id, a.param_nm, a.oper_id, a.oper_det_desc,
-           a.meas_val as thk_value, a.end_tm,
-           b.eqp_id as pre_eqp_id, b.module_id as pre_eqp_ch,
-           b.last_update_dtts as pre_oper_time,
-           RANK() over(partition by a.lot_id, a.wf_id, a.param_nm order by a.end_tm DESC) r2r_rank
-    from lake_catalog.tas.tas_src_wf_metr_inf a
-    left join (
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m10
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-        union
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m11
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-        union
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m14
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-        union
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m15
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-    ) b on a.lot_id = b.lot_id and a.wf_id = b.wf_id
-    left join (
-        select distinct d.lot_id, d.eqp_recipe_id, d.recipe_rank
-        from (
-            select lot_id, crt_tm, eqp_recipe_id,
-                   rank() over (partition by lot_id order by crt_tm asc) recipe_rank
-            from lake_catalog.dcp.dcp_dcp_dcoldata_inf_{fab}
-            where ( SUBSTRING(lot_id, 2, 2) = '{lot_code}'
-                 or SUBSTRING(lot_id, 2, 2) = 'XC'
-                 or SUBSTRING(lot_id, 1, 1) = 'S' )
-              and oper_id = '{oper_id}'
-              and dt between '{dt_s}' and '{dt_e}'
-        ) d
-        where d.recipe_rank = 1
-    ) c on a.lot_id = c.lot_id
-    where a.mt between '{mt_s}' and '{mt_e}'
-      and a.end_tm >= '{dt_start}'
-      and a.end_tm <= '{dt_end}'
-      and a.oper_id = '{oper_id}'
-      and right(a.lot_cd, 3) = '{lot_code}'
-      {recipe_cond}
-      and a.param_nm in {param_in}
-"""
-            # 일부 사전공정만 module_id 제한 (하드코딩 · 필요시 추가)
-            if pre_oper in ('V5071000B', 'X106100B', 'T5515000C'):
-                query += "      and ( b.module_id = '2' or b.module_id = '3' )\n)"
-            elif pre_oper in ('T5515000M', 'T5515000A'):
-                query += "      and ( b.module_id = '2' or b.module_id = '3' or b.module_id = '5' )\n)"
-            else:
-                query += "\n)"
-
-            query += """
-select *
-from (
-    select src.*,
-           row_number() over (partition by src.substrate_id, src.param_nm
-                              order by src.pre_oper_time desc) as rn
-    from src
-    where src.r2r_rank = 1
-) t
-where rn = 1
-"""
-            df = run_query(lake, query)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True).drop_duplicates()
-
-
-# ══════════════════════════════════════════════════════════
-# 4. MES(LC) 조회 — layer change
-#    장비별 recipe 이력을 시간순으로 놓고 직전 recipe 에서 이전 layer 유도
-# ══════════════════════════════════════════════════════════
-# 모델별 챔버 규칙
-#   챔버 표기는 recipe_id 중간(_L_)에도, 끝(_L)에도 올 수 있음
-#   → r'_L(_|$)' 형태여야 함. r'_L$' 로 하면 전부 걸러져 0행이 됨
-# ★ 모델 추가 시 여기만 수정
-_KCT_CH = {
-    'L': {'include': r'_L(_|$)', 'exclude': r'_R(_|$)'},
-    'R': {'include': r'_R(_|$)', 'exclude': r'_L(_|$)'},
-}
-
-MODEL_CH_CONFIG = {
-    'KCT_NTA': _KCT_CH,               # 구 ELASTIC
-    'KCT_NTH': _KCT_CH,
-    'EBARA': {
-        'AB': {'include': r'_AB(_|$)', 'exclude': r'_CD(_|$)'},
-        'CD': {'include': r'_CD(_|$)', 'exclude': r'_AB(_|$)'},
-    },
-    'OPTA': {
-        None: {'include': None, 'exclude': None},   # recipe 에 챔버 표기 없음(.CAS)
-    },
-}
-DEFAULT_CH_CONFIG = MODEL_CH_CONFIG['OPTA']
-
-
-def _derive_before_info(s):
-    """직전 recipe_id → 이전 layer 표기(LC_xxx)"""
-    parts = s.str.split('_')
-    p0, p1, p2 = parts.str[0], parts.str[1], parts.str[2]
-    three = 'LC_' + p0 + '_' + p1 + '_' + p2
-    two   = 'LC_' + p0 + '_' + p1
-    return np.where(s.str.contains('ADD_|T_|TB_', na=False), three, two)
-
-
-def _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_infos):
-    """장비 1대 × 챔버 1개의 layer change 추출"""
-    d = lc_df[lc_df['eqp_id'] == eqp_id]
-
-    if rule['include']:
-        d = d[d['recipe_id'].str.contains(rule['include'], na=False, regex=True)]
-    if rule['exclude']:
-        d = d[~d['recipe_id'].str.contains(rule['exclude'], na=False, regex=True)]
-    if d.empty:
-        return None
-
-    d = d.sort_values('event_tm').copy()
-    d['before_recipe_id'] = d['recipe_id'].shift()
-    d = d.dropna(subset=['before_recipe_id'])
-    if d.empty:
-        return None
-
-    d['before_info']    = _derive_before_info(d['before_recipe_id'])
-    d['recipe_id_info'] = (d['recipe_id'].str.split('_').str[0] + '_' +
-                           d['recipe_id'].str.split('_').str[1])
-    d = d[d['recipe_id_info'].isin(recipe_infos)]
-    if d.empty:
-        return None
-
-    d['eqp_ch'] = ch if ch else ''
-    d['rank']   = 1
-    return d
-
-
-def fetch_mes(lake, cond, df_src, days=30):
-    """
-    MES(LC) 조회.
-      df_src : SRC 결과 — 여기서 main_eqp_id 로 장비 목록을 뽑는다
-               (APC 의 eqp_id 는 lot 테이블 c 쪽이라 안정적이지 않음)
-    """
-    if df_src is None or df_src.empty:
-        return pd.DataFrame()
-
-    fab = cond['fab']
-
-    # 구닥스 RECIPE_ID 는 전체 recipe 명(E2_M1CU_R12_TSV.CAS).
-    # recipe_id_info 는 앞 두 파트(E2_M1CU) 이므로 prefix 로 변환해 비교해야 함
-    recipe_infos = []
-    for r in cond['recipe_list']:
-        if not r:
-            continue
-        prefix = '_'.join(str(r).split('_')[:2])
-        if prefix not in recipe_infos:
-            recipe_infos.append(prefix)
-
-    src = df_src.copy()
-    src.columns = src.columns.str.lower()
-    eqp_ids = src['main_eqp_id'].dropna().unique()
-    if len(eqp_ids) == 0:
-        return pd.DataFrame()
-    eqp_in = "'" + "','".join(map(str, eqp_ids)) + "'"
-
-    dfs = []
-    for dt_s, dt_e, _, _ in _date_chunks(days):
-        query = f"""
-select eqp_id, event_tm, last_recipe_id as recipe_id,
-       resv_field_val_3 as lot_id
-from lake_catalog.mes.mes_mes_eqpmasext_his_{fab}
-where dt between '{dt_s}' and '{dt_e}'
-  and eqp_id in ({eqp_in})
-  and event_cd = 'JobStart'
-"""
-        d = run_query(lake, query)
-        if d is not None and not d.empty:
-            dfs.append(d)
-
-    if not dfs:
-        return pd.DataFrame()
-
-    lc_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
-    lc_df.columns = lc_df.columns.str.lower()
-
-    model    = str(cond.get('eq_model') or '').upper()
-    ch_rules = MODEL_CH_CONFIG.get(model, DEFAULT_CH_CONFIG)
-
-    out = []
-    for eqp_id in lc_df['eqp_id'].unique():
-        for ch, rule in ch_rules.items():
-            part = _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_infos)
-            if part is not None:
-                out.append(part)
-
-    if not out:
-        return pd.DataFrame()
-    return pd.concat(out, ignore_index=True)
-
-
-# ══════════════════════════════════════════════════════════
-# 5. 소스별 정리 (pivot / 압축)
-# ══════════════════════════════════════════════════════════
-# 웨이퍼 1장당 하나인 값 (pivot 후에도 유지)
-SRC_META_COLS = [
-    'lot_id', 'wf_id', 'substrate_id', 'main_eqp_id',
-    'oper_id', 'oper_det_desc', 'end_tm',
-    'pre_eqp_id', 'pre_eqp_ch', 'pre_oper_time',
+# ── 차트 범례 후보 ────────────────────────────────────────
+#    ★ 항목 추가는 여기만 (PG 컬럼명과 일치해야 함)
+LEGEND_OPTIONS = [
+    ('EQP_ID',     '장비 ID'),
+    ('RECIPE_ID',  'Recipe'),
+    ('EQP_CH_ID',  'Chamber'),
+    ('IDLE',       'Idle'),
+    ('EQP_MODEL',  '장비 모델'),
+    ('PRE_LAYER',  'Layer Change'),
+    ('PRE_EQP_ID', '사전공정 장비'),
+    ('PRE_EQP_CH', '사전공정 챔버'),
 ]
 
-
-def pivot_src(df_src):
-    """
-    SRC long → wide.
-      substrate_id 기준으로 param_nm 을 컬럼화.
-      end_tm 이 param 별로 미세하게 다를 수 있어 index 에 넣지 않고,
-      메타는 별도 추출 후 병합한다.
-    """
-    if df_src is None or df_src.empty:
-        return pd.DataFrame()
-
-    df = df_src.copy()
-    df.columns = df.columns.str.lower()
-
-    wide = df.pivot_table(
-        index='substrate_id', columns='param_nm',
-        values='thk_value', aggfunc='first',
-    ).reset_index()
-    wide.columns.name = None
-
-    meta_cols = [c for c in SRC_META_COLS if c in df.columns]
-    meta = (df.sort_values('end_tm')
-              .groupby('substrate_id', as_index=False)[meta_cols]
-              .first())
-
-    return meta.merge(wide, on='substrate_id', how='left')
-
-
-def prepare_apc(df_apc):
-    """
-    APC → 웨이퍼당 1행.
-      item_value 에 idle / layer_change 가 들어오므로 값 자체로 판별
-      (item_name 은 SELECT 에 없고, 필요하지도 않음)
-    """
-    if df_apc is None or df_apc.empty:
-        return pd.DataFrame()
-
-    df = df_apc.copy()
-    df.columns = df.columns.str.lower()
-
-    iv   = df['item_value'].astype(str).str.strip().str.lower()
-    flag = df[iv.isin(['idle', 'layer_change'])]
-
-    if not flag.empty:
-        idle = (flag.sort_values('request_dtts')
-                    .groupby('substrate_id', as_index=False)['item_value']
-                    .first()
-                    .rename(columns={'item_value': 'idle'}))
-    else:
-        idle = pd.DataFrame(columns=['substrate_id', 'idle'])
-
-    meta_cols = [c for c in ['substrate_id', 'lot_id', 'eqp_id', 'process_id',
-                             'recipe_id', 'operation_id', 'qty', 'request_dtts']
-                 if c in df.columns]
-    meta = (df.sort_values('request_dtts')
-              .groupby('substrate_id', as_index=False)[meta_cols]
-              .first())
-
-    return meta.merge(idle, on='substrate_id', how='left')
-
-
-# ══════════════════════════════════════════════════════════
-# 6. 머지
-#    SRC ↔ APC : substrate_id (SRC 는 alias_lot_id 기반 — 매칭률 더 높음)
-#    ↔ MES     : lot_id (lot 당 1행으로 줄인 뒤 붙임)
-# ══════════════════════════════════════════════════════════
-def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
-    if df_src_wide is None or df_src_wide.empty:
-        return pd.DataFrame()
-
-    df = df_src_wide.copy()
-
-    if df_apc_prep is not None and not df_apc_prep.empty:
-        # lot_id 중복 방지 — substrate_id 로만 조인
-        apc = df_apc_prep.drop(columns=[c for c in ['lot_id'] if c in df_apc_prep.columns])
-        df = df.merge(apc, on='substrate_id', how='inner')   # inner → rework 자동 제외
-
-    if df_mes is not None and not df_mes.empty:
-        mes = df_mes.copy()
-        mes.columns = mes.columns.str.lower()
-        keep = [c for c in ['before_info', 'eqp_ch'] if c in mes.columns]
-        mes = (mes.sort_values('event_tm')
-                  .groupby('lot_id', as_index=False)[keep]
-                  .first())                                   # lot 당 1행 (행 뻥튀기 방지)
-        df = df.merge(mes, on='lot_id', how='left')
-
-    return df
-
-
-# ══════════════════════════════════════════════════════════
-# 7. 파생 — idle_1~4 / OPTA 챔버
-# ══════════════════════════════════════════════════════════
-def derive_idle(df):
-    """
-    APC 의 idle 플래그는 해당 lot 전체 웨이퍼에 동일하게 붙어온다.
-      → "이 lot 이 idle 직후인가" 를 뜻하므로
-        lot 웨이퍼를 시간순 정렬해 앞 4장에 idle_1~4 부여.
-      layer_change 는 lot 첫 웨이퍼에만 표기.
-    """
-    if df is None or df.empty:
-        return df
-
-    df = df.copy()
-    if 'idle' not in df.columns:
-        df['idle'] = ''
-    df['idle'] = df['idle'].fillna('').astype(str).str.strip().str.lower()
-
-    time_col = 'end_tm' if 'end_tm' in df.columns else 'request_dtts'
-
-    out = []
-    for lot_id, g in df.groupby('lot_id', sort=False):
-        g = g.sort_values(time_col).reset_index(drop=True)
-        flag = g['idle'].iloc[0]
-
-        g['idle'] = ''
-        if flag.startswith('idle'):
-            for i in range(min(4, len(g))):
-                g.loc[i, 'idle'] = f'idle_{i+1}'
-        elif 'layer' in flag:
-            g.loc[0, 'idle'] = 'layer_change'
-
-        out.append(g)
-
-    return pd.concat(out, ignore_index=True)
-
-
-# OPTA 챔버 — param_nm 표기(_P1/_P2) → 실제 챔버명
-OPTA_CH_MAP = {'P1': 'P3', 'P2': 'P4'}
-
-# param 으로 판정 불가한 공정 (챔버 고정)
-# ★ 실제 oper_id 입력 필요. 추후 구닥스 컬럼으로 옮기는 것 권장
-OPTA_FIXED_CH = {
-    # 'OPER_ID값': 'P4',
-}
-
-
-def derive_opta_chamber(df_src, oper_id):
-    """substrate_id 별 OPTA 챔버 판정"""
-    d = df_src.copy()
-    d.columns = d.columns.str.lower()
-
-    fixed = OPTA_FIXED_CH.get(str(oper_id))
-    if fixed:
-        out = d[['substrate_id']].drop_duplicates().copy()
-        out['eqp_ch_opta'] = fixed
-        return out
-
-    # thk 등 P 표기 없는 param 은 NaN 으로 빠져 자동 제외됨
-    d['ch'] = d['param_nm'].str.extract(r'_(P\d)(?:_|$)')
-    d['ch'] = d['ch'].map(OPTA_CH_MAP).fillna(d['ch'])
-    return (d.dropna(subset=['ch'])
-              .groupby('substrate_id', as_index=False)['ch']
-              .first()
-              .rename(columns={'ch': 'eqp_ch_opta'}))
-
-
-# ══════════════════════════════════════════════════════════
-# 8. 저장 직전 정리
-# ══════════════════════════════════════════════════════════
-RENAME_MAP = {
-    'end_tm':      'DATE',
-    'main_eqp_id': 'EQP_ID',
-    'eqp_ch':      'EQP_CH_ID',
-    'before_info': 'PRE_LAYER',
-    'oper_id':     'OPERATION_ID',
-    'idle':        'IDLE',
-}
-
-DROP_COLS = [
-    'r2r_rank', 'rn', 'rank', 'recipe_id_info', 'before_recipe_id',
-    'pre_oper_time', 'request_dtts', 'event_tm', 'oper_det_desc',
-    'operation_id', 'eqp_id',          # APC 쪽 중복 (SRC 값을 사용)
+# ── 요인 분포 항목 ────────────────────────────────────────
+#    (컬럼, 표시명, 빈값 표기, 구간 수)
+#    구간 수를 주면 숫자로 보고 같은 폭의 구간으로 묶는다 (WF_ID 등).
+#    ★ 요인 추가는 여기 한 줄. 테이블에 없는 컬럼은 자동으로 건너뜀
+FACTOR_COLS = [
+    ('IDLE',       'Idle',          'Normal',  None),
+    ('PRE_LAYER',  'Layer Change',  '(없음)',  None),
+    ('PRE_EQP_ID', '사전공정 장비',  '(없음)',  None),
+    ('PRE_EQP_CH', '사전공정 챔버',  '(없음)',  None),
+    ('EQP_ID',     '장비',          '(없음)',  None),
+    ('WF_ID',      'WF 구간',       '(없음)',  5),      # 25장 → 5구간
 ]
 
-
-def finalize_df(df, cond, df_src=None):
-    """
-    머지+파생 결과를 저장 형태로 정리.
-      - OPTA 면 param 기반 챔버 채우기 (df_src 필요)
-      - EQP_CH_ID = 장비ID_챔버 형태로 결합
-      - 컬럼명 통일 / 기준정보 추가 / 불필요 컬럼 제거 / 대문자화
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df.columns = df.columns.str.lower()
-
-    # OPTA 챔버 보강
-    if str(cond.get('eq_model', '')).upper() == 'OPTA' and df_src is not None:
-        ch = derive_opta_chamber(df_src, cond['oper_id'])
-        df = df.merge(ch, on='substrate_id', how='left')
-        if 'eqp_ch' not in df.columns:
-            df['eqp_ch'] = pd.NA
-        df['eqp_ch'] = df['eqp_ch'].replace('', pd.NA).fillna(df['eqp_ch_opta'])
-        df = df.drop(columns=['eqp_ch_opta'])
-
-    # EQP_CH_ID = 장비ID_챔버
-    if 'eqp_ch' in df.columns and 'main_eqp_id' in df.columns:
-        chs = df['eqp_ch'].fillna('').astype(str).str.strip()
-        df['eqp_ch'] = pd.Series(
-            [f"{e}_{c}" if c else '' for e, c in zip(df['main_eqp_id'].astype(str), chs)],
-            index=df.index,
-        )
-
-    df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
-    df = df.rename(columns={k: v for k, v in RENAME_MAP.items() if k in df.columns})
-
-    if 'lot_id' in df.columns:
-        df['LOT_CD'] = df['lot_id'].astype(str).str[:3]
-    df['EQP_MODEL'] = cond.get('eq_model', '')
-
-    df.columns = [c.upper() for c in df.columns]
-
-    if 'DATE' in df.columns:
-        df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
-
-    # 중복 컬럼 방어 (앞의 것만 유지)
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    return df
-
-
-# ══════════════════════════════════════════════════════════
-# 9. PostgreSQL 저장
-#    pandas to_sql 은 버전 조합에 따라 실패 → psycopg2 execute_values 사용
-# ══════════════════════════════════════════════════════════
-# 값이 숫자처럼 보여도 반드시 텍스트로 저장할 컬럼 (식별자류)
-#   LOT_CD 5E2 / 5E9 가 과학적표기법 숫자(500.0 / 5e9)로 뭉개지는 것을 막는다.
-#   계산 대상이 아니므로 전부 텍스트가 맞다.
-TEXT_COLS = {
-    'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID', 'EQP_MODEL',
-    'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID', 'WF_ID',
-    'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH',
+# ── 측정값이 아닌 메타 컬럼 (PARAMETER 후보에서 제외) ──────
+META_COLS = {
+    'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
+    'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
+    'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
 }
-TIME_COLS = {'DATE'}
+
+# PG 숫자 타입 (정확 일치로 판정 — 부분문자열 매칭은 오탐이 난다)
+NUMERIC_TYPES = {
+    'smallint', 'integer', 'bigint',
+    'decimal', 'numeric', 'real', 'double precision',
+}
+
+# 편중 판정 기준
+LIFT_MIN  = 1.5     # 전체 대비 몇 배 이상 몰려야 '편중' 으로 볼지
+COUNT_MIN = 3       # 선택 영역 내 최소 건수 (우연 배제)
 
 
-def _pg_type_from_series(s):
-    """
-    실제 데이터로 PG 타입 판정.
-    하드코딩 목록은 컬럼이 늘 때마다 누락되므로 값을 보고 결정한다.
-    """
-    if pd.api.types.is_datetime64_any_dtype(s):
-        return 'TIMESTAMP'
-    if pd.api.types.is_numeric_dtype(s):
-        return 'DOUBLE PRECISION'
-
-    nonnull = s.dropna()
-    if len(nonnull) == 0:
-        return 'VARCHAR(200)'
-    if pd.to_numeric(nonnull, errors='coerce').notna().all():
-        return 'DOUBLE PRECISION'
-    return 'VARCHAR(200)'
-
-
-def _table_name(oper_id):
+# ══════════════════════════════════════════════════════════
+# 2. 공통 헬퍼
+# ══════════════════════════════════════════════════════════
+def _an_table(oper_id):
     return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
 
 
-def drop_analysis_table(oper_id):
-    """컬럼/타입이 바뀌었을 때 테이블을 지운다 (재적재 전 1회)"""
-    table = _table_name(oper_id)
+def _f(v):
+    return round(float(v), 3) if v is not None else None
+
+
+def _sqlstr(v):
+    """SQL 문자열 리터럴 (설정값 전용 — 사용자 입력에는 쓰지 말 것)"""
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def _existing_cols(table):
+    """테이블에 실제 존재하는 컬럼(대문자) 집합"""
     with connections['analysis_db'].cursor() as cur:
-        cur.execute(f'DROP TABLE IF EXISTS {table}')
-    print(f"[{oper_id}] {table} DROP 완료")
+        cur.execute("""
+            SELECT upper(column_name) FROM information_schema.columns
+            WHERE table_name = %s
+        """, [table])
+        return {r[0] for r in cur.fetchall()}
 
 
-def save_analysis_df(df, oper_id):
-    """
-    최종 wide df -> PostgreSQL 저장 (LOT_CD 단위 삭제 후 재적재)
+def _fetch_numeric_cols(table):
+    """숫자형 측정값 컬럼 목록 (메타 컬럼 제외)"""
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_name = %s ORDER BY ordinal_position
+        """, [table])
+        rows = cur.fetchall()
 
-    [주의] CREATE TABLE IF NOT EXISTS 는 기존 테이블 구조를 바꾸지 않는다.
-           컬럼/타입이 바뀌었으면 drop_analysis_table() 을 먼저 호출할 것.
-    """
-    if df is None or df.empty:
-        print(f"[{oper_id}] 저장 스킵 (빈 df)")
-        return
+    out = []
+    for name, dtype in rows:
+        up = name.upper()
+        if up in META_COLS:
+            continue
+        if dtype.lower() in NUMERIC_TYPES:
+            out.append(up)
+    return out
 
-    df = df.copy()
-    df.columns = df.columns.str.upper()
-    df = df.loc[:, ~df.columns.duplicated()]      # 중복 컬럼 방어
 
-    table = _table_name(oper_id)
-    conn  = connections['analysis_db']
+def _factor_items():
+    """FACTOR_COLS 정규화 — 구간 수를 생략한 3개짜리 항목도 허용"""
+    out = []
+    for item in FACTOR_COLS:
+        col, label, empty = item[0], item[1], item[2]
+        nbins = item[3] if len(item) > 3 else None
+        out.append((col, label, empty, nbins))
+    return out
 
-    # 타입 판정 + 값 캐스팅 (Lake 에서 숫자가 문자열로 오는 경우 대비)
-    #   TEXT_COLS 는 값 변환 없이 타입만 VARCHAR 로 고정한다.
-    #   (Lake 가 문자열로 주므로 그대로 두면 5E2 가 보존된다)
-    col_types = {}
-    for c in df.columns:
-        if c in TEXT_COLS:
-            t = 'VARCHAR(200)'
-        elif c in TIME_COLS:
-            t = 'TIMESTAMP'
-        else:
-            t = _pg_type_from_series(df[c])
-        col_types[c] = t
 
-        if t == 'DOUBLE PRECISION':
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        elif t == 'TIMESTAMP':
-            df[c] = pd.to_datetime(df[c], errors='coerce')
-        # VARCHAR 는 원본 그대로 둔다 (변환하면 오히려 값이 깨진다)
+# ── 요인 집계용 SQL 식 ────────────────────────────────────
+def _num_expr(col):
+    """텍스트로 저장된 값에서 숫자만 추출 ('01' → 1)"""
+    return (f"""NULLIF(regexp_replace(CAST("{col}" AS TEXT), '[^0-9]', '', 'g'), '')"""
+            f"""::numeric""")
 
-    col_defs = ["id BIGSERIAL PRIMARY KEY"] + \
-               [f'"{c}" {col_types[c]}' for c in df.columns]
-    with conn.cursor() as cur:
-        cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n  "
-                    + ",\n  ".join(col_defs) + "\n)")
-        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_lot  ON {table} ("LOT_CD")')
-        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_date ON {table} ("DATE")')
 
-    df = df.astype(object).where(pd.notnull(df), None)
+def _bin_edges(cur, table, col, nbins):
+    """테이블 전체 범위를 nbins 개의 같은 폭 구간으로 → [(lo, hi), ...]"""
+    cur.execute(f'SELECT MIN(v), MAX(v) FROM (SELECT {_num_expr(col)} AS v FROM {table}) t')
+    lo, hi = cur.fetchone()
+    if lo is None or hi is None:
+        return []
+    lo, hi = int(lo), int(hi)
+    step = max(1, ceil((hi - lo + 1) / nbins))
 
-    cols    = list(df.columns)
-    col_str = ", ".join(f'"{c}"' for c in cols)
-    data    = [tuple(r) for r in df.itertuples(index=False, name=None)]
-    lot_cds = df['LOT_CD'].dropna().unique().tolist() if 'LOT_CD' in df.columns else []
+    edges, a = [], lo
+    while a <= hi:
+        b = min(a + step - 1, hi)
+        edges.append((a, b))
+        a = b + 1
+    return edges
 
-    with conn.cursor() as cur:
-        for lc in lot_cds:
-            cur.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s', [lc])
-        execute_values(cur.cursor, f'INSERT INTO {table} ({col_str}) VALUES %s',
-                       data, page_size=1000)
 
-    print(f"[{oper_id}] 저장 완료 {len(df):,}행 (lot_cd: {lot_cds})")
+def _key_expr(col, empty_label, edges=None):
+    """집계 키 SQL 식. edges 가 있으면 구간명으로 묶는다"""
+    if edges:
+        num = _num_expr(col)
+        cases = " ".join(
+            f"WHEN {num} BETWEEN {a} AND {b} THEN {_sqlstr(f'{a}~{b}')}"
+            for a, b in edges)
+        return f"COALESCE(CASE {cases} END, {_sqlstr(empty_label)})"
+    # 숫자 컬럼이어도 NULLIF 가 동작하도록 TEXT 로 캐스팅
+    return f"""COALESCE(NULLIF(CAST("{col}" AS TEXT), ''), {_sqlstr(empty_label)})"""
+
+
+def _order_expr(col, edges=None):
+    """구간은 번호순, 그 외는 건수순"""
+    return f'MIN({_num_expr(col)})' if edges else 'COUNT(*) DESC'
 
 
 # ══════════════════════════════════════════════════════════
-# 10. 한 공정 전체 파이프라인
+# 3. 페이지
 # ══════════════════════════════════════════════════════════
-def build_analysis_df(lake, df_info, oper_id, days=30):
-    """조회 → 정리 → 머지 → 파생 → 저장형태 정리까지"""
-    cond = get_oper_cond(df_info, oper_id)
+def analysis_page(request):
+    return render(request, 'equipment/analysis.html', {
+        'tech_list':      tech_map.all_techs(),
+        'legend_options': LEGEND_OPTIONS,
+    })
 
-    df_src = fetch_src(lake, cond, days)
-    df_apc = fetch_apc(lake, cond, days)
-    df_mes = fetch_mes(lake, cond, df_src, days)      # 장비 목록을 SRC 에서 뽑음
 
-    w = pivot_src(df_src)
-    a = prepare_apc(df_apc)
-    m = merge_sources(w, a, df_mes)
-    m = derive_idle(m)
+# ══════════════════════════════════════════════════════════
+# 4. 종속 드롭박스 옵션
+#    TECH  → tech_map.py
+#    LOT_CD→ tech_map ∩ 실제 적재된 값
+#    OPER  → 구닥스 공정명 ∩ 적재된 테이블
+#    PARAM → 테이블 숫자 컬럼
+# ══════════════════════════════════════════════════════════
 
-    return finalize_df(m, cond, df_src)
+# 구닥스 조회는 사내 API 라 매 요청마다 하면 느리다.
+# 프로세스 단위로 캐시하고, 새 공정 적재 후에는 서버를 재시작하거나
+# _oper_cache_clear() 를 호출한다.
+_OPER_CACHE = None
+
+
+def _oper_cache_clear():
+    global _OPER_CACHE
+    _OPER_CACHE = None
+
+
+def _oper_names():
+    """구닥스에서 {OPER_ID: OPER_DESC}. 실패해도 화면은 살아 있어야 한다"""
+    global _OPER_CACHE
+    if _OPER_CACHE is not None:
+        return _OPER_CACHE
+
+    names = {}
+    try:
+        df = svc.get_config()
+        for _, r in df.drop_duplicates(subset=['OPER_ID']).iterrows():
+            names[str(r['OPER_ID']).upper()] = str(r.get('OPER_DESC') or '')
+    except Exception as e:
+        print(f'[analysis] 구닥스 공정 목록 조회 실패: {e}')
+
+    _OPER_CACHE = names
+    return names
+
+
+def _loaded_opers():
+    """적재된 테이블에서 oper_id 목록"""
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT tablename FROM pg_tables
+            WHERE tablename LIKE 'cmp_analysis_%'
+            ORDER BY tablename
+        """)
+        return [r[0].replace('cmp_analysis_', '').upper() for r in cur.fetchall()]
+
+
+def _oper_options():
+    """적재된 공정만. 구닥스에 이름이 없으면 ID 만 표시한다"""
+    names = _oper_names()
+    out = []
+    for oid in _loaded_opers():
+        desc = names.get(oid, '')
+        out.append({'value': oid, 'label': f'{desc} ({oid})' if desc else oid})
+    # 이름 있는 것 먼저, 그 안에서 이름순
+    out.sort(key=lambda o: (o['label'].startswith('('), o['label']))
+    return out
+
+
+def _lots_with_data():
+    """적재된 테이블들에 실제 존재하는 LOT_CD (문자열로 통일)"""
+    lots = set()
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT tablename FROM pg_tables
+            WHERE tablename LIKE 'cmp_analysis_%'
+        """)
+        for (t,) in cur.fetchall():
+            try:
+                cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {t} '
+                            f'WHERE "LOT_CD" IS NOT NULL')
+                # 과거에 숫자로 저장된 테이블이 섞여 있어도 정렬이 깨지지 않게
+                lots.update(str(r[0]) for r in cur.fetchall())
+            except Exception:
+                pass
+    return lots
+
+
+@csrf_exempt
+def analysis_options(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+
+    body  = json.loads(request.body)
+    level = body.get('level')
+
+    if level == 'lot_cd':
+        # 매핑에 등록됐고 실제 데이터도 있는 것만
+        mapped  = tech_map.lots_of_tech(body.get('tech'))
+        have    = _lots_with_data()
+        options = [lc for lc in mapped if lc in have]
+
+        # 데이터에는 있는데 tech_map 에 없는 = 미등록 device
+        unmapped = sorted(lc for lc in have if tech_map.tech_of_lot(lc) is None)
+        return JsonResponse({'options': options, 'unmapped': unmapped})
+
+    if level == 'oper':
+        return JsonResponse({'options': _oper_options()})
+
+    if level == 'param':
+        table = _an_table(body.get('oper_id'))
+        try:
+            return JsonResponse({'options': _fetch_numeric_cols(table)})
+        except Exception as e:
+            return JsonResponse({'options': [], 'error': str(e)})
+
+    return JsonResponse({'options': []})
+
+
+# ══════════════════════════════════════════════════════════
+# 5. 트렌드 스캐터
+# ══════════════════════════════════════════════════════════
+def _sel_list(cols):
+    """SELECT 절 조각 — 비어 있으면 빈 문자열 (콤마 중복 방지)"""
+    return "".join(f', "{c}"' for c in cols)
+
+
+@csrf_exempt
+def analysis_trend(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+
+    body    = json.loads(request.body)
+    oper_id = body.get('oper_id')
+    lot_cd  = body.get('lot_cd')
+    param   = body.get('param')
+    table   = _an_table(oper_id)
+
+    if not param or not re.match(r'^[0-9A-Za-z_]+$', param):
+        return JsonResponse({'error': '잘못된 파라미터'}, status=400)
+
+    try:
+        have = _existing_cols(table)
+
+        # 선택한 파라미터가 이 공정에 없으면 오류가 아니라 '데이터 없음'
+        if param.upper() not in have:
+            return JsonResponse({'data': [], 'param': param,
+                                 'note': f'{param} 컬럼이 이 공정에 없습니다'})
+
+        legend_cols = [c for c, _ in LEGEND_OPTIONS if c in have]
+        extra_cols  = [c for c in ('LOT_ID', 'WF_ID') if c in have]
+
+        sql = f'''
+            SELECT id, "DATE", "{param}"{_sel_list(legend_cols)}{_sel_list(extra_cols)}
+            FROM {table}
+            WHERE "LOT_CD" = %s AND "{param}" IS NOT NULL
+            ORDER BY "DATE"
+        '''
+        with connections['analysis_db'].cursor() as cur:
+            cur.execute(sql, [lot_cd])
+            rows = cur.fetchall()
+
+        n = len(legend_cols)
+        data = []
+        for r in rows:
+            item = {
+                'id':   r[0],
+                'date': r[1].strftime('%Y-%m-%d %H:%M:%S') if r[1] else None,
+                'val':  float(r[2]) if r[2] is not None else None,
+            }
+            for i, c in enumerate(legend_cols):
+                item[c] = r[3 + i]
+            for j, c in enumerate(extra_cols):
+                item[c] = r[3 + n + j]
+            data.append(item)
+
+        return JsonResponse({'data': data, 'param': param})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+# ══════════════════════════════════════════════════════════
+# 6. 상관 산점도 + R² + 추세선
+#    범례로 항목을 걸러내면 화면에서 다시 계산한다 (analysis.html)
+# ══════════════════════════════════════════════════════════
+@csrf_exempt
+def analysis_corr(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+
+    body    = json.loads(request.body)
+    oper_id = body.get('oper_id')
+    lot_cd  = body.get('lot_cd')
+    x_col   = body.get('x_col')
+    y_col   = body.get('y_col')
+    table   = _an_table(oper_id)
+
+    for c in (x_col, y_col):
+        if not c or not re.match(r'^[0-9A-Za-z_]+$', c):
+            return JsonResponse({'error': '잘못된 컬럼'}, status=400)
+
+    try:
+        have = _existing_cols(table)
+
+        # 축 컬럼이 이 공정에 없으면 오류가 아니라 '데이터 없음'
+        missing = [c for c in (x_col, y_col) if c.upper() not in have]
+        if missing:
+            return JsonResponse({
+                'data': [], 'x_col': x_col, 'y_col': y_col,
+                'r2': None, 'trend': None,
+                'note': f"{', '.join(missing)} 컬럼이 이 공정에 없습니다",
+            })
+
+        legend_cols = [c for c, _ in LEGEND_OPTIONS if c in have]
+        extra_cols  = [c for c in ('LOT_ID', 'WF_ID') if c in have]
+
+        sql = f'''
+            SELECT id, "{x_col}", "{y_col}"{_sel_list(legend_cols)}{_sel_list(extra_cols)}
+            FROM {table}
+            WHERE "LOT_CD" = %s AND "{x_col}" IS NOT NULL AND "{y_col}" IS NOT NULL
+            ORDER BY "DATE"
+        '''
+        with connections['analysis_db'].cursor() as cur:
+            cur.execute(sql, [lot_cd])
+            rows = cur.fetchall()
+
+            # 데이터가 없으면 회귀를 돌릴 필요도 없다
+            if not rows:
+                return JsonResponse({'data': [], 'x_col': x_col, 'y_col': y_col,
+                                     'r2': None, 'trend': None})
+
+            cur.execute(f'''
+                SELECT CORR("{x_col}", "{y_col}"),
+                       REGR_SLOPE("{y_col}", "{x_col}"),
+                       REGR_INTERCEPT("{y_col}", "{x_col}"),
+                       MIN("{x_col}"), MAX("{x_col}")
+                FROM {table} WHERE "LOT_CD" = %s
+            ''', [lot_cd])
+            corr, slope, intercept, xmin, xmax = cur.fetchone()
+
+        r2 = round(corr * corr, 4) if corr is not None else None
+
+        trend = None
+        # x 가 한 값뿐이면(xmin == xmax) 직선을 그릴 수 없다
+        if (slope is not None and intercept is not None
+                and xmin is not None and xmax is not None
+                and float(xmin) != float(xmax)):
+            trend = {
+                'x': [float(xmin), float(xmax)],
+                'y': [float(slope * xmin + intercept), float(slope * xmax + intercept)],
+                'slope': round(float(slope), 5),
+                'intercept': round(float(intercept), 5),
+            }
+
+        n = len(legend_cols)
+        data = []
+        for r in rows:
+            item = {
+                'id': r[0],
+                'x':  float(r[1]) if r[1] is not None else None,
+                'y':  float(r[2]) if r[2] is not None else None,
+            }
+            for i, c in enumerate(legend_cols):
+                item[c] = r[3 + i]
+            for j, c in enumerate(extra_cols):
+                item[c] = r[3 + n + j]
+            data.append(item)
+
+        return JsonResponse({'data': data, 'x_col': x_col, 'y_col': y_col,
+                             'r2': r2, 'trend': trend})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+# ══════════════════════════════════════════════════════════
+# 7. 선택 구간의 요인 분포
+# ══════════════════════════════════════════════════════════
+@csrf_exempt
+def analysis_stats(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+
+    body    = json.loads(request.body)
+    oper_id = body.get('oper_id')
+    ids     = body.get('ids', [])
+    table   = _an_table(oper_id)
+
+    if not ids:
+        return JsonResponse({'count': 0, 'factors': []})
+
+    try:
+        with connections['analysis_db'].cursor() as cur:
+            cur.execute("""
+                SELECT upper(column_name) FROM information_schema.columns
+                WHERE table_name = %s
+            """, [table])
+            have = {r[0] for r in cur.fetchall()}
+
+            ph = ",".join(["%s"] * len(ids))
+            cur.execute(f'SELECT COUNT(*) FROM {table} WHERE id IN ({ph})', ids)
+            count = cur.fetchone()[0]
+
+            factors = []
+            for col, label, empty_label, nbins in _factor_items():
+                if col not in have:
+                    continue
+
+                edges = _bin_edges(cur, table, col, nbins) if nbins else None
+                key   = _key_expr(col, empty_label, edges)
+                order = _order_expr(col, edges)
+
+                cur.execute(f'''
+                    SELECT {key} AS k, COUNT(*)
+                    FROM {table} WHERE id IN ({ph})
+                    GROUP BY k ORDER BY {order}
+                ''', ids)
+                rows = [{'key': r[0], 'count': r[1]} for r in cur.fetchall()]
+                factors.append({'col': col, 'label': label, 'rows': rows,
+                                'binned': bool(edges)})
+
+        return JsonResponse({'count': count, 'factors': factors})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+# ══════════════════════════════════════════════════════════
+# 8. 편중도 · 상관 · 요약
+#    LLM 이 해석할 재료를 코드가 계산한다
+# ══════════════════════════════════════════════════════════
+def _enrichment(cur, table, col, ids, lot_cd, ph, empty_label='(없음)', nbins=None):
+    """
+    한 요인의 편중도.
+      선택 구간에서의 비율이 전체에서의 비율보다 얼마나 높은가(lift).
+      예) 선택 85% vs 전체 32% → 2.7배 → 이 조건에 몰려 있다
+    """
+    edges = _bin_edges(cur, table, col, nbins) if nbins else None
+    key   = _key_expr(col, empty_label, edges)
+
+    def counts(where, params):
+        cur.execute(f'SELECT {key} AS k, COUNT(*) FROM {table} '
+                    f'WHERE {where} GROUP BY k', params)
+        return {r[0]: r[1] for r in cur.fetchall()}
+
+    sel  = counts(f'id IN ({ph})', list(ids))
+    allc = counts('"LOT_CD" = %s', [lot_cd])
+
+    s_tot = sum(sel.values()) or 1
+    a_tot = sum(allc.values()) or 1
+
+    out = []
+    for k, sc in sel.items():
+        ac = allc.get(k, 0)
+        s_ratio = sc / s_tot
+        a_ratio = (ac / a_tot) if ac else 0.0
+        lift = (s_ratio / a_ratio) if a_ratio > 0 else None
+        out.append({
+            'key': k, 'sel_n': sc, 'all_n': ac,
+            'sel_pct': round(s_ratio * 100, 1),
+            'all_pct': round(a_ratio * 100, 1),
+            'lift': round(lift, 2) if lift else None,
+            'flag': bool(lift and lift >= LIFT_MIN and sc >= COUNT_MIN),
+        })
+    out.sort(key=lambda x: (x['lift'] or 0), reverse=True)
+    return out
+
+
+def _top_correlations(cur, table, param, lot_cd, ids, ph, top_n=5):
+    """'무엇과 함께 움직였나' — 원인 추론의 강한 단서"""
+    num_cols = [c for c in _fetch_numeric_cols(table) if c != param]
+    if not num_cols:
+        return []
+
+    corr_sel = ", ".join(f'CORR("{param}", "{c}")' for c in num_cols)
+    cur.execute(f'SELECT {corr_sel} FROM {table} WHERE "LOT_CD" = %s', [lot_cd])
+    crow = cur.fetchone()
+
+    ranked = [(c, crow[i]) for i, c in enumerate(num_cols) if crow[i] is not None]
+    ranked.sort(key=lambda x: abs(x[1]), reverse=True)
+    top = ranked[:top_n]
+    if not top:
+        return []
+
+    cols = [c for c, _ in top]
+    agg  = ", ".join(f'AVG("{c}")' for c in cols)
+    cur.execute(f'SELECT {agg} FROM {table} WHERE id IN ({ph})', list(ids))
+    srow = cur.fetchone()
+    cur.execute(f'SELECT {agg} FROM {table} WHERE "LOT_CD" = %s', [lot_cd])
+    arow = cur.fetchone()
+
+    return [{
+        'col': c,
+        'r2': round(v * v, 3),
+        'dir': '같은 방향' if v > 0 else '반대 방향',
+        'sel_avg': _f(srow[i]),
+        'all_avg': _f(arow[i]),
+    } for i, (c, v) in enumerate(top)]
+
+
+def _build_summary(oper_id, lot_cd, param, ids):
+    """LLM 에 넘길 구조화 요약 (원본 행은 포함하지 않는다)"""
+    table = _an_table(oper_id)
+    ph    = ",".join(["%s"] * len(ids))
+
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT upper(column_name) FROM information_schema.columns
+            WHERE table_name = %s
+        """, [table])
+        have = {r[0] for r in cur.fetchall()}
+
+        # 대상 파라미터 통계 (선택 vs 전체)
+        cur.execute(f'''
+            SELECT COUNT(*), AVG("{param}"), STDDEV("{param}"),
+                   PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY "{param}")
+            FROM {table} WHERE id IN ({ph})
+        ''', list(ids))
+        s_n, s_avg, s_std, s_med = cur.fetchone()
+
+        cur.execute(f'''
+            SELECT COUNT(*), AVG("{param}"), STDDEV("{param}"),
+                   PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY "{param}")
+            FROM {table} WHERE "LOT_CD" = %s
+        ''', [lot_cd])
+        a_n, a_avg, a_std, a_med = cur.fetchone()
+
+        factors = []
+        for col, label, empty_label, nbins in _factor_items():
+            if col not in have:
+                continue
+            rows = _enrichment(cur, table, col, ids, lot_cd, ph, empty_label, nbins)
+            factors.append({'col': col, 'label': label, 'rows': rows})
+
+        corr = _top_correlations(cur, table, param, lot_cd, ids, ph)
+
+    dev = None
+    if s_avg is not None and a_avg is not None and a_avg:
+        dev = round((float(s_avg) - float(a_avg)) / abs(float(a_avg)) * 100, 2)
+
+    return {
+        'oper_id': oper_id, 'lot_cd': lot_cd, 'param': param,
+        'target': {
+            'sel': {'n': s_n, 'avg': _f(s_avg), 'med': _f(s_med), 'std': _f(s_std)},
+            'all': {'n': a_n, 'avg': _f(a_avg), 'med': _f(a_med), 'std': _f(a_std)},
+            'dev_pct': dev,
+        },
+        'factors': factors,
+        'corr': corr,
+    }
+
+
+def _summary_to_text(s):
+    """
+    프롬프트용 텍스트.
+    무엇이 포함됐고 무엇이 없는지를 명시해, 모델이 없는 정보를
+    임의로 끌어오는 것을 막는다.
+    """
+    L = []
+    L.append("=== 데이터 ===")
+    L.append(f"공정 {s['oper_id']} / 제품 {s['lot_cd']} / 분석 파라미터 {s['param']}")
+    L.append("")
+
+    t   = s['target']
+    dev = t.get('dev_pct')
+    if dev is None:
+        direction = ''
+    elif dev < 0:
+        direction = ' → 선택 구간이 전체보다 낮음'
+    elif dev > 0:
+        direction = ' → 선택 구간이 전체보다 높음'
+    else:
+        direction = ''
+
+    L.append("[선택 구간 vs 전체]")
+    L.append(f"  웨이퍼 수 : 선택 {t['sel']['n']}장 / 전체 {t['all']['n']}장")
+    L.append(f"  평균      : 선택 {t['sel']['avg']} / 전체 {t['all']['avg']}"
+             f" (편차 {dev}%){direction}")
+    L.append(f"  중앙값    : 선택 {t['sel']['med']} / 전체 {t['all']['med']}")
+    L.append(f"  표준편차  : 선택 {t['sel']['std']} / 전체 {t['all']['std']}")
+    L.append("")
+
+    flagged = []
+    for f in s['factors']:
+        for r in [r for r in f['rows'] if r['flag']][:3]:
+            flagged.append(
+                f"  {f['label']} = {r['key']} : 선택 {r['sel_pct']}% / 전체 {r['all_pct']}%"
+                f" → {r['lift']}배 집중 ({r['sel_n']}장)")
+
+    if flagged:
+        L.append("[편중된 조건] 전체 대비 선택 구간에 몰려 있는 항목")
+        L.extend(flagged)
+    else:
+        L.append("[편중된 조건] 없음")
+        L.append("  검사한 모든 요인에서 전체 대비 유의하게 몰린 조건이 발견되지 않음")
+    L.append("")
+
+    L.append(f"[검사한 요인] {', '.join(f['label'] for f in s['factors'])}")
+    L.append("")
+
+    if s.get('corr'):
+        L.append("[함께 움직인 파라미터] 전체 데이터 기준 상관 상위")
+        for c in s['corr']:
+            L.append(f"  {c['col']} : R² {c['r2']} ({c['dir']}),"
+                     f" 선택 평균 {c['sel_avg']} / 전체 평균 {c['all_avg']}")
+        L.append("")
+
+    absent = []
+    if not s.get('corr'):
+        absent.append("파라미터 간 상관")
+    absent.append("소모품(Pad/Head/Disk) 수명")
+    absent.append("압력·회전수·슬러리 등 위에 나열되지 않은 모든 설비 조건")
+    absent.append("스펙 상하한, 목표값")
+
+    L.append("[이 요약에 없는 정보] 아래는 제공되지 않았으므로 언급하지 말 것")
+    for a in absent:
+        L.append(f"  - {a}")
+
+    return "\n".join(L)
+
+
+# ══════════════════════════════════════════════════════════
+# 9. LLM 해석
+# ══════════════════════════════════════════════════════════
+LLM_SYSTEM = """당신은 반도체 CMP 공정 엔지니어를 돕는 데이터 분석 보조자입니다.
+엔지니어가 트렌드 차트에서 이상 구간을 선택했고, 그 구간의 통계 요약이 주어집니다.
+
+# 절대 규칙 (다른 무엇보다 우선)
+
+1. **주어진 [데이터]에 실제로 적힌 수치만 사용합니다.**
+   데이터에 없는 항목(예: 압력, 온도, 슬러리, 소모품 수명 등)은
+   그 항목이 데이터에 등장하지 않는 한 절대 언급하지 마세요.
+
+2. **모든 주장 끝에는 근거 수치를 괄호로 인용합니다.**
+   예: "5CMP1E21 장비에 몰려 있습니다 (선택 85% vs 전체 32%, 2.7배)"
+   인용할 수치가 없으면 그 주장은 쓰지 마세요.
+
+3. **아래 배경지식은 데이터에 해당 항목이 있을 때만 해석에 사용합니다.**
+   데이터에 없는 원인을 배경지식에서 끌어와 추측하지 마세요.
+
+4. **편중된 조건이 없으면** "특정 조건에 몰려 있지 않다"고 명시하고,
+   억지로 원인을 만들지 마세요. 그 경우 산발적 편차 가능성과
+   추가로 확보해야 할 데이터를 제안하는 것이 올바른 답변입니다.
+
+5. 상관관계를 인과로 단정하지 마세요. "~와 함께 움직였다" 로 표현합니다.
+
+# 참고 배경지식 (해당 항목이 데이터에 있을 때만 적용)
+
+- 두께가 목표보다 **낮다** = 과연마. 제거율이 높았다는 뜻.
+- 두께가 목표보다 **높다** = 미연마. 제거율이 낮았다는 뜻.
+
+- **장비/챔버 편중** → 해당 설비의 상태(부품 마모, 셋업 편차)를 우선 의심
+- **사전공정(장비·Layer) 편중** → 입고 편차일 수 있으므로,
+  CMP 조건을 바꾸기 전에 입고 두께부터 확인
+- **Idle 편중** (idle_1~4 는 idle 직후 N번째 웨이퍼) →
+  재가동 초기 패드 온도·수분 상태가 정상과 달라 제거율이 흔들림
+- **Layer Change 편중** → 직전에 다른 layer 를 돌린 영향
+- **WF 구간 편중**
+  - 앞번호(1~5): lot 초반. 장비 예열·안정화 문제
+  - 뒷번호(21~25): 연속 처리로 패드 온도 상승, slurry 누적
+  - 특정 구간 편중 없음: 웨이퍼 순서와 무관
+
+# 출력 형식
+
+## 진단
+무엇이 어떻게 벗어났는지 2~3줄. 반드시 수치 인용.
+
+## 유력 원인
+데이터에서 근거를 찾을 수 있는 것만, 가능성 높은 순으로 최대 3개.
+근거가 하나도 없으면 이 항목에 "데이터상 뚜렷한 원인 신호 없음" 이라고만 쓰세요.
+
+## 조치 방안
+원인별 구체적 조치. 즉시 조치와 추가 확인이 필요한 것을 구분.
+원인이 불명확하면 무엇을 더 봐야 하는지를 쓰세요.
+
+# 작성 후 자체 점검
+답변을 쓴 뒤, 각 문장에 인용한 수치가 [데이터]에 실제로 있는지 확인하세요.
+없는 수치를 썼다면 그 문장을 지우세요. 한국어로, 서론 없이 간결하게."""
+
+
+def _call_company_llm(system, user):
+    """
+    사내 LLM 호출 (OpenAI 호환 형식).
+    settings 에 LLM_URL / LLM_MODEL / LLM_API_KEY 가 있어야 한다.
+
+    ※ 게이트웨이가 system 역할이나 temperature 를 거부하면
+      messages 를 user 하나로 합치고 temperature 를 빼면 된다.
+    """
+    resp = requests.post(
+        settings.LLM_URL + '/chat/completions',
+        json={
+            'model': settings.LLM_MODEL,
+            'messages': [
+                {'role': 'system', 'content': system},
+                {'role': 'user',   'content': user},
+            ],
+            'temperature': 0.2,      # 분석이므로 낮게 — 같은 데이터면 같은 답
+        },
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {settings.LLM_API_KEY}',
+        },
+        timeout=getattr(settings, 'LLM_TIMEOUT', 60),
+    )
+    resp.raise_for_status()
+    return resp.json()['choices'][0]['message']['content']
+
+
+@csrf_exempt
+def analysis_insight(request):
+    """
+    선택 구간의 편중도를 계산하고 LLM 해석을 덧붙인다.
+    LLM 이 실패해도 편중도 요약(prompt)은 그대로 반환한다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+
+    body    = json.loads(request.body)
+    oper_id = body.get('oper_id')
+    lot_cd  = body.get('lot_cd')
+    param   = body.get('param')
+    ids     = body.get('ids', [])
+    use_llm = body.get('use_llm', True)
+
+    if not ids:
+        return JsonResponse({'error': '선택된 구간이 없습니다'}, status=400)
+    if not param or not re.match(r'^[0-9A-Za-z_]+$', param):
+        return JsonResponse({'error': '잘못된 파라미터'}, status=400)
+
+    try:
+        summary = _build_summary(oper_id, lot_cd, param, ids)
+        text    = _summary_to_text(summary)
+
+        answer, llm_error = None, None
+        if use_llm:
+            try:
+                answer = _call_company_llm(LLM_SYSTEM, text)
+            except NotImplementedError:
+                llm_error = '사내 LLM API가 연결되지 않았습니다.'
+            except Exception as e:
+                llm_error = f'LLM 호출 실패: {e}'
+
+        return JsonResponse({
+            'summary':   summary,     # 화면 강조용 (편중 항목 표시)
+            'prompt':    text,        # 무엇을 넘겼는지 확인용
+            'answer':    answer,
+            'llm_error': llm_error,
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
