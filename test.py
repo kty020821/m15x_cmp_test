@@ -1,44 +1,77 @@
 """
-equipment/tech_map.py
 ════════════════════════════════════════════════════════════
-TECH ↔ LOT_CD(device) 매핑
-
-  구닥스 기준정보는 공정(OPER) 단위라 TECH↔LOT_CD 관계를 갖지 않는다.
-  (device 별로 넣으면 PARAM × device 로 행이 폭증하므로)
-  그래서 이 매핑만 따로 여기서 관리한다.
-
-  ★ device 가 추가되면 아래 TECH_LOT_MAP 에 LOT_CD 한 줄만 넣으면 된다.
-    파라미터 정보와 무관하므로 여기는 절대 커지지 않는다.
+views_analysis.py 수정
+  ① 상단에서 tech_map import, 기존 TECH_LOT_MAP 하드코딩 제거
+  ② analysis_page / analysis_options 를 아래로 교체
 ════════════════════════════════════════════════════════════
 """
 
-
-# ── TECH → LOT_CD 목록 ────────────────────────────────────
-TECH_LOT_MAP = {
-    'LUCY': ['5E2', '5E9'],
-    # 'ROSE': ['5F1', '5F2'],
-    # device 추가 시 해당 TECH 목록에 LOT_CD 만 추가
-}
+from . import tech_map
 
 
-def all_techs():
-    """화면 TECH 드롭박스용"""
-    return list(TECH_LOT_MAP.keys())
+# ══════════════════════════════════════════════════════════
+# 페이지
+# ══════════════════════════════════════════════════════════
+def analysis_page(request):
+    return render(request, 'equipment/analysis.html', {
+        'tech_list':      tech_map.all_techs(),
+        'legend_options': LEGEND_OPTIONS,
+    })
 
 
-def lots_of_tech(tech):
-    """해당 TECH 의 LOT_CD 목록"""
-    return TECH_LOT_MAP.get(tech, [])
+# ══════════════════════════════════════════════════════════
+# 종속 드롭박스 옵션
+# ══════════════════════════════════════════════════════════
+def _lots_with_data():
+    """실제 적재된 테이블들에 존재하는 LOT_CD 전체 (중복 제거)"""
+    lots = set()
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT tablename FROM pg_tables
+            WHERE tablename LIKE 'cmp_analysis_%'
+        """)
+        tables = [r[0] for r in cur.fetchall()]
+        for t in tables:
+            try:
+                cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {t} '
+                            f'WHERE "LOT_CD" IS NOT NULL')
+                lots.update(r[0] for r in cur.fetchall())
+            except Exception:
+                pass
+    return lots
 
 
-def tech_of_lot(lot_cd):
-    """LOT_CD 로 TECH 역조회 (없으면 None)"""
-    for tech, lots in TECH_LOT_MAP.items():
-        if lot_cd in lots:
-            return tech
-    return None
+@csrf_exempt
+def analysis_options(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
 
+    body  = json.loads(request.body)
+    level = body.get('level')
 
-def known_lots():
-    """등록된 전체 LOT_CD"""
-    return [lc for lots in TECH_LOT_MAP.values() for lc in lots]
+    if level == 'lot_cd':
+        # 매핑에 등록된 LOT_CD 중, 실제 데이터가 있는 것만 보여준다.
+        # (등록됐지만 아직 적재 안 된 device 가 드롭박스에 뜨는 것 방지)
+        tech     = body.get('tech')
+        mapped   = tech_map.lots_of_tech(tech)
+        have     = _lots_with_data()
+        options  = [lc for lc in mapped if lc in have]
+
+        # 데이터에는 있는데 매핑에 없는 LOT_CD = 미등록 device
+        unmapped = sorted(lc for lc in have
+                          if tech_map.tech_of_lot(lc) is None)
+        return JsonResponse({'options': options, 'unmapped': unmapped})
+
+    if level == 'oper':
+        return JsonResponse({'options': [
+            {'value': oid, 'label': f"{desc} ({oid})"} for oid, desc in OPER_LIST
+        ]})
+
+    if level == 'param':
+        table = _an_table(body.get('oper_id'))
+        try:
+            return JsonResponse({'options': _fetch_numeric_cols(table)})
+        except Exception as e:
+            return JsonResponse({'options': [], 'error': str(e)})
+
+    return JsonResponse({'options': []})
