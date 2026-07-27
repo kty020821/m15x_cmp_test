@@ -70,6 +70,27 @@ def _recipe_cond(recipe_list, col='recipe_id'):
     return f"and {col} in (" + ",".join(f"'{r}'" for r in rl) + ")"
 
 
+def _recipe_like_cond(recipe_list, col='eqp_recipe_id'):
+    """
+    여러 레시피를 prefix(LIKE) 로 OR 조합.
+
+    구닥스 RECIPE_ID 는 확장자가 붙기도 하고(.CAS), 실제 장비에서는
+    파생 레시피가 돌기도 해서 접두 일치로 비교한다.
+    챔버가 다른 레시피(_AB / _CD)는 구닥스에 각각 등록하면 여기서 모두 조회된다.
+    """
+    bases = []
+    for r in recipe_list:
+        if not r:
+            continue
+        b = str(r).split('.')[0]          # 확장자 제거
+        if b not in bases:
+            bases.append(b)
+    if not bases:
+        return ""
+    ors = " or ".join(f"{col} like '{b}%'" for b in bases)
+    return f"and ({ors})"
+
+
 def _param_tuple(param_list):
     """구닥스 PARAM 목록 → SQL IN 용 튜플 문자열"""
     params = [str(p) for p in param_list if p]
@@ -218,7 +239,8 @@ def fetch_src(lake, cond, days=30):
     param_in = _param_tuple(cond['param_list'])
 
     recipe_list = [r for r in cond['recipe_list'] if r]
-    recipe_info = recipe_list[0] if recipe_list else ''
+    # 챔버 확장(_AB/_CD) 등 여러 레시피를 모두 조회한다
+    recipe_cond = _recipe_like_cond(recipe_list, 'c.eqp_recipe_id')
     pre_oper_r1 = pre_oper[:-1] if pre_oper else ''
 
     dfs = []
@@ -285,7 +307,7 @@ WITH src AS (
       and a.end_tm <= '{dt_end}'
       and a.oper_id = '{oper_id}'
       and right(a.lot_cd, 3) = '{lot_code}'
-      and c.eqp_recipe_id like '{recipe_info}%'
+      {recipe_cond}
       and a.param_nm in {param_in}
 """
             # 일부 사전공정만 module_id 제한 (하드코딩 · 필요시 추가)
