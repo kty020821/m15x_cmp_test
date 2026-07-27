@@ -681,6 +681,9 @@ def finalize_df(df, cond, df_src=None):
 # 9. PostgreSQL 저장
 #    pandas to_sql 은 버전 조합에 따라 실패 → psycopg2 execute_values 사용
 # ══════════════════════════════════════════════════════════
+# 값이 숫자처럼 보여도 반드시 텍스트로 저장할 컬럼 (식별자류)
+#   LOT_CD 5E2 / 5E9 가 과학적표기법 숫자(500.0 / 5e9)로 뭉개지는 것을 막는다.
+#   계산 대상이 아니므로 전부 텍스트가 맞다.
 TEXT_COLS = {
     'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID', 'EQP_MODEL',
     'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID', 'WF_ID',
@@ -711,15 +714,6 @@ def _table_name(oper_id):
     return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
 
 
-# 값이 숫자처럼 보여도 반드시 텍스트로 저장할 컬럼
-#   5E2 / 5E9 같은 LOT_CD 가 과학적표기법(500.0 / 5e9)으로 뭉개지는 것을 방지.
-#   식별자류는 계산 대상이 아니므로 전부 텍스트가 맞다.
-FORCE_TEXT = {
-    'LOT_CD', 'LOT_ID', 'WF_ID', 'SUBSTRATE_ID',
-    'EQP_ID', 'EQP_CH_ID', 'PRE_EQP_ID', 'PRE_EQP_CH',
-}
-
-
 def drop_analysis_table(oper_id):
     """컬럼/타입이 바뀌었을 때 테이블을 지운다 (재적재 전 1회)"""
     table = _table_name(oper_id)
@@ -747,9 +741,11 @@ def save_analysis_df(df, oper_id):
     conn  = connections['analysis_db']
 
     # 타입 판정 + 값 캐스팅 (Lake 에서 숫자가 문자열로 오는 경우 대비)
+    #   TEXT_COLS 는 값 변환 없이 타입만 VARCHAR 로 고정한다.
+    #   (Lake 가 문자열로 주므로 그대로 두면 5E2 가 보존된다)
     col_types = {}
     for c in df.columns:
-        if c in FORCE_TEXT:
+        if c in TEXT_COLS:
             t = 'VARCHAR(200)'
         elif c in TIME_COLS:
             t = 'TIMESTAMP'
@@ -761,17 +757,7 @@ def save_analysis_df(df, oper_id):
             df[c] = pd.to_numeric(df[c], errors='coerce')
         elif t == 'TIMESTAMP':
             df[c] = pd.to_datetime(df[c], errors='coerce')
-        else:
-            # 5E2 가 float 500.0 으로 들어오지 않도록 문자열로 고정.
-            # 숫자로 읽혀 버린 경우 정수부만 남겨(500.0→500) 원본과 어긋나므로,
-            # 원본이 문자열이면 그대로, 숫자면 소수점 제거 후 문자열화.
-            def _to_text(v):
-                if pd.isna(v):
-                    return None
-                if isinstance(v, float) and v.is_integer():
-                    return str(int(v))
-                return str(v)
-            df[c] = df[c].map(_to_text)
+        # VARCHAR 는 원본 그대로 둔다 (변환하면 오히려 값이 깨진다)
 
     col_defs = ["id BIGSERIAL PRIMARY KEY"] + \
                [f'"{c}" {col_types[c]}' for c in df.columns]
