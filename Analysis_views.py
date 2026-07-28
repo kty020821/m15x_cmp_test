@@ -681,9 +681,14 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
     df = df_src_wide.copy()
 
     if df_apc_prep is not None and not df_apc_prep.empty:
-        # lot_id 중복 방지 — substrate_id 로만 조인
-        apc = df_apc_prep.drop(columns=[c for c in ['lot_id'] if c in df_apc_prep.columns])
-        df = df.merge(apc, on='substrate_id', how='inner')   # inner → rework 자동 제외
+        # SRC 가 이미 가진 식별 컬럼은 APC 쪽을 버린다.
+        # (남겨두면 merge 가 wf_id_x / wf_id_y 로 갈라 저장에서 실패한다)
+        apc = df_apc_prep.drop(
+            columns=[c for c in ['lot_id', 'wf_id'] if c in df_apc_prep.columns])
+
+        # 그 밖의 이름 충돌은 APC 쪽에 _APC 를 붙여 구분한다
+        df = df.merge(apc, on='substrate_id', how='inner',
+                      suffixes=('', '_APC'))                 # inner → rework 자동 제외
 
     if df_mes is not None and not df_mes.empty:
         mes = df_mes.copy()
@@ -847,8 +852,9 @@ def save_analysis_df(df, oper_id):
     """
     최종 wide df -> PostgreSQL 저장 (LOT_CD 단위 삭제 후 재적재)
 
-    [주의] CREATE TABLE IF NOT EXISTS 는 기존 테이블 구조를 바꾸지 않는다.
-           컬럼/타입이 바뀌었으면 drop_analysis_table() 을 먼저 호출할 것.
+    새 컬럼은 자동으로 ALTER TABLE ADD COLUMN 한다.
+    다만 기존 컬럼의 타입이 바뀐 경우(예: LOT_CD 가 숫자 → 텍스트)는
+    바꾸지 못하므로 drop_analysis_table() 을 먼저 호출해야 한다.
     """
     if df is None or df.empty:
         print(f"[{oper_id}] 저장 스킵 (빈 df)")
@@ -885,6 +891,23 @@ def save_analysis_df(df, oper_id):
     with conn.cursor() as cur:
         cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n  "
                     + ",\n  ".join(col_defs) + "\n)")
+
+        # 이미 있는 테이블에 컬럼이 늘었으면 추가한다.
+        # (CREATE TABLE IF NOT EXISTS 는 기존 구조를 바꾸지 않으므로
+        #  이 단계가 없으면 새 컬럼에서 INSERT 가 실패한다)
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = %s
+        """, [table])
+        exists = {r[0] for r in cur.fetchall()}
+
+        added = [c for c in df.columns if c not in exists]
+        for c in added:
+            cur.execute(f'ALTER TABLE {table} ADD COLUMN "{c}" {col_types[c]}')
+        if added:
+            print(f'  [{oper_id}] 컬럼 {len(added)}개 추가: '
+                  f'{", ".join(added[:8])}{" ..." if len(added) > 8 else ""}')
+
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_lot  ON {table} ("LOT_CD")')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_date ON {table} ("DATE")')
 
