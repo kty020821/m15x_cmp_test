@@ -215,6 +215,61 @@
 .ai-out strong { font-weight: var(--fw-heavy); }
 .ai-note { font-size: var(--fs-xs); font-weight: var(--fw-mid); color: var(--tx-muted);
   margin-top: 12px; line-height: 1.6; }
+.ai-toggle { margin-top: 14px; }
+.ai-toggle summary { cursor: pointer; list-style: none; display: inline-flex;
+  align-items: center; gap: 6px; font-size: var(--fs-xs);
+  font-weight: var(--fw-bold); color: var(--tx-muted); user-select: none; }
+.ai-toggle summary::-webkit-details-marker { display: none; }
+.ai-toggle summary::before { content: '▸'; font-size: 10px; transition: transform .15s; }
+.ai-toggle[open] summary::before { transform: rotate(90deg); }
+.ai-toggle summary:hover { color: var(--tx-1); }
+.ai-prompt { border: 1px dashed var(--bd); border-radius: var(--r-md);
+  padding: 12px 14px; margin-top: 8px; background: var(--bg-2);
+  font-family: var(--an-mono); font-size: var(--fs-sm); line-height: 1.65;
+  color: var(--tx-2); white-space: pre-wrap; max-height: 420px; overflow-y: auto; }
+/* ── 대화형 분석 ──────────────────────────────────── */
+.chat-log { display: flex; flex-direction: column; gap: 10px;
+  margin-top: 14px; max-height: 460px; overflow-y: auto; padding-right: 4px; }
+.chat-log:empty { display: none; }
+.msg { max-width: 88%; padding: 10px 13px; border-radius: var(--r-md);
+  font-size: var(--fs-md); line-height: 1.7; }
+.msg.me { align-self: flex-end; background: var(--bg-2);
+  border: 1px solid var(--bd); color: var(--tx-1); font-weight: var(--fw-mid); }
+.msg.ai { align-self: flex-start; background: transparent; padding-left: 0; }
+.msg.ai h3 { font-size: var(--fs-sm); font-weight: var(--fw-heavy);
+  color: var(--accent); margin: 12px 0 4px; }
+.msg.ai h3:first-child { margin-top: 0; }
+.msg.ai p { margin: 0 0 6px; }
+.msg.ai p:last-child { margin-bottom: 0; }
+.msg.err { align-self: flex-start; color: var(--warn); font-weight: var(--fw-mid); }
+.msg-params { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.msg-chip { font-family: var(--an-mono); font-size: 10px; font-weight: var(--fw-bold);
+  color: var(--tx-2); background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 20px; padding: 2px 7px; }
+.chat-bar { display: flex; gap: 8px; margin-top: 14px; align-items: flex-end; }
+.chat-input { flex: 1; box-sizing: border-box; resize: none;
+  font-family: var(--an-font); font-size: var(--fs-md); font-weight: var(--fw-mid);
+  color: var(--tx-1); background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 10px 13px; outline: none; line-height: 1.5; max-height: 120px;
+  transition: border-color .15s, box-shadow .15s; }
+.chat-input::placeholder { color: var(--tx-muted); }
+.chat-input:focus { border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
+.chat-input:disabled { opacity: .45; cursor: not-allowed; }
+.chat-hint { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.hint-btn { font-size: var(--fs-xs); font-weight: var(--fw-bold);
+  color: var(--tx-2); background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 20px; padding: 5px 11px; cursor: pointer;
+  transition: color .15s, border-color .15s; }
+.hint-btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.typing { display: inline-flex; gap: 3px; }
+.typing i { width: 5px; height: 5px; border-radius: 50%;
+  background: var(--tx-muted); animation: blink 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay: .2s; }
+.typing i:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
 .ai-fallback { border: 1px dashed var(--bd); border-radius: var(--r-md);
   padding: 12px 14px; margin-top: 12px; background: var(--bg-2);
   font-family: var(--an-mono); font-size: var(--fs-sm); line-height: 1.65;
@@ -323,10 +378,20 @@
 
       <div class="ai-card">
         <div class="res-head">
-          <span class="res-title">AI 원인 분석<span class="res-note">통계 요약을 해석합니다</span></span>
-          <button class="btn-ai" id="btn-ai" onclick="runInsight()">분석 실행</button>
+          <span class="res-title">AI 분석<span class="res-note">선택 구간에 대해 물어보세요</span></span>
+          <button class="btn-ai" id="btn-ai" onclick="runInsight()">자동 진단</button>
         </div>
         <div class="ai-out" id="js-ai-out"></div>
+
+        <div class="chat-log" id="js-chat"></div>
+
+        <div class="chat-bar">
+          <textarea class="chat-input" id="js-q" rows="1" disabled
+                    placeholder="예: S7_P3_04_TIME 분포가 어때?"></textarea>
+          <button class="btn-ai" id="btn-send" onclick="sendChat()" disabled>전송</button>
+        </div>
+
+        <div class="chat-hint" id="js-hints"></div>
       </div>
     </div>
   </section>
@@ -341,6 +406,7 @@ const API_TREND     = "{% url 'analysis-trend' %}";
 const API_CORR      = "{% url 'analysis-corr' %}";
 const API_STATS     = "{% url 'analysis-stats' %}";
 const API_INSIGHT   = "{% url 'analysis-insight' %}";
+const API_CHAT      = "{% url 'analysis-chat' %}";
 
 /* 차트 타이포 — 위 CSS 토큰과 같은 값 */
 const AN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
@@ -911,6 +977,8 @@ async function onSelected(ids) {
 
   document.getElementById('js-ai-out').innerHTML = '';
   btnAi.disabled = false;
+  resetChat();
+  enableChat();
 
   const distRes = await postJSON(API_STATS, {oper_id: ssOper.value, ids: ids});
   if (!distRes.error) {
@@ -966,20 +1034,29 @@ async function runInsight() {
     });
     if (res.error) { out.innerHTML = `<p>${esc(res.error)}</p>`; return; }
 
-    // 편중된 요인을 요인 분포 표에도 반영
-    markHotFactors(res.summary);
+    markHotFactors(res.summary);           // 편중 항목을 요인 분포에도 표시
 
     let html = '';
     if (res.answer) {
       html += mdToHtml(res.answer);
     } else {
-      // LLM 미연결이어도 편중도 요약은 그대로 쓸모가 있다
+      // LLM 이 실패해도 편중도 요약 자체는 쓸모가 있다
       html += `<p>${esc(res.llm_error || 'LLM 응답이 없습니다.')}</p>`;
-      html += `<div class="ai-fallback">${esc(res.prompt || '')}</div>`;
     }
+
+    // 실제로 LLM 에 넘긴 내용 — 답변이 데이터와 맞는지 대조용
+    if (res.prompt) {
+      html += `<details class="ai-toggle">
+        <summary>LLM 에 전달한 데이터 보기</summary>
+        <div class="ai-prompt">${esc(res.prompt)}</div>
+      </details>`;
+    }
+
     html += `<div class="ai-note">
       원본 웨이퍼 데이터는 전송되지 않습니다. 위 통계 요약만 분석에 사용됩니다.
+      답변에 위 데이터에 없는 내용이 있다면 신뢰하지 마세요.
     </div>`;
+
     out.innerHTML = html;
   } finally {
     btnAi.disabled = false; btnAi.textContent = '분석 실행';
@@ -1032,6 +1109,103 @@ function mdToHtml(md) {
     .join('');
 }
 
+/* ══════════════════════════════════════════════════
+   대화형 분석
+   질문에 나온 파라미터의 통계는 서버가 계산해서 넘긴다.
+   LLM 은 그 수치를 읽고 설명만 하므로 값을 지어내지 않는다.
+   ══════════════════════════════════════════════════ */
+let chatHistory = [];
+
+const elChat  = document.getElementById('js-chat');
+const elQ     = document.getElementById('js-q');
+const btnSend = document.getElementById('btn-send');
+
+// 입력창 높이 자동 조절 + Enter 전송 (Shift+Enter 는 줄바꿈)
+elQ.addEventListener('input', () => {
+  elQ.style.height = 'auto';
+  elQ.style.height = Math.min(elQ.scrollHeight, 120) + 'px';
+});
+elQ.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+function enableChat() {
+  elQ.disabled = false;
+  btnSend.disabled = false;
+  renderHints();
+}
+
+function renderHints() {
+  const p = ssParam.value || '';
+  const hints = [
+    p ? `${p} 분포가 어때?` : '이 구간 특징이 뭐야?',
+    '장비별로 차이가 있어?',
+    '전체랑 뭐가 달라?',
+  ];
+  document.getElementById('js-hints').innerHTML = hints.map(h =>
+    `<button class="hint-btn" onclick="askHint(this)">${esc(h)}</button>`
+  ).join('');
+}
+
+function askHint(btn) {
+  elQ.value = btn.textContent;
+  sendChat();
+}
+
+function addMsg(cls, html) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.innerHTML = html;
+  elChat.appendChild(d);
+  elChat.scrollTop = elChat.scrollHeight;
+  return d;
+}
+
+async function sendChat() {
+  const q = elQ.value.trim();
+  if (!q || !selectedIds) return;
+
+  addMsg('me', esc(q));
+  elQ.value = ''; elQ.style.height = 'auto';
+  elQ.disabled = true; btnSend.disabled = true;
+
+  const wait = addMsg('ai', '<span class="typing"><i></i><i></i><i></i></span>');
+
+  try {
+    const res = await postJSON(API_CHAT, {
+      oper_id: ssOper.value, lot_cd: ssLot.value,
+      param: ssParam.value, ids: selectedIds,
+      question: q, history: chatHistory,
+    });
+
+    if (res.error || res.llm_error) {
+      wait.className = 'msg err';
+      wait.textContent = res.error || res.llm_error;
+      return;
+    }
+
+    // 어떤 파라미터를 계산했는지 함께 표시 (답변 검증용)
+    const chips = (res.params || []).length
+      ? `<div class="msg-params">${res.params.map(p =>
+          `<span class="msg-chip">${esc(p)}</span>`).join('')}</div>`
+      : '';
+    wait.innerHTML = chips + mdToHtml(res.answer || '');
+
+    chatHistory.push({role: 'user',      content: q});
+    chatHistory.push({role: 'assistant', content: res.answer || ''});
+  } finally {
+    elQ.disabled = false; btnSend.disabled = false; elQ.focus();
+  }
+}
+
+function resetChat() {
+  chatHistory = [];
+  elChat.innerHTML = '';
+  elQ.disabled = true;
+  btnSend.disabled = true;
+  document.getElementById('js-hints').innerHTML = '';
+}
+
 function clearSelection() {
   selectedIds = null;
   ['js-trend', 'js-corr'].forEach(id => {
@@ -1043,6 +1217,7 @@ function clearSelection() {
   document.getElementById('js-stats-count').textContent = '';
   document.getElementById('js-lift-note').textContent = '';
   btnAi.disabled = true;
+  resetChat();
   setStep(3, 'locked');
   if (trendData.length) setStep(2, 'active');
 }
