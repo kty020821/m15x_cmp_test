@@ -41,7 +41,6 @@ from django.views.decorators.csrf import csrf_exempt
 from django.db import connections
 
 from . import tech_map
-from . import analysis_service as svc
 
 
 # ══════════════════════════════════════════════════════════
@@ -217,13 +216,20 @@ def _oper_cache_clear():
 
 
 def _oper_names():
-    """구닥스에서 {OPER_ID: OPER_DESC}. 실패해도 화면은 살아 있어야 한다"""
+    """
+    구닥스에서 {OPER_ID: OPER_DESC}. 실패해도 화면은 살아 있어야 한다.
+
+    analysis_service 는 사내 모듈(Lake/구닥스 클라이언트)에 의존하므로
+    모듈 최상단에서 import 하면 그 모듈이 없거나 초기화에 실패할 때
+    페이지 자체가 열리지 않는다. 그래서 여기서 지연 import 한다.
+    """
     global _OPER_CACHE
     if _OPER_CACHE is not None:
         return _OPER_CACHE
 
     names = {}
     try:
+        from . import analysis_service as svc
         df = svc.get_config()
         for _, r in df.drop_duplicates(subset=['OPER_ID']).iterrows():
             names[str(r['OPER_ID']).upper()] = str(r.get('OPER_DESC') or '')
@@ -836,3 +842,256 @@ def analysis_insight(request):
         })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
+
+# ══════════════════════════════════════════════════════════
+# 10. 대화형 분석
+#     선택 구간에 대해 자유롭게 묻고 이어서 물어볼 수 있게 한다.
+#
+#     질문에 나온 파라미터를 찾아 그 통계를 코드가 계산한 뒤 넘긴다.
+#     LLM 은 계산된 수치를 읽고 설명만 한다 — 값을 만들어내지 않는다.
+# ══════════════════════════════════════════════════════════
+# ── 대화 설정 ─────────────────────────────────────────────
+CHAT_MAX_PARAMS  = 3     # 한 질문에서 통계를 계산할 파라미터 최대 개수
+CHAT_HISTORY_MAX = 6     # LLM 에 넘길 이전 대화 수 (질문+답변 = 2)
+HIST_BINS        = 8     # 분포 구간 개수
+
+
+# ══════════════════════════════════════════════════════════
+# 질문에서 파라미터 찾기
+# ══════════════════════════════════════════════════════════
+def _mentioned_params(question, table, base_param=None):
+    """
+    질문에 등장하는 파라미터명을 실제 컬럼과 대조해 찾는다.
+
+    긴 이름부터 확인해 부분 일치로 인한 오탐을 줄인다.
+    (THK 와 THK_AVG 가 모두 있을 때 THK_AVG 를 우선)
+    """
+    cols = _fetch_numeric_cols(table)
+    q    = question.upper()
+
+    hits = []
+    for c in sorted(cols, key=len, reverse=True):
+        if c in q and not any(c in h for h in hits):
+            hits.append(c)
+        if len(hits) >= CHAT_MAX_PARAMS:
+            break
+
+    # 아무것도 못 찾으면 현재 보고 있는 파라미터를 기본으로
+    if not hits and base_param and base_param in cols:
+        hits = [base_param]
+    return hits
+
+
+# ══════════════════════════════════════════════════════════
+# 파라미터 분포 통계
+# ══════════════════════════════════════════════════════════
+def _param_stats(cur, table, param, lot_cd, ids, ph):
+    """선택 구간 vs 전체의 분포 (사분위 포함)"""
+    def agg(where, params):
+        cur.execute(f'''
+            SELECT COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
+                   MIN("{param}"), MAX("{param}"),
+                   PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY "{param}"),
+                   PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY "{param}"),
+                   PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "{param}")
+            FROM {table} WHERE {where} AND "{param}" IS NOT NULL
+        ''', params)
+        n, avg, std, mn, mx, q1, med, q3 = cur.fetchone()
+        return {'n': n or 0, 'avg': _f(avg), 'std': _f(std),
+                'min': _f(mn), 'max': _f(mx),
+                'q1': _f(q1), 'med': _f(med), 'q3': _f(q3)}
+
+    sel = agg(f'id IN ({ph})', list(ids))
+    alw = agg('"LOT_CD" = %s', [lot_cd])
+
+    return {'param': param, 'sel': sel, 'all': alw,
+            'hist': _param_hist(cur, table, param, lot_cd, ids, ph, alw)}
+
+
+def _param_hist(cur, table, param, lot_cd, ids, ph, alw):
+    """
+    전체 범위를 같은 폭으로 나눠 선택 구간의 도수를 센다.
+    분포가 한쪽에 몰렸는지, 두 덩어리로 갈렸는지를 보기 위함.
+    """
+    if alw['min'] is None or alw['max'] is None:
+        return []
+    lo, hi = float(alw['min']), float(alw['max'])
+    if hi <= lo:
+        return []
+
+    width = (hi - lo) / HIST_BINS
+    cur.execute(f'''
+        SELECT width_bucket("{param}", %s, %s, %s) AS b, COUNT(*)
+        FROM {table} WHERE id IN ({ph}) AND "{param}" IS NOT NULL
+        GROUP BY b ORDER BY b
+    ''', [lo, hi, HIST_BINS] + list(ids))
+    counts = {r[0]: r[1] for r in cur.fetchall()}
+
+    out = []
+    for b in range(1, HIST_BINS + 1):
+        a = lo + width * (b - 1)
+        z = lo + width * b
+        # width_bucket 은 상한 초과를 HIST_BINS+1 로 반환한다
+        n = counts.get(b, 0) + (counts.get(HIST_BINS + 1, 0) if b == HIST_BINS else 0)
+        out.append({'lo': round(a, 3), 'hi': round(z, 3), 'n': n})
+    return out
+
+
+def _param_by_eqp(cur, table, param, lot_cd, ids, ph):
+    """선택 구간의 장비별 평균 (어느 장비가 다른지 확인용)"""
+    cur.execute(f'''
+        SELECT "EQP_ID", COUNT(*), AVG("{param}")
+        FROM {table} WHERE id IN ({ph}) AND "{param}" IS NOT NULL
+        GROUP BY "EQP_ID" ORDER BY AVG("{param}") DESC
+    ''', list(ids))
+    return [{'eqp': r[0], 'n': r[1], 'avg': _f(r[2])} for r in cur.fetchall()]
+
+
+def _stats_to_text(st, by_eqp=None):
+    """계산 결과 → LLM 이 읽을 텍스트"""
+    L = [f"[{st['param']}]"]
+    s, a = st['sel'], st['all']
+
+    L.append(f"  선택 구간 {s['n']}장 : 평균 {s['avg']}, 표준편차 {s['std']}, "
+             f"범위 {s['min']}~{s['max']}")
+    L.append(f"    사분위 Q1 {s['q1']} / 중앙값 {s['med']} / Q3 {s['q3']}")
+    L.append(f"  전체 {a['n']}장 : 평균 {a['avg']}, 표준편차 {a['std']}, "
+             f"범위 {a['min']}~{a['max']}")
+    L.append(f"    사분위 Q1 {a['q1']} / 중앙값 {a['med']} / Q3 {a['q3']}")
+
+    if st['hist']:
+        L.append("  선택 구간 분포 (전체 범위를 8구간으로 나눔)")
+        for h in st['hist']:
+            bar = '■' * min(h['n'], 30)
+            L.append(f"    {h['lo']} ~ {h['hi']} : {h['n']}장 {bar}")
+
+    if by_eqp:
+        L.append("  선택 구간 장비별 평균")
+        for e in by_eqp:
+            L.append(f"    {e['eqp']} : {e['avg']} ({e['n']}장)")
+
+    return "\n".join(L)
+
+
+# ══════════════════════════════════════════════════════════
+# 대화용 프롬프트
+# ══════════════════════════════════════════════════════════
+CHAT_SYSTEM = """당신은 반도체 CMP 공정 엔지니어의 데이터 분석을 돕는 보조자입니다.
+엔지니어가 트렌드 차트에서 특정 구간을 선택했고, 그 구간에 대해 질문합니다.
+
+# 절대 규칙
+1. 주어진 [데이터]에 적힌 수치만 사용하세요. 없는 값은 만들지 마세요.
+2. 데이터에 없는 항목을 물으면 "그 정보는 제공되지 않았습니다"라고 답하고,
+   무엇을 보면 알 수 있는지 알려주세요.
+3. 수치를 인용할 때는 괄호로 함께 적으세요.
+4. 상관관계를 인과로 단정하지 마세요.
+
+# 해석 참고 (데이터에 해당 항목이 있을 때만)
+- 두께가 목표보다 낮다 = 과연마(제거율이 높았다), 높다 = 미연마
+- 분포가 두 덩어리로 갈리면 조건이 섞여 있다는 신호 (장비·챔버·레시피 확인)
+- 선택 구간의 표준편차가 전체보다 크면 그 구간에서 산포가 더 벌어진 것
+- 장비별 평균이 한 대만 동떨어지면 그 설비 상태를 우선 의심
+
+# 답변 방식
+- 질문에 직접 답하세요. 서론과 요약 반복은 생략합니다.
+- 짧게, 한국어로. 필요하면 3~4줄이면 충분합니다.
+- 데이터에서 눈에 띄는 점이 있으면 한 줄로 덧붙이세요."""
+
+
+# ══════════════════════════════════════════════════════════
+# 대화 API
+# ══════════════════════════════════════════════════════════
+@csrf_exempt
+def analysis_chat(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+
+    body     = json.loads(request.body)
+    oper_id  = body.get('oper_id')
+    lot_cd   = body.get('lot_cd')
+    param    = body.get('param')
+    ids      = body.get('ids', [])
+    question = (body.get('question') or '').strip()
+    history  = body.get('history', [])
+
+    if not ids:
+        return JsonResponse({'error': '선택된 구간이 없습니다'}, status=400)
+    if not question:
+        return JsonResponse({'error': '질문이 비어 있습니다'}, status=400)
+
+    table = _an_table(oper_id)
+    ph    = ",".join(["%s"] * len(ids))
+
+    try:
+        # ── 질문에 나온 파라미터의 통계를 계산 ──────────────
+        targets = _mentioned_params(question, table, param)
+
+        blocks = []
+        with connections['analysis_db'].cursor() as cur:
+            have = _existing_cols(table)
+            for p in targets:
+                st  = _param_stats(cur, table, p, lot_cd, ids, ph)
+                eqp = (_param_by_eqp(cur, table, p, lot_cd, ids, ph)
+                       if 'EQP_ID' in have else None)
+                blocks.append(_stats_to_text(st, eqp))
+
+        ctx = [f"공정 {oper_id} / 제품 {lot_cd} / 선택 웨이퍼 {len(ids)}장", ""]
+        if blocks:
+            ctx.append("=== 계산 결과 ===")
+            ctx.extend(blocks)
+        else:
+            ctx.append("(질문에서 파라미터를 찾지 못해 통계를 계산하지 않았습니다)")
+
+        # 이 요약에 없는 것을 분명히 해 둔다
+        ctx.append("")
+        ctx.append("[이 데이터에 없는 정보] 위에 나열되지 않은 파라미터,")
+        ctx.append("스펙 상하한, 소모품 수명, 설비 조건은 제공되지 않았습니다.")
+
+        # ── 대화 이력 + 이번 질문 ─────────────────────────
+        messages = [{'role': 'system', 'content': CHAT_SYSTEM}]
+        for h in history[-CHAT_HISTORY_MAX:]:
+            role = 'assistant' if h.get('role') == 'assistant' else 'user'
+            messages.append({'role': role, 'content': str(h.get('content', ''))})
+        messages.append({
+            'role': 'user',
+            'content': "\n".join(ctx) + f"\n\n=== 질문 ===\n{question}",
+        })
+
+        answer, llm_error = None, None
+        try:
+            answer = _call_llm_messages(messages)
+        except Exception as e:
+            llm_error = f'LLM 호출 실패: {e}'
+
+        return JsonResponse({
+            'answer':    answer,
+            'llm_error': llm_error,
+            'params':    targets,              # 어떤 파라미터를 봤는지 화면 표시용
+            'context':   "\n".join(ctx),       # 무엇을 넘겼는지 확인용
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+def _call_llm_messages(messages):
+    """
+    messages 배열을 그대로 보내는 호출 (대화 이력 유지용).
+
+    ※ 게이트웨이가 system 역할을 거부하면 첫 메시지를 user 로 합칠 것.
+    """
+    resp = requests.post(
+        settings.LLM_URL + '/chat/completions',
+        json={
+            'model': settings.LLM_MODEL,
+            'messages': messages,
+            'temperature': 0.2,
+        },
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {settings.LLM_API_KEY}',
+        },
+        timeout=getattr(settings, 'LLM_TIMEOUT', 60),
+    )
+    resp.raise_for_status()
+    return resp.json()['choices'][0]['message']['content']
