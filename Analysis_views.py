@@ -507,64 +507,164 @@ def pivot_src(df_src):
 # item_name → 저장 컬럼명
 #   APC 는 웨이퍼당 item_name 별로 행이 나뉘므로 컬럼으로 펼쳐야 한다.
 #   ★ 항목을 추가하려면 APC 쿼리의 item_name in (...) 과 여기 둘 다 넣을 것
-ITEM_COLS = {
-    'FORMULA':                          'FORMULA',
-    'IDLE_TIME':                        'IDLE_TIME',
-    'PROCESS_OFFSET_WAFER_SEQ':         'WAFER_SEQ',
-    'PROCESS_OFFSET_MES_IDLE_FLAG_IDLE': 'IDLE_FLAG',
-}
+# ══════════════════════════════════════════════════════════
+# 5. APC 정리
+#    APC 는 웨이퍼 × input_name × item_name 으로 행이 갈라져 있다.
+#    이를 웨이퍼당 1행으로 펼친다.
+#
+#      {input_name}          APC 파라미터 값 (input_value)
+#      {input_name}_OFFSET   보정량 = seq_offset + idle_offset
+#      {input_name}_FORMULA  적용된 수식 (FORMULA 의 item_value)
+#      IDLE                  idle_1~4 / layer_1~4 / ''
+# ══════════════════════════════════════════════════════════
+
+# idle 순번을 몇 번째 웨이퍼까지 표기할지
+IDLE_RANK_MAX = 4
+
+# lot 완전성 검사 — 조회된 웨이퍼 수가 qty 와 다르면 그 lot 을 버린다.
+#   일부만 조회된 lot 은 순번(rank)이 어긋나므로 제외하는 편이 안전하다.
+CHECK_LOT_COMPLETE = True
+
+
+def _wf_id_from_substrate(sr):
+    """substrate_id (= alias_lot_id.wf_id) 에서 wf_id 추출"""
+    return sr.astype(str).str.rsplit('.', n=1).str[-1].str.strip()
+
+
+def _apc_idle(df):
+    """
+    IDLE 라벨 계산.
+
+      IDLE_TIME 의 item_value 에 Idle / Layer 가 들어온다.
+      순번은 (lot, 장비, 레시피) 안에서 wf_id 순으로 매긴다.
+      → 챔버가 나뉘어 병렬로 도는 경우에도 각 흐름의 첫 장이 1번이 된다.
+        (lot 전체를 시간순으로 줄 세우면 늦게 시작한 챔버의 첫 장이 밀린다)
+    """
+    idle_rows = df[df['item_name'] == 'IDLE_TIME'].copy()
+    if idle_rows.empty:
+        return pd.DataFrame(columns=['substrate_id', 'idle'])
+
+    key = [c for c in ['lot_id', 'eqp_id', 'recipe_id'] if c in idle_rows.columns]
+    idle_rows = idle_rows.drop_duplicates(subset=['substrate_id'], keep='first')
+
+    idle_rows['wf_no'] = pd.to_numeric(idle_rows['wf_id'], errors='coerce')
+    idle_rows = idle_rows[idle_rows['wf_no'].notna()]
+    if idle_rows.empty:
+        return pd.DataFrame(columns=['substrate_id', 'idle'])
+
+    idle_rows['rank'] = idle_rows.groupby(key)['wf_no'].rank(method='first')
+
+    val  = idle_rows['item_value'].astype(str).str.strip().str.lower()
+    rank = idle_rows['rank'].astype(int)
+
+    is_idle  = val.str.startswith('idle')
+    is_layer = val.str.startswith('layer')
+    base     = pd.Series('', index=idle_rows.index)
+    base[is_idle]  = 'idle'
+    base[is_layer] = 'layer'
+
+    hit   = (is_idle | is_layer) & (rank <= IDLE_RANK_MAX)
+    label = pd.Series('', index=idle_rows.index)
+    label[hit] = base[hit] + '_' + rank[hit].astype(str)
+
+    idle_rows['idle'] = label
+    return idle_rows[['substrate_id', 'idle']]
+
+
+def _apc_offset(df):
+    """
+    보정량 = PROCESS_OFFSET_WAFER_SEQ + PROCESS_OFFSET_MES_IDLE_FLAG_IDLE
+    (input_name 별로 따로 존재하므로 substrate_id + input_name 기준)
+    """
+    def pick(item, name):
+        d = df[df['item_name'] == item][['substrate_id', 'input_name', 'item_value']]
+        return d.rename(columns={'item_value': name}).drop_duplicates(
+            subset=['substrate_id', 'input_name'], keep='first')
+
+    seq  = pick('PROCESS_OFFSET_WAFER_SEQ', 'seq_offset')
+    idle = pick('PROCESS_OFFSET_MES_IDLE_FLAG_IDLE', 'idle_offset')
+
+    if seq.empty and idle.empty:
+        return pd.DataFrame(columns=['substrate_id', 'input_name', 'OFFSET'])
+
+    off = seq.merge(idle, on=['substrate_id', 'input_name'], how='outer')
+    for c in ('seq_offset', 'idle_offset'):
+        off[c] = pd.to_numeric(off.get(c), errors='coerce').fillna(0)
+    off['OFFSET'] = off['seq_offset'] + off['idle_offset']
+    return off[['substrate_id', 'input_name', 'OFFSET']]
+
+
+def _pivot_by_input(df, values, suffix=''):
+    """input_name 을 컬럼으로 펼친다 (웨이퍼당 1행)"""
+    d = df[df['input_name'].notna() & df[values].notna()]
+    if d.empty:
+        return pd.DataFrame(columns=['substrate_id'])
+
+    wide = pd.pivot_table(d, index='substrate_id', columns='input_name',
+                          values=values, aggfunc='first').reset_index()
+    wide.columns.name = None
+    if suffix:
+        wide = wide.rename(columns={c: f'{c}{suffix}'
+                                    for c in wide.columns if c != 'substrate_id'})
+    return wide
 
 
 def prepare_apc(df_apc):
-    """
-    APC → 웨이퍼당 1행.
-
-      · idle / layer_change 는 item_value 값 자체로 판별한다
-        (어느 item_name 에서 오든 값만 보면 되므로)
-      · 나머지 item_name 은 각각 컬럼으로 펼친다 (FORMULA, IDLE_TIME 등)
-        웨이퍼당 여러 행이므로 펼치지 않으면 어느 행 값인지 정해지지 않는다
-    """
+    """APC → 웨이퍼당 1행 (파라미터 · 보정량 · 수식 · IDLE)"""
     if df_apc is None or df_apc.empty:
         return pd.DataFrame()
 
     df = df_apc.copy()
     df.columns = df.columns.str.lower()
 
-    # ── idle / layer_change ──────────────────────────────
-    iv   = df['item_value'].astype(str).str.strip().str.lower()
-    flag = df[iv.isin(['idle', 'layer_change'])]
+    # ── wf_id 추출 + 비정상 행 제거 ───────────────────────
+    df['wf_id'] = _wf_id_from_substrate(df['substrate_id'])
+    df = df[(df['wf_id'] != '-') & (df['lot_id'].astype(str) != '-')]
+    if df.empty:
+        return pd.DataFrame()
 
-    if not flag.empty:
-        idle = (flag.sort_values('request_dtts')
-                    .groupby('substrate_id', as_index=False)['item_value']
-                    .first()
-                    .rename(columns={'item_value': 'idle'}))
-    else:
-        idle = pd.DataFrame(columns=['substrate_id', 'idle'])
+    # ── lot 완전성 (조회 웨이퍼 수 == qty) ────────────────
+    if CHECK_LOT_COMPLETE and 'qty' in df.columns:
+        cnt  = df.groupby('lot_id')['substrate_id'].transform('nunique')
+        keep = cnt == pd.to_numeric(df['qty'], errors='coerce')
+        dropped = df.loc[~keep, 'lot_id'].nunique()
+        if dropped:
+            print(f'  [APC] 불완전 lot {dropped}개 제외')
+        df = df[keep]
+        if df.empty:
+            return pd.DataFrame()
 
-    # ── 메타 (웨이퍼당 첫 행) ─────────────────────────────
-    meta_cols = [c for c in ['substrate_id', 'lot_id', 'eqp_id', 'process_id',
-                             'recipe_id', 'operation_id', 'qty', 'request_dtts']
+    # ── 웨이퍼 메타 (첫 행) ───────────────────────────────
+    meta_cols = [c for c in ['substrate_id', 'lot_id', 'wf_id', 'eqp_id',
+                             'process_id', 'recipe_id', 'operation_id',
+                             'qty', 'request_dtts']
                  if c in df.columns]
-    meta = (df.sort_values('request_dtts')
-              .groupby('substrate_id', as_index=False)[meta_cols]
-              .first())
+    out = (df.sort_values('request_dtts')
+             .groupby('substrate_id', as_index=False)[meta_cols]
+             .first())
 
-    out = meta.merge(idle, on='substrate_id', how='left')
+    # ── IDLE ─────────────────────────────────────────────
+    out = out.merge(_apc_idle(df), on='substrate_id', how='left')
+    out['idle'] = out['idle'].fillna('')
 
-    # ── item_name 별 컬럼으로 펼치기 ──────────────────────
-    if 'item_name' in df.columns:
-        piv = df[df['item_name'].isin(ITEM_COLS.keys())]
-        if not piv.empty:
-            wide = (piv.sort_values('request_dtts')
-                       .drop_duplicates(subset=['substrate_id', 'item_name'],
-                                        keep='first')
-                       .pivot(index='substrate_id', columns='item_name',
-                              values='item_value')
-                       .reset_index())
-            wide.columns.name = None
-            wide = wide.rename(columns=ITEM_COLS)
-            out = out.merge(wide, on='substrate_id', how='left')
+    # ── 파라미터 / 보정량 / 수식 ──────────────────────────
+    df['input_value'] = pd.to_numeric(df['input_value'], errors='coerce')
+    out = out.merge(_pivot_by_input(df, 'input_value'),
+                    on='substrate_id', how='left')
+
+    off = _apc_offset(df)
+    if not off.empty:
+        wide = pd.pivot_table(off, index='substrate_id', columns='input_name',
+                              values='OFFSET', aggfunc='first').reset_index()
+        wide.columns.name = None
+        wide = wide.rename(columns={c: f'{c}_OFFSET'
+                                    for c in wide.columns if c != 'substrate_id'})
+        out = out.merge(wide, on='substrate_id', how='left')
+
+    formula = df[df['item_name'] == 'FORMULA']
+    if not formula.empty:
+        out = out.merge(_pivot_by_input(formula, 'item_value', '_FORMULA'),
+                        on='substrate_id', how='left')
 
     return out
 
@@ -600,40 +700,6 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
 # ══════════════════════════════════════════════════════════
 # 7. 파생 — idle_1~4 / OPTA 챔버
 # ══════════════════════════════════════════════════════════
-def derive_idle(df):
-    """
-    APC 의 idle 플래그는 해당 lot 전체 웨이퍼에 동일하게 붙어온다.
-      → "이 lot 이 idle 직후인가" 를 뜻하므로
-        lot 웨이퍼를 시간순 정렬해 앞 4장에 idle_1~4 부여.
-      layer_change 는 lot 첫 웨이퍼에만 표기.
-    """
-    if df is None or df.empty:
-        return df
-
-    df = df.copy()
-    if 'idle' not in df.columns:
-        df['idle'] = ''
-    df['idle'] = df['idle'].fillna('').astype(str).str.strip().str.lower()
-
-    time_col = 'end_tm' if 'end_tm' in df.columns else 'request_dtts'
-
-    out = []
-    for lot_id, g in df.groupby('lot_id', sort=False):
-        g = g.sort_values(time_col).reset_index(drop=True)
-        flag = g['idle'].iloc[0]
-
-        g['idle'] = ''
-        if flag.startswith('idle'):
-            for i in range(min(4, len(g))):
-                g.loc[i, 'idle'] = f'idle_{i+1}'
-        elif 'layer' in flag:
-            g.loc[0, 'idle'] = 'layer_change'
-
-        out.append(g)
-
-    return pd.concat(out, ignore_index=True)
-
-
 # OPTA 챔버 — param_nm 표기(_P1/_P2) → 실제 챔버명
 OPTA_CH_MAP = {'P1': 'P3', 'P2': 'P4'}
 
@@ -850,8 +916,7 @@ def build_analysis_df(lake, df_info, oper_id, days=30):
     df_mes = fetch_mes(lake, cond, df_src, days)      # 장비 목록을 SRC 에서 뽑음
 
     w = pivot_src(df_src)
-    a = prepare_apc(df_apc)
+    a = prepare_apc(df_apc)          # IDLE 라벨까지 여기서 계산
     m = merge_sources(w, a, df_mes)
-    m = derive_idle(m)
 
     return finalize_df(m, cond, df_src)
