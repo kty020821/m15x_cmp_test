@@ -6,24 +6,18 @@ equipment/analysis_service.py
   APC / SRC / MES(LC) 조회 (Lake·StarRocks)
       → SRC pivot(long→wide) / APC 압축 / MES lot단위 정리
       → 머지
-      → EQP_CH_ID 결정
+      → EQP_CH_ID / PRE_EQP_CH 결정
       → PostgreSQL 저장
 
 실행: 루트의 run_analysis_load.py (사내 스케줄러가 호출)
 
 ────────────────────────────────────────────────────────────
-[★ 이번 수정 — 데이터 소실 추적]
-  1. build_analysis_df 에 단계별 행수 로그 (어디서 0이 되는지 즉시 특정)
-  2. prepare_apc 의 lot 완전성 검사 — 제외 수를 로그로 남기고,
-     전 lot 이 제외되면 경고 후 검사 없이 재시도 (전멸 방지)
-  3. merge_sources — SRC↔APC substrate_id 교집합을 사전 점검,
-     0이면 양쪽 예시 값을 찍음 (inner join 무에러 전멸 방지)
-  4. fetch_src DCP 조인의 SUBSTRING(lot_id, 2, 2) → (2, 3) 수정
-     (2글자 substring 은 3글자 '5E2' 와 절대 같을 수 없음 →
-      recipe 필터가 걸린 공정은 SRC 가 조용히 0행이 됨)
-  5. save_analysis_df 에 타입 넓히기(숫자→VARCHAR) 복원
-     (ADD COLUMN 만 있고 ALTER TYPE 이 빠져 있어
-      기존 숫자 컬럼에 텍스트가 오면 INSERT 실패)
+[★ 이번 수정]
+  1. 값이 전부 비어 있는 컬럼을 VARCHAR 로 만들지 않는다 (숫자로 유지)
+     → 화면에서 그 컬럼에 AVG/CORR 를 걸 때 나던 500 의 근본 원인
+  2. IDLE 라벨 진단 로그 — idle_1 이 어디서 사라지는지 추적
+     (APC 단계 라벨 분포 vs SRC 머지 후 라벨 분포를 나란히 출력)
+  3. PRE_EQP_CH 를 '사전공정장비_챔버' 형태로 결합 (EQP_CH_ID 와 동일 규칙)
 
 [★ 사용 전 확인]
   1. 아래 import 에 사내 모듈(lakes, goodDocsGetData) 실제 경로 입력
@@ -44,7 +38,7 @@ from psycopg2.extras import execute_values
 # from ??? import goodDocsGetData
 
 
-# 단계별 행수 로그 (배치 로그로 소실 지점을 추적한다)
+# 단계별 행수 / 진단 로그
 VERBOSE = True
 
 
@@ -56,6 +50,18 @@ def _rows(d):
         return len(d)
     except TypeError:
         return 0
+
+
+def _idle_dist(sr):
+    """IDLE 라벨 분포 → 'idle_1:3, idle_2:12, ...' (빈값 제외)"""
+    if sr is None or len(sr) == 0:
+        return '(없음)'
+    v = sr.fillna('').astype(str).str.strip()
+    v = v[v != '']
+    if v.empty:
+        return '(없음)'
+    c = v.value_counts().sort_index()
+    return ', '.join(f'{k}:{n}' for k, n in c.items())
 
 
 # ══════════════════════════════════════════════════════════
@@ -276,11 +282,9 @@ def fetch_src(lake, cond, days=30):
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
 
-            # ★ 수정: SUBSTRING(lot_id, 2, 2) → SUBSTRING(lot_id, 2, 3)
-            #   2글자 substring 은 3글자 lot_code('5E2')와 절대 같을 수 없어
-            #   DCP 조인이 전부 실패 → c.eqp_recipe_id 가 전부 NULL →
-            #   recipe 필터가 걸린 공정은 SRC 가 에러 없이 0행이 된다.
-            #   (recipe 미등록 공정은 recipe_cond 가 "" 라서 증상이 안 보였음)
+            # SUBSTRING(lot_id, 2, 3) — lot_code 가 3자리(5E2)이므로 길이도 3.
+            #   2 로 두면 3글자와 절대 같을 수 없어 DCP 조인이 전부 실패하고
+            #   recipe 필터가 걸린 공정만 조용히 0행이 된다.
             query = f"""
 WITH src AS (
     select a.lot_id, a.wf_id,
@@ -568,20 +572,36 @@ def _apc_idle(df):
       순번은 (lot, 장비, 레시피) 안에서 wf_id 순으로 매긴다.
       → 챔버가 나뉘어 병렬로 도는 경우에도 각 흐름의 첫 장이 1번이 된다.
         (lot 전체를 시간순으로 줄 세우면 늦게 시작한 챔버의 첫 장이 밀린다)
+
+    ★ 수정
+      · drop_duplicates 전에 request_dtts 로 정렬한다.
+        정렬 없이 keep='first' 를 쓰면 한 웨이퍼에 IDLE_TIME 행이 여러 개일 때
+        어느 값이 남을지가 실행마다 달라져 라벨이 들쭉날쭉해진다.
+      · rank 1 인데 라벨을 못 받은 웨이퍼 수를 진단 로그로 남긴다
+        (idle_1 만 비어 보이는 현상의 원인을 좁히기 위함)
     """
     idle_rows = df[df['item_name'] == 'IDLE_TIME'].copy()
     if idle_rows.empty:
+        if VERBOSE:
+            print('  [IDLE] IDLE_TIME 행이 없음 → 라벨 없음')
         return pd.DataFrame(columns=['substrate_id', 'idle'])
 
     key = [c for c in ['lot_id', 'eqp_id', 'recipe_id'] if c in idle_rows.columns]
+
+    # 웨이퍼당 1행 — 가장 이른 조회 기록을 남긴다 (결정적으로)
+    if 'request_dtts' in idle_rows.columns:
+        idle_rows = idle_rows.sort_values('request_dtts')
     idle_rows = idle_rows.drop_duplicates(subset=['substrate_id'], keep='first')
 
     idle_rows['wf_no'] = pd.to_numeric(idle_rows['wf_id'], errors='coerce')
+    n_bad_wf = int(idle_rows['wf_no'].isna().sum())
     idle_rows = idle_rows[idle_rows['wf_no'].notna()]
+    if VERBOSE and n_bad_wf:
+        print(f'  [IDLE] wf_id 를 숫자로 못 읽어 제외 {n_bad_wf}장')
     if idle_rows.empty:
         return pd.DataFrame(columns=['substrate_id', 'idle'])
 
-    # ★ 수정: key 가 비어 있으면 groupby([]) 가 예외 → 전체 기준으로 순번
+    # key 가 비어 있으면 groupby([]) 가 예외 → 전체 기준으로 순번
     if key:
         idle_rows['rank'] = idle_rows.groupby(key)['wf_no'].rank(method='first')
     else:
@@ -601,6 +621,21 @@ def _apc_idle(df):
     label[hit] = base[hit] + '_' + rank[hit].astype(str)
 
     idle_rows['idle'] = label
+
+    # ── 진단 ─────────────────────────────────────────────
+    # rank 1 인데 라벨이 안 붙었다면, 그 웨이퍼의 item_value 가
+    # Idle/Layer 로 시작하지 않는다는 뜻이다 (= APC 원본이 그렇게 옴).
+    if VERBOSE:
+        r1     = rank == 1
+        r1_tot = int(r1.sum())
+        r1_lab = int((r1 & hit).sum())
+        print(f'  [IDLE] APC 라벨 분포: {_idle_dist(idle_rows["idle"])}')
+        print(f'  [IDLE] rank1 웨이퍼 {r1_tot}장 중 라벨 {r1_lab}장')
+        if r1_tot and r1_lab < r1_tot:
+            miss_val = val[r1 & ~hit].value_counts().head(5)
+            print(f'  [IDLE] ★ rank1 인데 라벨 없음 {r1_tot - r1_lab}장 — '
+                  f'그 웨이퍼들의 IDLE_TIME item_value 상위: {dict(miss_val)}')
+
     return idle_rows[['substrate_id', 'idle']]
 
 
@@ -660,22 +695,19 @@ def prepare_apc(df_apc):
         return pd.DataFrame()
 
     # ── lot 완전성 (조회 웨이퍼 수 == qty) ────────────────
-    # ★ 수정: 제외 규모를 항상 로그로 남기고,
-    #         전 lot 이 제외되면(qty 불일치가 전면적이면) 검사 자체가
-    #         잘못된 것이므로 경고 후 검사 없이 진행한다 — 전멸 방지.
+    #   전 lot 이 제외되면 검사 기준 자체가 틀린 것이므로 경고 후 통과시킨다.
     if CHECK_LOT_COMPLETE and 'qty' in df.columns:
         cnt  = df.groupby('lot_id')['substrate_id'].transform('nunique')
         qty  = pd.to_numeric(df['qty'], errors='coerce')
         keep = cnt == qty
 
-        n_lots  = df['lot_id'].nunique()
-        n_drop  = df.loc[~keep, 'lot_id'].nunique()
+        n_lots = df['lot_id'].nunique()
+        n_drop = df.loc[~keep, 'lot_id'].nunique()
         if n_drop and VERBOSE:
             print(f'  [APC] 완전성 검사: lot {n_drop}/{n_lots}개 제외 '
                   f'(웨이퍼 수 ≠ qty)')
 
         if n_drop >= n_lots:
-            # qty 가 NaN 이거나 단위가 다르거나 — 검사 기준 자체가 틀린 상황
             print(f'  [APC] ★ 완전성 검사에서 전 lot({n_lots}개) 제외 — '
                   f'검사 없이 진행. qty 값/형식을 확인할 것 '
                   f'(예시 qty: {df["qty"].head(3).tolist()}, '
@@ -737,8 +769,7 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
         apc = df_apc_prep.drop(
             columns=[c for c in ['lot_id', 'wf_id'] if c in df_apc_prep.columns])
 
-        # ★ 추가: inner join 사전 점검 — 키 포맷이 어긋나면
-        #   에러 없이 0행이 되므로, 교집합을 미리 로그로 남긴다.
+        # inner join 사전 점검 — 키 포맷이 어긋나면 에러 없이 0행이 된다
         if VERBOSE:
             ws  = set(df['substrate_id'].astype(str).str.strip())
             as_ = set(apc['substrate_id'].astype(str).str.strip())
@@ -753,8 +784,13 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
         # 그 밖의 이름 충돌은 APC 쪽에 _APC 를 붙여 구분한다
         df = df.merge(apc, on='substrate_id', how='inner',
                       suffixes=('', '_APC'))                 # inner → rework 자동 제외
+
         if VERBOSE:
             print(f'  [merge] SRC∩APC → {len(df):,}행')
+            if 'idle' in df.columns:
+                # ★ APC 단계 분포와 비교하면 idle_1 이 어디서 사라졌는지 알 수 있다.
+                #   APC 에는 있는데 여기서 줄었다면 → 그 웨이퍼가 SRC(측정)에 없는 것
+                print(f'  [merge] 머지 후 IDLE 분포: {_idle_dist(df["idle"])}')
 
     if df_mes is not None and not df_mes.empty:
         mes = df_mes.copy()
@@ -823,11 +859,31 @@ DROP_COLS = [
 ]
 
 
+def _join_eqp_ch(eqp_sr, ch_sr):
+    """
+    '장비ID_챔버' 결합.
+      챔버가 비면 빈 문자열, 장비가 비면 챔버만 남긴다.
+      (챔버 값만 덩그러니 남으면 어느 장비의 챔버인지 구분이 안 된다)
+    """
+    eqps = eqp_sr.fillna('').astype(str).str.strip()
+    chs  = ch_sr.fillna('').astype(str).str.strip()
+    out = []
+    for e, c in zip(eqps, chs):
+        if c and e:
+            out.append(f'{e}_{c}')
+        elif c:
+            out.append(c)
+        else:
+            out.append('')
+    return pd.Series(out, index=ch_sr.index)
+
+
 def finalize_df(df, cond, df_src=None):
     """
     머지+파생 결과를 저장 형태로 정리.
       - OPTA 면 param 기반 챔버 채우기 (df_src 필요)
-      - EQP_CH_ID = 장비ID_챔버 형태로 결합
+      - EQP_CH_ID  = 장비ID_챔버
+      - PRE_EQP_CH = 사전공정장비ID_챔버   ★ 이번 수정
       - 컬럼명 통일 / 기준정보 추가 / 불필요 컬럼 제거 / 대문자화
     """
     if df is None or df.empty:
@@ -848,11 +904,16 @@ def finalize_df(df, cond, df_src=None):
 
     # EQP_CH_ID = 장비ID_챔버
     if 'eqp_ch' in df.columns and 'main_eqp_id' in df.columns:
-        chs = df['eqp_ch'].fillna('').astype(str).str.strip()
-        df['eqp_ch'] = pd.Series(
-            [f"{e}_{c}" if c else '' for e, c in zip(df['main_eqp_id'].astype(str), chs)],
-            index=df.index,
-        )
+        df['eqp_ch'] = _join_eqp_ch(df['main_eqp_id'], df['eqp_ch'])
+
+    # ★ PRE_EQP_CH = 사전공정장비ID_챔버
+    #   SRC 의 b.module_id 는 '2', '3' 처럼 번호만 온다.
+    #   그대로 두면 어느 장비의 챔버인지 알 수 없으므로 장비ID 를 앞에 붙인다.
+    if 'pre_eqp_ch' in df.columns and 'pre_eqp_id' in df.columns:
+        df['pre_eqp_ch'] = _join_eqp_ch(df['pre_eqp_id'], df['pre_eqp_ch'])
+        if VERBOSE:
+            sample = [v for v in df['pre_eqp_ch'].unique()[:3] if v]
+            print(f'  [finalize] PRE_EQP_CH 결합 예시: {sample}')
 
     df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
     df = df.rename(columns={k: v for k, v in RENAME_MAP.items() if k in df.columns})
@@ -896,6 +957,12 @@ def _pg_type_from_series(s):
     """
     실제 데이터로 PG 타입 판정.
     하드코딩 목록은 컬럼이 늘 때마다 누락되므로 값을 보고 결정한다.
+
+    ★ 값이 하나도 없는 컬럼은 DOUBLE PRECISION 으로 본다.
+      여기 오는 컬럼은 식별자류(TEXT_COLS)가 이미 걸러진 '측정값' 뿐이다.
+      이번 적재에서만 비어 있다고 VARCHAR 로 만들면,
+        · 아래 타입 넓히기가 멀쩡한 숫자 컬럼을 VARCHAR 로 바꾸고
+        · 화면에서 그 컬럼에 AVG/CORR 를 걸 때 500 이 난다
     """
     if pd.api.types.is_datetime64_any_dtype(s):
         return 'TIMESTAMP'
@@ -904,7 +971,7 @@ def _pg_type_from_series(s):
 
     nonnull = s.dropna()
     if len(nonnull) == 0:
-        return 'VARCHAR(200)'
+        return 'DOUBLE PRECISION'          # ★ 전부 NULL → 숫자로 유지
     if pd.to_numeric(nonnull, errors='coerce').notna().all():
         return 'DOUBLE PRECISION'
     return 'VARCHAR(200)'
@@ -920,6 +987,45 @@ def drop_analysis_table(oper_id):
     with connections['analysis_db'].cursor() as cur:
         cur.execute(f'DROP TABLE IF EXISTS {table}')
     print(f"[{oper_id}] {table} DROP 완료")
+
+
+def repair_numeric_columns(oper_id):
+    """
+    과거 적재에서 VARCHAR 로 굳어버린 측정값 컬럼을 숫자로 되돌린다.
+
+    값이 전부 비어 있던 컬럼이 VARCHAR 로 만들어지면 화면에서
+    AVG/CORR 를 걸 때 500 이 나므로, 숫자로 바꿀 수 있는 것만 되돌린다.
+    (한 번만 돌리면 되고, 실패하는 컬럼은 실제로 텍스트가 들어 있는 것)
+    """
+    table = _table_name(oper_id)
+    fixed, skipped = [], []
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("""
+            SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_name = %s
+        """, [table])
+        cols = cur.fetchall()
+
+        for name, dtype in cols:
+            up = name.upper()
+            if up in TEXT_COLS or up in TIME_COLS or up == 'ID':
+                continue
+            if dtype.lower() not in ('character varying', 'text'):
+                continue
+            try:
+                cur.execute(
+                    f'ALTER TABLE {table} ALTER COLUMN "{name}" '
+                    f'TYPE DOUBLE PRECISION '
+                    f'USING NULLIF("{name}", \'\')::double precision')
+                fixed.append(name)
+            except Exception as e:
+                skipped.append(f'{name}({e.__class__.__name__})')
+
+    print(f'[{oper_id}] 숫자 복구 {len(fixed)}개: {", ".join(fixed) or "-"}')
+    if skipped:
+        print(f'[{oper_id}] 건너뜀(실제 텍스트) {len(skipped)}개: '
+              f'{", ".join(skipped[:8])}')
+    return fixed
 
 
 def save_analysis_df(df, oper_id):
@@ -983,9 +1089,10 @@ def save_analysis_df(df, oper_id):
             print(f'  [{oper_id}] 컬럼 {len(added)}개 추가: '
                   f'{", ".join(added[:8])}{" ..." if len(added) > 8 else ""}')
 
-        # ★ 복원: 타입 넓히기 — df 는 텍스트인데 테이블이 숫자면 VARCHAR 로.
-        #   이게 없으면 값 형식이 바뀐 컬럼(PRE_EQP_CH 등)에서
+        # 타입 넓히기 — df 는 텍스트인데 테이블이 숫자면 VARCHAR 로.
+        #   이게 없으면 값 형식이 바뀐 컬럼에서
         #   'invalid input syntax for type double precision' 으로 INSERT 실패.
+        #   (전부 NULL 인 컬럼은 위에서 숫자로 판정되므로 여기 걸리지 않는다)
         widened = []
         for c in df.columns:
             if c in exists and col_types[c].startswith('VARCHAR') \
@@ -1023,8 +1130,8 @@ def save_analysis_df(df, oper_id):
 def build_analysis_df(lake, df_info, oper_id, days=30):
     """
     조회 → 정리 → 머지 → 저장형태 정리까지.
-    ★ 단계별 행수를 로그로 남긴다 — 저장 시 '빈 df' 가 나오면
-      이 로그에서 어느 단계가 0인지 바로 보인다.
+    단계별 행수를 로그로 남긴다 — 저장 시 '빈 df' 가 나오면
+    이 로그에서 어느 단계가 0인지 바로 보인다.
     """
     def _n(tag, d):
         if VERBOSE:
