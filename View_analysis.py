@@ -261,35 +261,65 @@ def analysis_page(request):
 # 프로세스 단위로 캐시하고, 새 공정 적재 후에는 서버를 재시작하거나
 # _oper_cache_clear() 를 호출한다.
 _OPER_CACHE = None
+_OPER_ERROR = None      # 마지막 실패 사유 (화면/네트워크 탭에서 확인용)
 
 
 def _oper_cache_clear():
-    global _OPER_CACHE
+    global _OPER_CACHE, _OPER_ERROR
     _OPER_CACHE = None
+    _OPER_ERROR = None
 
 
 def _oper_names():
     """
-    구닥스에서 {OPER_ID: OPER_DESC}. 실패해도 화면은 살아 있어야 한다.
+    {OPER_ID: 공정명}.
 
-    analysis_service 는 사내 모듈(Lake/구닥스 클라이언트)에 의존하므로
-    모듈 최상단에서 import 하면 그 모듈이 없거나 초기화에 실패할 때
-    페이지 자체가 열리지 않는다. 그래서 여기서 지연 import 한다.
+    ★ 1순위는 tech_map.OPER_NAME_MAP 이다.
+      웹 프로세스는 사내 모듈(Lake/구닥스 클라이언트)을 쓸 수 없어서
+      구닥스를 직접 조회하는 방식은 여기서 늘 실패한다.
+      그 결과 드롭박스에 공정명 없이 OPER_ID 만 표시된다.
+      (예전에 같은 이유로 tech_map 방식으로 옮겼던 부분)
+
+    ★ 2순위로 구닥스도 시도한다.
+      배치와 같은 프로세스에서 이 함수를 부르는 경우(예: 셸에서 확인)에는
+      성공할 수 있고, 그때는 tech_map 에 없는 공정명까지 채워진다.
+      실패해도 조용히 넘어가고 tech_map 값만 쓴다.
+
+    ★ 실패하거나 빈 결과는 캐시하지 않는다.
+      예전 코드는 except 로 잡은 뒤에도 _OPER_CACHE = {} 를 넣었는데,
+      {} 는 None 이 아니므로 이후 모든 요청이 빈 값을 돌려받아
+      서버를 재시작할 때까지 증상이 고정됐다.
     """
-    global _OPER_CACHE
-    if _OPER_CACHE is not None:
+    global _OPER_CACHE, _OPER_ERROR
+    if _OPER_CACHE:                    # 비어 있지 않을 때만 캐시 적중
         return _OPER_CACHE
 
-    names = {}
+    # 1순위 — tech_map (웹에서 항상 동작)
+    names = dict(tech_map.oper_names())
+
+    # 2순위 — 구닥스 (가능한 환경에서만. 지연 import 로 페이지를 지키다)
     try:
         from . import analysis_service as svc
         df = svc.get_config()
         for _, r in df.drop_duplicates(subset=['OPER_ID']).iterrows():
-            names[str(r['OPER_ID']).upper()] = str(r.get('OPER_DESC') or '')
+            oid  = str(r['OPER_ID']).upper().strip()
+            desc = str(r.get('OPER_DESC') or '').strip()
+            if oid and desc:
+                names.setdefault(oid, desc)    # tech_map 값을 우선
     except Exception as e:
-        print(f'[analysis] 구닥스 공정 목록 조회 실패: {e}')
+        # 웹에서는 정상적인 실패다. tech_map 에 이름이 있으면 문제 없음.
+        print(f'[analysis] 구닥스 공정명 보조 조회 생략: {e.__class__.__name__}: {e}')
 
+    if not names:
+        _OPER_ERROR = ('공정명을 하나도 얻지 못했습니다. '
+                       'equipment/tech_map.py 의 OPER_NAME_MAP 에 '
+                       '{OPER_ID: 공정명} 을 등록하세요.')
+        print(f'[analysis] {_OPER_ERROR}')
+        return {}                      # ★ 빈 결과는 캐시하지 않음
+
+    _OPER_ERROR = None
     _OPER_CACHE = names
+    print(f'[analysis] 공정명 {len(names)}건 캐시 완료')
     return names
 
 
@@ -358,7 +388,13 @@ def analysis_options(request):
             return JsonResponse({'options': options, 'unmapped': unmapped})
 
         if level == 'oper':
-            return JsonResponse({'options': _oper_options()})
+            opts = _oper_options()
+            out  = {'options': opts}
+            # 공정명을 못 가져왔으면 사유를 함께 보낸다.
+            # 서버 로그를 못 볼 때 브라우저 개발자도구 > 네트워크에서 확인 가능.
+            if _OPER_ERROR:
+                out['note'] = _OPER_ERROR
+            return JsonResponse(out)
 
         if level == 'param':
             table = _an_table(body.get('oper_id'))
