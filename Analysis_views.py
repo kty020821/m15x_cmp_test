@@ -6,12 +6,25 @@ equipment/analysis_service.py
   APC / SRC / MES(LC) 조회 (Lake·StarRocks)
       → SRC pivot(long→wide) / APC 압축 / MES lot단위 정리
       → 머지
-      → idle_1~4 파생, EQP_CH_ID 결정
+      → EQP_CH_ID 결정
       → PostgreSQL 저장
 
 실행: 루트의 run_analysis_load.py (사내 스케줄러가 호출)
 
 ────────────────────────────────────────────────────────────
+[★ 이번 수정 — 데이터 소실 추적]
+  1. build_analysis_df 에 단계별 행수 로그 (어디서 0이 되는지 즉시 특정)
+  2. prepare_apc 의 lot 완전성 검사 — 제외 수를 로그로 남기고,
+     전 lot 이 제외되면 경고 후 검사 없이 재시도 (전멸 방지)
+  3. merge_sources — SRC↔APC substrate_id 교집합을 사전 점검,
+     0이면 양쪽 예시 값을 찍음 (inner join 무에러 전멸 방지)
+  4. fetch_src DCP 조인의 SUBSTRING(lot_id, 2, 2) → (2, 3) 수정
+     (2글자 substring 은 3글자 '5E2' 와 절대 같을 수 없음 →
+      recipe 필터가 걸린 공정은 SRC 가 조용히 0행이 됨)
+  5. save_analysis_df 에 타입 넓히기(숫자→VARCHAR) 복원
+     (ADD COLUMN 만 있고 ALTER TYPE 이 빠져 있어
+      기존 숫자 컬럼에 텍스트가 오면 INSERT 실패)
+
 [★ 사용 전 확인]
   1. 아래 import 에 사내 모듈(lakes, goodDocsGetData) 실제 경로 입력
   2. OPTA_FIXED_CH 에 챔버 고정 공정의 oper_id 입력
@@ -29,6 +42,20 @@ from psycopg2.extras import execute_values
 # ★ 사내 모듈 — 기존 코드에서 쓰던 import 문을 그대로 넣을 것
 # from ??? import lakes
 # from ??? import goodDocsGetData
+
+
+# 단계별 행수 로그 (배치 로그로 소실 지점을 추적한다)
+VERBOSE = True
+
+
+def _rows(d):
+    """행수 (None/빈 df 는 0)"""
+    if d is None:
+        return 0
+    try:
+        return len(d)
+    except TypeError:
+        return 0
 
 
 # ══════════════════════════════════════════════════════════
@@ -249,6 +276,11 @@ def fetch_src(lake, cond, days=30):
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
 
+            # ★ 수정: SUBSTRING(lot_id, 2, 2) → SUBSTRING(lot_id, 2, 3)
+            #   2글자 substring 은 3글자 lot_code('5E2')와 절대 같을 수 없어
+            #   DCP 조인이 전부 실패 → c.eqp_recipe_id 가 전부 NULL →
+            #   recipe 필터가 걸린 공정은 SRC 가 에러 없이 0행이 된다.
+            #   (recipe 미등록 공정은 recipe_cond 가 "" 라서 증상이 안 보였음)
             query = f"""
 WITH src AS (
     select a.lot_id, a.wf_id,
@@ -294,7 +326,7 @@ WITH src AS (
             select lot_id, crt_tm, eqp_recipe_id,
                    rank() over (partition by lot_id order by crt_tm asc) recipe_rank
             from lake_catalog.dcp.dcp_dcp_dcoldata_inf_{fab}
-            where ( SUBSTRING(lot_id, 2, 2) = '{lot_code}'
+            where ( SUBSTRING(lot_id, 2, 3) = '{lot_code}'
                  or SUBSTRING(lot_id, 2, 2) = 'XC'
                  or SUBSTRING(lot_id, 1, 1) = 'S' )
               and oper_id = '{oper_id}'
@@ -467,7 +499,7 @@ where dt between '{dt_s}' and '{dt_e}'
 
 
 # ══════════════════════════════════════════════════════════
-# 5. 소스별 정리 (pivot / 압축)
+# 5-A. SRC 정리 (pivot)
 # ══════════════════════════════════════════════════════════
 # 웨이퍼 1장당 하나인 값 (pivot 후에도 유지)
 SRC_META_COLS = [
@@ -504,11 +536,8 @@ def pivot_src(df_src):
     return meta.merge(wide, on='substrate_id', how='left')
 
 
-# item_name → 저장 컬럼명
-#   APC 는 웨이퍼당 item_name 별로 행이 나뉘므로 컬럼으로 펼쳐야 한다.
-#   ★ 항목을 추가하려면 APC 쿼리의 item_name in (...) 과 여기 둘 다 넣을 것
 # ══════════════════════════════════════════════════════════
-# 5. APC 정리
+# 5-B. APC 정리
 #    APC 는 웨이퍼 × input_name × item_name 으로 행이 갈라져 있다.
 #    이를 웨이퍼당 1행으로 펼친다.
 #
@@ -552,7 +581,11 @@ def _apc_idle(df):
     if idle_rows.empty:
         return pd.DataFrame(columns=['substrate_id', 'idle'])
 
-    idle_rows['rank'] = idle_rows.groupby(key)['wf_no'].rank(method='first')
+    # ★ 수정: key 가 비어 있으면 groupby([]) 가 예외 → 전체 기준으로 순번
+    if key:
+        idle_rows['rank'] = idle_rows.groupby(key)['wf_no'].rank(method='first')
+    else:
+        idle_rows['rank'] = idle_rows['wf_no'].rank(method='first')
 
     val  = idle_rows['item_value'].astype(str).str.strip().str.lower()
     rank = idle_rows['rank'].astype(int)
@@ -618,21 +651,39 @@ def prepare_apc(df_apc):
     df.columns = df.columns.str.lower()
 
     # ── wf_id 추출 + 비정상 행 제거 ───────────────────────
+    n0 = len(df)
     df['wf_id'] = _wf_id_from_substrate(df['substrate_id'])
     df = df[(df['wf_id'] != '-') & (df['lot_id'].astype(str) != '-')]
+    if VERBOSE and len(df) < n0:
+        print(f'  [APC] 비정상 행 제거 {n0 - len(df):,}행 ({n0:,} → {len(df):,})')
     if df.empty:
         return pd.DataFrame()
 
     # ── lot 완전성 (조회 웨이퍼 수 == qty) ────────────────
+    # ★ 수정: 제외 규모를 항상 로그로 남기고,
+    #         전 lot 이 제외되면(qty 불일치가 전면적이면) 검사 자체가
+    #         잘못된 것이므로 경고 후 검사 없이 진행한다 — 전멸 방지.
     if CHECK_LOT_COMPLETE and 'qty' in df.columns:
         cnt  = df.groupby('lot_id')['substrate_id'].transform('nunique')
-        keep = cnt == pd.to_numeric(df['qty'], errors='coerce')
-        dropped = df.loc[~keep, 'lot_id'].nunique()
-        if dropped:
-            print(f'  [APC] 불완전 lot {dropped}개 제외')
-        df = df[keep]
-        if df.empty:
-            return pd.DataFrame()
+        qty  = pd.to_numeric(df['qty'], errors='coerce')
+        keep = cnt == qty
+
+        n_lots  = df['lot_id'].nunique()
+        n_drop  = df.loc[~keep, 'lot_id'].nunique()
+        if n_drop and VERBOSE:
+            print(f'  [APC] 완전성 검사: lot {n_drop}/{n_lots}개 제외 '
+                  f'(웨이퍼 수 ≠ qty)')
+
+        if n_drop >= n_lots:
+            # qty 가 NaN 이거나 단위가 다르거나 — 검사 기준 자체가 틀린 상황
+            print(f'  [APC] ★ 완전성 검사에서 전 lot({n_lots}개) 제외 — '
+                  f'검사 없이 진행. qty 값/형식을 확인할 것 '
+                  f'(예시 qty: {df["qty"].head(3).tolist()}, '
+                  f'예시 웨이퍼수: {cnt.head(3).tolist()})')
+        else:
+            df = df[keep]
+            if df.empty:
+                return pd.DataFrame()
 
     # ── 웨이퍼 메타 (첫 행) ───────────────────────────────
     meta_cols = [c for c in ['substrate_id', 'lot_id', 'wf_id', 'eqp_id',
@@ -686,9 +737,24 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
         apc = df_apc_prep.drop(
             columns=[c for c in ['lot_id', 'wf_id'] if c in df_apc_prep.columns])
 
+        # ★ 추가: inner join 사전 점검 — 키 포맷이 어긋나면
+        #   에러 없이 0행이 되므로, 교집합을 미리 로그로 남긴다.
+        if VERBOSE:
+            ws  = set(df['substrate_id'].astype(str).str.strip())
+            as_ = set(apc['substrate_id'].astype(str).str.strip())
+            inter = len(ws & as_)
+            print(f'  [merge] substrate_id 교집합 {inter:,} '
+                  f'(SRC {len(ws):,} / APC {len(as_):,})')
+            if inter == 0:
+                print(f'  [merge] ★ 교집합 0 — 키 포맷 불일치 의심')
+                print(f'          SRC 예시: {sorted(ws)[:3]}')
+                print(f'          APC 예시: {sorted(as_)[:3]}')
+
         # 그 밖의 이름 충돌은 APC 쪽에 _APC 를 붙여 구분한다
         df = df.merge(apc, on='substrate_id', how='inner',
                       suffixes=('', '_APC'))                 # inner → rework 자동 제외
+        if VERBOSE:
+            print(f'  [merge] SRC∩APC → {len(df):,}행')
 
     if df_mes is not None and not df_mes.empty:
         mes = df_mes.copy()
@@ -698,12 +764,15 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
                   .groupby('lot_id', as_index=False)[keep]
                   .first())                                   # lot 당 1행 (행 뻥튀기 방지)
         df = df.merge(mes, on='lot_id', how='left')
+        if VERBOSE:
+            n_hit = df['before_info'].notna().sum() if 'before_info' in df.columns else 0
+            print(f'  [merge] +MES(left) → {len(df):,}행 (LC 매칭 {n_hit:,}행)')
 
     return df
 
 
 # ══════════════════════════════════════════════════════════
-# 7. 파생 — idle_1~4 / OPTA 챔버
+# 7. 파생 — OPTA 챔버
 # ══════════════════════════════════════════════════════════
 # OPTA 챔버 — param_nm 표기(_P1/_P2) → 실제 챔버명
 OPTA_CH_MAP = {'P1': 'P3', 'P2': 'P4'}
@@ -773,8 +842,9 @@ def finalize_df(df, cond, df_src=None):
         df = df.merge(ch, on='substrate_id', how='left')
         if 'eqp_ch' not in df.columns:
             df['eqp_ch'] = pd.NA
-        df['eqp_ch'] = df['eqp_ch'].replace('', pd.NA).fillna(df['eqp_ch_opta'])
-        df = df.drop(columns=['eqp_ch_opta'])
+        if 'eqp_ch_opta' in df.columns:
+            df['eqp_ch'] = df['eqp_ch'].replace('', pd.NA).fillna(df['eqp_ch_opta'])
+            df = df.drop(columns=['eqp_ch_opta'])
 
     # EQP_CH_ID = 장비ID_챔버
     if 'eqp_ch' in df.columns and 'main_eqp_id' in df.columns:
@@ -817,6 +887,10 @@ TEXT_COLS = {
 }
 TIME_COLS = {'DATE'}
 
+# information_schema 의 숫자 타입명 (넓히기 판정용)
+_PG_NUMERIC_TYPES = {'double precision', 'integer', 'bigint', 'numeric',
+                     'real', 'smallint'}
+
 
 def _pg_type_from_series(s):
     """
@@ -852,12 +926,14 @@ def save_analysis_df(df, oper_id):
     """
     최종 wide df -> PostgreSQL 저장 (LOT_CD 단위 삭제 후 재적재)
 
-    새 컬럼은 자동으로 ALTER TABLE ADD COLUMN 한다.
-    다만 기존 컬럼의 타입이 바뀐 경우(예: LOT_CD 가 숫자 → 텍스트)는
-    바꾸지 못하므로 drop_analysis_table() 을 먼저 호출해야 한다.
+    스키마 자가 치유:
+      - 새 컬럼            → ALTER TABLE ADD COLUMN
+      - 숫자 → 텍스트 변경 → ALTER COLUMN TYPE VARCHAR (넓히기만, 좁히기는 안 함)
+    그 외의 구조 변경은 drop_analysis_table() 을 먼저 호출해야 한다.
     """
     if df is None or df.empty:
-        print(f"[{oper_id}] 저장 스킵 (빈 df)")
+        print(f"[{oper_id}] 저장 스킵 (빈 df) — 위 단계별 행수 로그에서 "
+              f"어디서 0이 됐는지 확인할 것")
         return
 
     df = df.copy()
@@ -892,21 +968,35 @@ def save_analysis_df(df, oper_id):
         cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n  "
                     + ",\n  ".join(col_defs) + "\n)")
 
-        # 이미 있는 테이블에 컬럼이 늘었으면 추가한다.
-        # (CREATE TABLE IF NOT EXISTS 는 기존 구조를 바꾸지 않으므로
-        #  이 단계가 없으면 새 컬럼에서 INSERT 가 실패한다)
+        # 기존 테이블 구조 확인 (CREATE IF NOT EXISTS 는 구조를 안 바꾼다)
         cur.execute("""
-            SELECT column_name FROM information_schema.columns
+            SELECT column_name, data_type FROM information_schema.columns
             WHERE table_name = %s
         """, [table])
-        exists = {r[0] for r in cur.fetchall()}
+        exists = {r[0]: r[1] for r in cur.fetchall()}
 
+        # 새 컬럼 추가
         added = [c for c in df.columns if c not in exists]
         for c in added:
             cur.execute(f'ALTER TABLE {table} ADD COLUMN "{c}" {col_types[c]}')
         if added:
             print(f'  [{oper_id}] 컬럼 {len(added)}개 추가: '
                   f'{", ".join(added[:8])}{" ..." if len(added) > 8 else ""}')
+
+        # ★ 복원: 타입 넓히기 — df 는 텍스트인데 테이블이 숫자면 VARCHAR 로.
+        #   이게 없으면 값 형식이 바뀐 컬럼(PRE_EQP_CH 등)에서
+        #   'invalid input syntax for type double precision' 으로 INSERT 실패.
+        widened = []
+        for c in df.columns:
+            if c in exists and col_types[c].startswith('VARCHAR') \
+                    and exists[c] in _PG_NUMERIC_TYPES:
+                cur.execute(
+                    f'ALTER TABLE {table} ALTER COLUMN "{c}" TYPE VARCHAR(200) '
+                    f'USING "{c}"::VARCHAR(200)')
+                widened.append(c)
+        if widened:
+            print(f'  [{oper_id}] 타입 넓힘(→VARCHAR) {len(widened)}개: '
+                  f'{", ".join(widened[:8])}{" ..." if len(widened) > 8 else ""}')
 
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_lot  ON {table} ("LOT_CD")')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_date ON {table} ("DATE")')
@@ -931,15 +1021,25 @@ def save_analysis_df(df, oper_id):
 # 10. 한 공정 전체 파이프라인
 # ══════════════════════════════════════════════════════════
 def build_analysis_df(lake, df_info, oper_id, days=30):
-    """조회 → 정리 → 머지 → 파생 → 저장형태 정리까지"""
+    """
+    조회 → 정리 → 머지 → 저장형태 정리까지.
+    ★ 단계별 행수를 로그로 남긴다 — 저장 시 '빈 df' 가 나오면
+      이 로그에서 어느 단계가 0인지 바로 보인다.
+    """
+    def _n(tag, d):
+        if VERBOSE:
+            print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행")
+        return d
+
     cond = get_oper_cond(df_info, oper_id)
 
-    df_src = fetch_src(lake, cond, days)
-    df_apc = fetch_apc(lake, cond, days)
-    df_mes = fetch_mes(lake, cond, df_src, days)      # 장비 목록을 SRC 에서 뽑음
+    df_src = _n('fetch_src',   fetch_src(lake, cond, days))
+    df_apc = _n('fetch_apc',   fetch_apc(lake, cond, days))
+    df_mes = _n('fetch_mes',   fetch_mes(lake, cond, df_src, days))
 
-    w = pivot_src(df_src)
-    a = prepare_apc(df_apc)          # IDLE 라벨까지 여기서 계산
-    m = merge_sources(w, a, df_mes)
+    w = _n('pivot_src',   pivot_src(df_src))
+    a = _n('prepare_apc', prepare_apc(df_apc))    # IDLE 라벨까지 여기서 계산
 
-    return finalize_df(m, cond, df_src)
+    m = _n('merge',       merge_sources(w, a, df_mes))
+
+    return _n('finalize', finalize_df(m, cond, df_src))
