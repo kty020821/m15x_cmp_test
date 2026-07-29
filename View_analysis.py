@@ -13,6 +13,13 @@ equipment/views_analysis.py
     · 통계 계산은 전부 PostgreSQL 이 담당하고, 웹은 그리기만 한다
     · LLM 에는 원본 행을 넘기지 않는다. 코드가 만든 요약만 넘긴다
 
+  [★ 이번 수정 — 데이터 없는 컬럼에서 500 방지]
+    1. 컬럼 검증을 '존재 여부' → '숫자 컬럼인지' 로 강화
+       (VARCHAR 로 굳은 컬럼에 AVG/CORR 를 걸면 PG 가 에러를 낸다)
+    2. 차트/통계 API 는 어떤 예외가 나도 HTTP 200 + error 필드로 반환
+       (화면에 500 팝업이 뜨지 않게. 원인은 서버 로그에 남는다)
+    3. 선택 구간이 비었거나 값이 전부 NULL 이어도 빈 결과로 정상 응답
+
   [사용법]
     이 파일을 그대로 두고 views.py 에서 가져다 쓰거나,
     내용을 views.py 에 붙여넣어도 된다.
@@ -31,6 +38,7 @@ equipment/views_analysis.py
 
 import json
 import re
+import traceback
 from math import ceil
 
 import requests
@@ -135,6 +143,46 @@ def _fetch_numeric_cols(table):
     return out
 
 
+def _numeric_col_set(table):
+    """
+    통계 연산(AVG/STDDEV/CORR)이 가능한 컬럼 집합.
+
+    ★ 이 검사가 핵심이다.
+      적재 과정에서 값이 전부 비어 있던 컬럼이 VARCHAR 로 만들어지면,
+      화면에는 컬럼이 보이는데 AVG/CORR 를 걸는 순간 PG 가
+      'function avg(character varying) does not exist' 로 실패한다.
+      '존재하는가' 가 아니라 '숫자인가' 로 판정해야 500 이 사라진다.
+    """
+    return set(_fetch_numeric_cols(table))
+
+
+def _table_exists(table):
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", [table])
+        return bool(cur.fetchone()[0])
+
+
+def _safe_name(v):
+    """컬럼/파라미터명 형식 검사 (SQL 식별자로 직접 들어가므로 필수)"""
+    return bool(v) and bool(re.match(r'^[0-9A-Za-z_]+$', str(v)))
+
+
+def _api_fail(msg, payload=None, exc=None):
+    """
+    읽기 API 의 실패 응답.
+
+    HTTP 500 대신 200 + error 필드로 돌려준다.
+    화면은 팝업 대신 빈 차트를 보여주고, 원인은 서버 로그에 남는다.
+    (쓰기 API 가 아니므로 상태코드보다 화면이 안 죽는 쪽이 낫다)
+    """
+    print(f'[analysis] {msg}')
+    if exc is not None:
+        traceback.print_exc()
+    out = dict(payload or {})
+    out['error'] = msg
+    return JsonResponse(out, status=200)
+
+
 def _factor_items():
     """FACTOR_COLS 정규화 — 구간 수를 생략한 3개짜리 항목도 허용"""
     out = []
@@ -154,8 +202,13 @@ def _num_expr(col):
 
 def _bin_edges(cur, table, col, nbins):
     """테이블 전체 범위를 nbins 개의 같은 폭 구간으로 → [(lo, hi), ...]"""
-    cur.execute(f'SELECT MIN(v), MAX(v) FROM (SELECT {_num_expr(col)} AS v FROM {table}) t')
-    lo, hi = cur.fetchone()
+    try:
+        cur.execute(f'SELECT MIN(v), MAX(v) FROM '
+                    f'(SELECT {_num_expr(col)} AS v FROM {table}) t')
+        lo, hi = cur.fetchone()
+    except Exception:
+        # 숫자를 하나도 못 뽑는 컬럼이면 구간화를 포기하고 원값으로 집계한다
+        return []
     if lo is None or hi is None:
         return []
     lo, hi = int(lo), int(hi)
@@ -287,30 +340,36 @@ def analysis_options(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
-    body  = json.loads(request.body)
+    try:
+        body  = json.loads(request.body)
+    except Exception:
+        return _api_fail('요청 형식 오류', {'options': []})
     level = body.get('level')
 
-    if level == 'lot_cd':
-        # 매핑에 등록됐고 실제 데이터도 있는 것만
-        mapped  = tech_map.lots_of_tech(body.get('tech'))
-        have    = _lots_with_data()
-        options = [lc for lc in mapped if lc in have]
+    try:
+        if level == 'lot_cd':
+            # 매핑에 등록됐고 실제 데이터도 있는 것만
+            mapped  = tech_map.lots_of_tech(body.get('tech'))
+            have    = _lots_with_data()
+            options = [lc for lc in mapped if lc in have]
 
-        # 데이터에는 있는데 tech_map 에 없는 = 미등록 device
-        unmapped = sorted(lc for lc in have if tech_map.tech_of_lot(lc) is None)
-        return JsonResponse({'options': options, 'unmapped': unmapped})
+            # 데이터에는 있는데 tech_map 에 없는 = 미등록 device
+            unmapped = sorted(lc for lc in have if tech_map.tech_of_lot(lc) is None)
+            return JsonResponse({'options': options, 'unmapped': unmapped})
 
-    if level == 'oper':
-        return JsonResponse({'options': _oper_options()})
+        if level == 'oper':
+            return JsonResponse({'options': _oper_options()})
 
-    if level == 'param':
-        table = _an_table(body.get('oper_id'))
-        try:
+        if level == 'param':
+            table = _an_table(body.get('oper_id'))
+            if not _table_exists(table):
+                return JsonResponse({'options': [],
+                                     'note': '적재된 데이터가 없습니다'})
             return JsonResponse({'options': _fetch_numeric_cols(table)})
-        except Exception as e:
-            return JsonResponse({'options': [], 'error': str(e)})
 
-    return JsonResponse({'options': []})
+        return JsonResponse({'options': []})
+    except Exception as e:
+        return _api_fail(f'옵션 조회 실패: {e}', {'options': []}, exc=e)
 
 
 # ══════════════════════════════════════════════════════════
@@ -326,22 +385,37 @@ def analysis_trend(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
-    body    = json.loads(request.body)
+    empty = {'data': [], 'param': None}
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _api_fail('요청 형식 오류', empty)
+
     oper_id = body.get('oper_id')
     lot_cd  = body.get('lot_cd')
     param   = body.get('param')
     table   = _an_table(oper_id)
+    empty['param'] = param
 
-    if not param or not re.match(r'^[0-9A-Za-z_]+$', param):
-        return JsonResponse({'error': '잘못된 파라미터'}, status=400)
+    if not _safe_name(param):
+        return JsonResponse({'data': [], 'param': param,
+                             'note': '파라미터가 선택되지 않았습니다'})
 
     try:
-        have = _existing_cols(table)
-
-        # 선택한 파라미터가 이 공정에 없으면 오류가 아니라 '데이터 없음'
-        if param.upper() not in have:
+        if not _table_exists(table):
             return JsonResponse({'data': [], 'param': param,
-                                 'note': f'{param} 컬럼이 이 공정에 없습니다'})
+                                 'note': '적재된 데이터가 없습니다'})
+
+        have     = _existing_cols(table)
+        num_cols = _numeric_col_set(table)
+
+        # ★ 존재 여부가 아니라 '통계가 가능한 숫자 컬럼인가' 로 판정한다.
+        #   없거나 타입이 어긋난 컬럼은 오류가 아니라 '데이터 없음'.
+        if param.upper() not in num_cols:
+            note = (f'{param} 데이터가 없습니다'
+                    if param.upper() in have
+                    else f'{param} 컬럼이 이 공정에 없습니다')
+            return JsonResponse({'data': [], 'param': param, 'note': note})
 
         legend_cols = [c for c, _ in LEGEND_OPTIONS if c in have]
         extra_cols  = [c for c in ('LOT_ID', 'WF_ID') if c in have]
@@ -370,9 +444,12 @@ def analysis_trend(request):
                 item[c] = r[3 + n + j]
             data.append(item)
 
-        return JsonResponse({'data': data, 'param': param})
+        out = {'data': data, 'param': param}
+        if not data:
+            out['note'] = f'{param} 에 표시할 값이 없습니다'
+        return JsonResponse(out)
     except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+        return _api_fail(f'트렌드 조회 실패: {e}', empty, exc=e)
 
 
 # ══════════════════════════════════════════════════════════
@@ -384,28 +461,37 @@ def analysis_corr(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
-    body    = json.loads(request.body)
+    empty = {'data': [], 'x_col': None, 'y_col': None, 'r2': None, 'trend': None}
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _api_fail('요청 형식 오류', empty)
+
     oper_id = body.get('oper_id')
     lot_cd  = body.get('lot_cd')
     x_col   = body.get('x_col')
     y_col   = body.get('y_col')
     table   = _an_table(oper_id)
+    empty.update({'x_col': x_col, 'y_col': y_col})
 
     for c in (x_col, y_col):
-        if not c or not re.match(r'^[0-9A-Za-z_]+$', c):
-            return JsonResponse({'error': '잘못된 컬럼'}, status=400)
+        if not _safe_name(c):
+            return JsonResponse(dict(empty, note='축이 선택되지 않았습니다'))
 
     try:
-        have = _existing_cols(table)
+        if not _table_exists(table):
+            return JsonResponse(dict(empty, note='적재된 데이터가 없습니다'))
 
-        # 축 컬럼이 이 공정에 없으면 오류가 아니라 '데이터 없음'
-        missing = [c for c in (x_col, y_col) if c.upper() not in have]
+        have     = _existing_cols(table)
+        num_cols = _numeric_col_set(table)
+
+        # ★ 숫자 컬럼 기준으로 판정 → 오류 대신 빈 차트
+        missing = [c for c in (x_col, y_col) if c.upper() not in num_cols]
         if missing:
-            return JsonResponse({
-                'data': [], 'x_col': x_col, 'y_col': y_col,
-                'r2': None, 'trend': None,
-                'note': f"{', '.join(missing)} 컬럼이 이 공정에 없습니다",
-            })
+            gone = [c for c in missing if c.upper() not in have]
+            note = (f"{', '.join(gone)} 컬럼이 이 공정에 없습니다" if gone
+                    else f"{', '.join(missing)} 데이터가 없습니다")
+            return JsonResponse(dict(empty, note=note))
 
         legend_cols = [c for c, _ in LEGEND_OPTIONS if c in have]
         extra_cols  = [c for c in ('LOT_ID', 'WF_ID') if c in have]
@@ -422,8 +508,7 @@ def analysis_corr(request):
 
             # 데이터가 없으면 회귀를 돌릴 필요도 없다
             if not rows:
-                return JsonResponse({'data': [], 'x_col': x_col, 'y_col': y_col,
-                                     'r2': None, 'trend': None})
+                return JsonResponse(dict(empty, note='두 축 모두 값이 있는 웨이퍼가 없습니다'))
 
             cur.execute(f'''
                 SELECT CORR("{x_col}", "{y_col}"),
@@ -465,7 +550,7 @@ def analysis_corr(request):
         return JsonResponse({'data': data, 'x_col': x_col, 'y_col': y_col,
                              'r2': r2, 'trend': trend})
     except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+        return _api_fail(f'상관 조회 실패: {e}', empty, exc=e)
 
 
 # ══════════════════════════════════════════════════════════
@@ -476,21 +561,25 @@ def analysis_stats(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
-    body    = json.loads(request.body)
+    empty = {'count': 0, 'factors': []}
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _api_fail('요청 형식 오류', empty)
+
     oper_id = body.get('oper_id')
     ids     = body.get('ids', [])
     table   = _an_table(oper_id)
 
     if not ids:
-        return JsonResponse({'count': 0, 'factors': []})
+        return JsonResponse(empty)
 
     try:
+        if not _table_exists(table):
+            return JsonResponse(dict(empty, note='적재된 데이터가 없습니다'))
+
         with connections['analysis_db'].cursor() as cur:
-            cur.execute("""
-                SELECT upper(column_name) FROM information_schema.columns
-                WHERE table_name = %s
-            """, [table])
-            have = {r[0] for r in cur.fetchall()}
+            have = _existing_cols(table)
 
             ph = ",".join(["%s"] * len(ids))
             cur.execute(f'SELECT COUNT(*) FROM {table} WHERE id IN ({ph})', ids)
@@ -501,22 +590,28 @@ def analysis_stats(request):
                 if col not in have:
                     continue
 
-                edges = _bin_edges(cur, table, col, nbins) if nbins else None
-                key   = _key_expr(col, empty_label, edges)
-                order = _order_expr(col, edges)
+                # 요인 하나가 실패해도 나머지는 보여준다
+                try:
+                    edges = _bin_edges(cur, table, col, nbins) if nbins else None
+                    key   = _key_expr(col, empty_label, edges)
+                    order = _order_expr(col, edges)
 
-                cur.execute(f'''
-                    SELECT {key} AS k, COUNT(*)
-                    FROM {table} WHERE id IN ({ph})
-                    GROUP BY k ORDER BY {order}
-                ''', ids)
-                rows = [{'key': r[0], 'count': r[1]} for r in cur.fetchall()]
+                    cur.execute(f'''
+                        SELECT {key} AS k, COUNT(*)
+                        FROM {table} WHERE id IN ({ph})
+                        GROUP BY k ORDER BY {order}
+                    ''', ids)
+                    rows = [{'key': r[0], 'count': r[1]} for r in cur.fetchall()]
+                except Exception as e:
+                    print(f'[analysis] 요인 집계 건너뜀 ({col}): {e}')
+                    continue
+
                 factors.append({'col': col, 'label': label, 'rows': rows,
                                 'binned': bool(edges)})
 
         return JsonResponse({'count': count, 'factors': factors})
     except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+        return _api_fail(f'요인 분포 조회 실패: {e}', empty, exc=e)
 
 
 # ══════════════════════════════════════════════════════════
@@ -598,11 +693,7 @@ def _build_summary(oper_id, lot_cd, param, ids):
     ph    = ",".join(["%s"] * len(ids))
 
     with connections['analysis_db'].cursor() as cur:
-        cur.execute("""
-            SELECT upper(column_name) FROM information_schema.columns
-            WHERE table_name = %s
-        """, [table])
-        have = {r[0] for r in cur.fetchall()}
+        have = _existing_cols(table)
 
         # 대상 파라미터 통계 (선택 vs 전체)
         cur.execute(f'''
@@ -623,10 +714,19 @@ def _build_summary(oper_id, lot_cd, param, ids):
         for col, label, empty_label, nbins in _factor_items():
             if col not in have:
                 continue
-            rows = _enrichment(cur, table, col, ids, lot_cd, ph, empty_label, nbins)
+            try:
+                rows = _enrichment(cur, table, col, ids, lot_cd, ph,
+                                   empty_label, nbins)
+            except Exception as e:
+                print(f'[analysis] 편중도 건너뜀 ({col}): {e}')
+                continue
             factors.append({'col': col, 'label': label, 'rows': rows})
 
-        corr = _top_correlations(cur, table, param, lot_cd, ids, ph)
+        try:
+            corr = _top_correlations(cur, table, param, lot_cd, ids, ph)
+        except Exception as e:
+            print(f'[analysis] 상관 상위 계산 실패: {e}')
+            corr = []
 
     dev = None
     if s_avg is not None and a_avg is not None and a_avg:
@@ -809,19 +909,30 @@ def analysis_insight(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
-    body    = json.loads(request.body)
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _api_fail('요청 형식 오류')
+
     oper_id = body.get('oper_id')
     lot_cd  = body.get('lot_cd')
     param   = body.get('param')
     ids     = body.get('ids', [])
     use_llm = body.get('use_llm', True)
+    table   = _an_table(oper_id)
 
     if not ids:
-        return JsonResponse({'error': '선택된 구간이 없습니다'}, status=400)
-    if not param or not re.match(r'^[0-9A-Za-z_]+$', param):
-        return JsonResponse({'error': '잘못된 파라미터'}, status=400)
+        return JsonResponse({'error': '선택된 구간이 없습니다'})
+    if not _safe_name(param):
+        return JsonResponse({'error': '파라미터가 선택되지 않았습니다'})
 
     try:
+        # ★ 통계를 걸 수 없는 컬럼이면 500 대신 안내로 끝낸다
+        if param.upper() not in _numeric_col_set(table):
+            return JsonResponse({
+                'error': f'{param} 은 수치 데이터가 없어 분석할 수 없습니다. '
+                         f'다른 파라미터를 선택해 주세요.'})
+
         summary = _build_summary(oper_id, lot_cd, param, ids)
         text    = _summary_to_text(summary)
 
@@ -841,7 +952,7 @@ def analysis_insight(request):
             'llm_error': llm_error,
         })
     except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+        return _api_fail(f'분석 실패: {e}', exc=e)
 
 
 # ══════════════════════════════════════════════════════════
@@ -867,7 +978,7 @@ def _mentioned_params(question, table, base_param=None):
     긴 이름부터 확인해 부분 일치로 인한 오탐을 줄인다.
     (THK 와 THK_AVG 가 모두 있을 때 THK_AVG 를 우선)
     """
-    cols = _fetch_numeric_cols(table)
+    cols = _fetch_numeric_cols(table)      # 숫자 컬럼만 → 통계 불가 컬럼 자동 제외
     q    = question.upper()
 
     hits = []
@@ -1007,7 +1118,11 @@ def analysis_chat(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
 
-    body     = json.loads(request.body)
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _api_fail('요청 형식 오류')
+
     oper_id  = body.get('oper_id')
     lot_cd   = body.get('lot_cd')
     param    = body.get('param')
@@ -1016,9 +1131,9 @@ def analysis_chat(request):
     history  = body.get('history', [])
 
     if not ids:
-        return JsonResponse({'error': '선택된 구간이 없습니다'}, status=400)
+        return JsonResponse({'error': '선택된 구간이 없습니다'})
     if not question:
-        return JsonResponse({'error': '질문이 비어 있습니다'}, status=400)
+        return JsonResponse({'error': '질문이 비어 있습니다'})
 
     table = _an_table(oper_id)
     ph    = ",".join(["%s"] * len(ids))
@@ -1031,10 +1146,14 @@ def analysis_chat(request):
         with connections['analysis_db'].cursor() as cur:
             have = _existing_cols(table)
             for p in targets:
-                st  = _param_stats(cur, table, p, lot_cd, ids, ph)
-                eqp = (_param_by_eqp(cur, table, p, lot_cd, ids, ph)
-                       if 'EQP_ID' in have else None)
-                blocks.append(_stats_to_text(st, eqp))
+                # 파라미터 하나가 실패해도 대화는 이어진다
+                try:
+                    st  = _param_stats(cur, table, p, lot_cd, ids, ph)
+                    eqp = (_param_by_eqp(cur, table, p, lot_cd, ids, ph)
+                           if 'EQP_ID' in have else None)
+                    blocks.append(_stats_to_text(st, eqp))
+                except Exception as e:
+                    print(f'[analysis] 대화 통계 건너뜀 ({p}): {e}')
 
         ctx = [f"공정 {oper_id} / 제품 {lot_cd} / 선택 웨이퍼 {len(ids)}장", ""]
         if blocks:
@@ -1071,7 +1190,7 @@ def analysis_chat(request):
             'context':   "\n".join(ctx),       # 무엇을 넘겼는지 확인용
         })
     except Exception as e:
-        return JsonResponse({'error': str(e)}, status=500)
+        return _api_fail(f'대화 처리 실패: {e}', exc=e)
 
 
 def _call_llm_messages(messages):
