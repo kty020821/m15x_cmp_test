@@ -909,11 +909,31 @@ def finalize_df(df, cond, df_src=None):
     # ★ PRE_EQP_CH = 사전공정장비ID_챔버
     #   SRC 의 b.module_id 는 '2', '3' 처럼 번호만 온다.
     #   그대로 두면 어느 장비의 챔버인지 알 수 없으므로 장비ID 를 앞에 붙인다.
-    if 'pre_eqp_ch' in df.columns and 'pre_eqp_id' in df.columns:
-        df['pre_eqp_ch'] = _join_eqp_ch(df['pre_eqp_id'], df['pre_eqp_ch'])
-        if VERBOSE:
-            sample = [v for v in df['pre_eqp_ch'].unique()[:3] if v]
-            print(f'  [finalize] PRE_EQP_CH 결합 예시: {sample}')
+    #   ※ 화면은 PostgreSQL 을 읽으므로, 이 결합은 '다음 적재분'부터 반영된다.
+    #     이미 저장된 옛 행은 재적재해야 형식이 바뀐다.
+    if 'pre_eqp_ch' in df.columns:
+        if 'pre_eqp_id' in df.columns:
+            before = df['pre_eqp_ch'].fillna('').astype(str).str.strip()
+            ids    = df['pre_eqp_id'].fillna('').astype(str).str.strip()
+            df['pre_eqp_ch'] = _join_eqp_ch(df['pre_eqp_id'], df['pre_eqp_ch'])
+
+            if VERBOSE:
+                n_both   = int(((ids != '') & (before != '')).sum())
+                n_chonly = int(((ids == '') & (before != '')).sum())
+                print(f'  [finalize] PRE_EQP_CH 결합: 장비+챔버 {n_both:,}행 / '
+                      f'챔버만(사전공정 장비 미매칭) {n_chonly:,}행')
+                if n_chonly and not n_both:
+                    # 코드는 돌았는데 붙일 장비 ID 가 없는 상태.
+                    # SRC 쿼리의 APC wafer-history 조인(b) 이 안 붙은 것이므로
+                    # pre_oper_id / module_id 조건을 확인해야 한다.
+                    print('  [finalize] ★ PRE_EQP_ID 가 전부 비어 있어 '
+                          '챔버만 남았습니다 — SRC 의 wafer-history 조인(b) 확인 필요 '
+                          '(pre_oper_id 접두 조건, module_id 필터)')
+                sample = [v for v in df['pre_eqp_ch'].unique()[:3] if v]
+                print(f'  [finalize] PRE_EQP_CH 예시: {sample}')
+        else:
+            print('  [finalize] ★ pre_eqp_id 컬럼이 없어 PRE_EQP_CH 를 결합하지 못했습니다 '
+                  '— SRC_META_COLS 와 SRC 쿼리의 b.eqp_id 확인 필요')
 
     df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
     df = df.rename(columns={k: v for k, v in RENAME_MAP.items() if k in df.columns})
@@ -1026,6 +1046,97 @@ def repair_numeric_columns(oper_id):
         print(f'[{oper_id}] 건너뜀(실제 텍스트) {len(skipped)}개: '
               f'{", ".join(skipped[:8])}')
     return fixed
+
+
+def repair_pre_eqp_ch(oper_id=None):
+    """
+    이미 저장된 PRE_EQP_CH 를 '사전공정장비ID_챔버' 형태로 일괄 보정한다.
+
+    재적재를 기다리지 않고 기존 행을 바로 고친다.
+    여러 번 실행해도 안전하다 — 이미 '_' 가 들어간(결합된) 값은 건드리지 않는다.
+
+      oper_id 를 주면 그 공정만, 생략하면 cmp_analysis_* 전체.
+
+    실행 예)
+      from equipment import analysis_service as svc
+      svc.repair_pre_eqp_ch()            # 전 공정
+      svc.repair_pre_eqp_ch('공정ID')     # 한 공정만
+
+    로그에 공정별로 아래를 찍는다.
+      · 보정        : 이번에 장비ID 를 붙인 행 수
+      · 이미결합    : 앞서 결합돼 있던 행 수
+      · 장비ID없음  : 챔버는 있는데 PRE_EQP_ID 가 비어 결합 불가한 행 수
+                     → 이 값이 크면 코드 문제가 아니라 SRC 의
+                       wafer-history 조인(b) 이 안 붙은 것이다
+    """
+    conn = connections['analysis_db']
+
+    with conn.cursor() as cur:
+        if oper_id:
+            tables = [_table_name(oper_id)]
+        else:
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE tablename LIKE %s "
+                "ORDER BY tablename", ['cmp_analysis_%'])
+            tables = [r[0] for r in cur.fetchall()]
+
+        if not tables:
+            print('[repair] 대상 테이블 없음')
+            return
+
+        total_upd = 0
+        for t in tables:
+            cur.execute("""
+                SELECT upper(column_name) FROM information_schema.columns
+                WHERE table_name = %s
+            """, [t])
+            cols = {r[0] for r in cur.fetchall()}
+            if 'PRE_EQP_CH' not in cols or 'PRE_EQP_ID' not in cols:
+                print(f'  [{t}] PRE_EQP_ID / PRE_EQP_CH 컬럼 없음 — 건너뜀')
+                continue
+
+            # 현황 파악 (챔버 값이 있는 행 기준)
+            cur.execute(f'''
+                SELECT
+                  COUNT(*) FILTER (WHERE COALESCE("PRE_EQP_CH", '') <> ''),
+                  COUNT(*) FILTER (WHERE COALESCE("PRE_EQP_CH", '') <> ''
+                                     AND strpos("PRE_EQP_CH", '_') > 0),
+                  COUNT(*) FILTER (WHERE COALESCE("PRE_EQP_CH", '') <> ''
+                                     AND COALESCE("PRE_EQP_ID", '') = '')
+                FROM {t}
+            ''')
+            n_ch, n_done, n_noid = cur.fetchone()
+
+            # 결합 — 장비ID 가 있고 아직 결합 안 된 행만
+            cur.execute(f'''
+                UPDATE {t}
+                SET "PRE_EQP_CH" = "PRE_EQP_ID" || '_' || "PRE_EQP_CH"
+                WHERE COALESCE("PRE_EQP_ID", '') <> ''
+                  AND COALESCE("PRE_EQP_CH", '') <> ''
+                  AND strpos("PRE_EQP_CH", '_') = 0
+            ''')
+            n_upd = cur.rowcount
+            total_upd += n_upd
+
+            print(f'  [{t}] 챔버보유 {n_ch:,}행 | 보정 {n_upd:,} | '
+                  f'이미결합 {n_done:,} | 장비ID없음 {n_noid:,}')
+
+            if n_ch and n_noid == n_ch:
+                print(f'  [{t}] ★ PRE_EQP_ID 가 전부 비어 있음 — '
+                      f'코드가 아니라 SRC 의 wafer-history 조인(b) 문제. '
+                      f'pre_oper_id 접두 조건과 module_id 필터를 확인할 것')
+
+            # 결과 예시
+            cur.execute(f'''
+                SELECT DISTINCT "PRE_EQP_CH" FROM {t}
+                WHERE COALESCE("PRE_EQP_CH", '') <> '' LIMIT 3
+            ''')
+            sample = [r[0] for r in cur.fetchall()]
+            if sample:
+                print(f'  [{t}] 예시: {sample}')
+
+    print(f'[repair] PRE_EQP_CH 보정 완료 — 총 {total_upd:,}행')
+    return total_upd
 
 
 def save_analysis_df(df, oper_id):
