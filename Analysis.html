@@ -20,6 +20,15 @@
     · LLM 연결        → views.py 의 _call_company_llm()
     · Idle 표시 순서  → 아래 IDLE_ORDER
     · 실제 스펙값     → 아래 getSpecLines()
+
+  [이번 수정]
+    1. 드롭박스를 선택한 직후 다시 눌러도 열리도록 (mousedown 보완)
+       - 항목 선택 시 mousedown 에서 preventDefault 하므로 포커스가
+         입력창에 남고, 이미 포커스를 가진 요소는 focus 이벤트가
+         다시 발생하지 않아 무반응이었다
+    2. 차트 빈 영역 클릭으로 선택 해제 (plotly_deselect + 빈 selected)
+    3. API 오류 시 alert 팝업 제거 → 콘솔 기록만
+    4. 상관 차트 X/Y 검색칸 확대 (150 → 230px) + 패널 폭 자동
 ════════════════════════════════════════════════════════════
 #}
 
@@ -123,6 +132,8 @@
   box-shadow: 0 8px 24px rgba(0,0,0,0.14); padding: 5px; max-height: 268px;
   overflow-y: auto; display: none; }
 .ss-panel.open { display: block; }
+/* mini 드롭박스는 패널을 내용 폭만큼 넓힘 (긴 파라미터명 잘림 방지) */
+.ss.mini .ss-panel { width: max-content; min-width: 100%; max-width: 360px; }
 .ss-opt { padding: 7px 11px; border-radius: 8px; cursor: pointer;
   font-size: var(--fs-sm); font-weight: var(--fw-mid); color: var(--tx-1);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -323,7 +334,7 @@
     <div class="step-num">2</div>
     <div class="step-head">
       <span class="step-title">문제 구간 지정</span>
-      <span class="step-desc">트렌드에서 이상 구간을 드래그하면 오른쪽 차트에도 함께 표시됩니다</span>
+      <span class="step-desc">트렌드에서 이상 구간을 드래그하면 오른쪽 차트에도 함께 표시됩니다 (빈 곳을 클릭하면 해제)</span>
     </div>
     <div class="step-body">
       <div class="chart-row">
@@ -346,9 +357,9 @@
             <span class="chart-title">Correlation <span class="r2badge" id="js-corr-r2"></span></span>
             <div class="chart-ctrls">
               <span class="mini-label">X</span>
-              <div class="ss mini" id="ss-corr-x" style="width:150px;"></div>
+              <div class="ss mini" id="ss-corr-x" style="width:230px;"></div>
               <span class="mini-label">Y</span>
-              <div class="ss mini" id="ss-corr-y" style="width:150px;"></div>
+              <div class="ss mini" id="ss-corr-y" style="width:230px;"></div>
             </div>
           </div>
           <div class="plot-area" id="js-corr"></div>
@@ -458,18 +469,30 @@ function esc(s) {
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+/* ══════════════════════════════════════════════════
+   API 호출
+   실패해도 팝업을 띄우지 않는다. 조회 중 컬럼 하나가 비었다는 이유로
+   경고창이 뜨면 작업 흐름이 끊기므로, 콘솔에만 남기고 화면은
+   빈 차트를 유지한다. 서버도 읽기 API 는 200 + error 필드로 응답한다.
+   ══════════════════════════════════════════════════ */
 async function postJSON(url, payload) {
-  const res = await fetch(url, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    let msg = `API 오류 ${res.status}`;
-    try { const j = await res.json(); if (j.error) msg += `\n\n${j.error}`; } catch (e) {}
-    alert(msg); console.error(msg);
+  try {
+    const res = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error(`API 오류 ${res.status}`, url, j.error || '');
+      return j.error ? j : {};
+    }
+    if (j.note)  console.info('[analysis]', j.note);
+    if (j.error) console.warn('[analysis]', j.error);
+    return j;
+  } catch (e) {
+    console.error('API 요청 실패', url, e);
     return {};
   }
-  return res.json();
 }
 
 /* ══════════════════════════════════════════════════
@@ -491,7 +514,27 @@ class SearchSelect {
     this.input = this.root.querySelector('.ss-input');
     this.panel = this.root.querySelector('.ss-panel');
 
+    /* 패널 열기 — focus 만으로는 부족하다.
+       항목을 고를 때 mousedown 에서 preventDefault 를 하므로 포커스가
+       입력창에 그대로 남는데, 이미 포커스를 가진 요소를 다시 클릭해도
+       focus 이벤트는 발생하지 않는다. 그래서 "선택 → 바로 다시 클릭" 이
+       무반응이었고, 다른 곳을 눌러 포커스를 뺀 뒤에야 열렸다.
+       mousedown 으로 그 경우를 직접 처리한다. */
     this.input.addEventListener('focus', () => { this.input.select(); this.open(''); });
+
+    this.input.addEventListener('mousedown', (e) => {
+      if (this.input.disabled) return;
+      if (this.panel.classList.contains('open')) {
+        e.preventDefault();            // 포커스는 둔 채 닫기만 (토글)
+        this.close(true);
+      } else if (document.activeElement === this.input) {
+        e.preventDefault();
+        this.input.select();
+        this.open('');                 // focus 가 안 나는 경우를 여기서 처리
+      }
+      // 포커스가 없으면 뒤이어 발생할 focus 이벤트가 열어준다
+    });
+
     this.input.addEventListener('input', () => this.open(this.input.value));
     this.input.addEventListener('keydown', (e) => this.onKey(e));
     document.addEventListener('mousedown', (e) => {
@@ -542,6 +585,7 @@ class SearchSelect {
       this.panel.querySelectorAll('.ss-opt').forEach(el => {
         el.addEventListener('mousedown', (e) => {
           e.preventDefault();
+          e.stopPropagation();       // 입력창 mousedown 토글과 겹치지 않게
           const o = list[Number(el.dataset.i)];
           this.setValue(o.value, o.label);
           this.close();
@@ -623,7 +667,7 @@ async function onOperChange(v) {
   btnRun.disabled = true;
   if (!v) return;
   const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: v});
-  if (error) { alert('오류: ' + error); return; }
+  if (error) { console.warn('파라미터 목록 조회 실패:', error); return; }
   corrParams = options || [];
   const opts = corrParams.map(o => ({value: o, label: o}));
   ssParam.setOptions(opts);
@@ -641,7 +685,7 @@ async function runQuery() {
     const {data, param, error} = await postJSON(API_TREND, {
       oper_id: ssOper.value, lot_cd: ssLot.value, param: ssParam.value,
     });
-    if (error) { alert('오류: ' + error); return; }
+    if (error) { console.warn('트렌드 조회 실패:', error); return; }
     trendData = data || [];
     currentParam = param;
     drawTrend();
@@ -725,6 +769,30 @@ function markerTrace(name, g) {
   };
 }
 
+/* ══════════════════════════════════════════════════
+   차트 이벤트 등록
+   · 빈 영역을 클릭하면 Plotly 는 plotly_selected 를 points 없이 주거나
+     plotly_deselect 를 보낸다. 예전 코드는 둘 다 무시해서(그냥 return)
+     더블클릭 말고는 선택이 풀리지 않았다.
+   · newPlot 을 다시 호출해도 핸들러가 겹쳐 쌓이지 않도록 먼저 비운다.
+     (겹치면 onSelected 가 여러 번 돌아 요청도 중복으로 나간다)
+   ══════════════════════════════════════════════════ */
+function bindChartEvents(div, otherId) {
+  ['plotly_selected', 'plotly_deselect', 'plotly_doubleclick'].forEach(ev => {
+    if (div.removeAllListeners) div.removeAllListeners(ev);
+  });
+
+  div.on('plotly_selected', (ev) => {
+    if (!ev || !ev.points || !ev.points.length) { clearSelection(); return; }
+    const ids = ev.points.map(p => p.customdata);
+    highlightIn(otherId, ids);          // 반대쪽 차트에도 같은 웨이퍼 표시
+    onSelected(ids);
+  });
+
+  div.on('plotly_deselect',    clearSelection);   // 드래그 박스 밖 클릭
+  div.on('plotly_doubleclick', clearSelection);
+}
+
 /* ── Trend ─────────────────────────────────────── */
 function drawTrend() {
   if (!trendData.length) return;
@@ -745,13 +813,7 @@ function drawTrend() {
   Plotly.newPlot(div, traces, layout,
     {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
 
-  div.on('plotly_selected', (ev) => {
-    if (!ev || !ev.points || !ev.points.length) return;
-    const ids = ev.points.map(p => p.customdata);
-    highlightIn('js-corr', ids);          // 상관 차트에도 같은 웨이퍼 표시
-    onSelected(ids);
-  });
-  div.on('plotly_doubleclick', clearSelection);
+  bindChartEvents(div, 'js-corr');
 }
 
 /* ── Correlation ───────────────────────────────── */
@@ -762,7 +824,7 @@ async function drawCorr() {
   const {data, r2, trend, error} = await postJSON(API_CORR, {
     oper_id: ssOper.value, lot_cd: ssLot.value, x_col: xc, y_col: yc,
   });
-  if (error) { alert('오류: ' + error); return; }
+  if (error) { console.warn('상관 조회 실패:', error); return; }
 
   document.getElementById('js-corr-r2').textContent =
     (r2 !== null && r2 !== undefined) ? `R² = ${fmt3(r2)}` : '';
@@ -810,16 +872,13 @@ async function drawCorr() {
   // 이미 선택된 구간이 있으면 다시 그린 뒤에도 유지
   if (selectedIds) highlightIn('js-corr', selectedIds);
 
-  div.on('plotly_selected', (ev) => {
-    if (!ev || !ev.points || !ev.points.length) return;
-    const ids = ev.points.map(p => p.customdata);
-    highlightIn('js-trend', ids);         // 트렌드에도 같은 웨이퍼 표시
-    onSelected(ids);
-  });
-  div.on('plotly_doubleclick', clearSelection);
+  bindChartEvents(div, 'js-trend');
 
   // 범례로 항목을 켜고 끄면 추세선과 R² 를 다시 계산한다
   // (이벤트는 표시 상태가 바뀌기 전에 발생하므로 다음 틱에 처리)
+  ['plotly_legendclick', 'plotly_legenddoubleclick'].forEach(ev => {
+    if (div.removeAllListeners) div.removeAllListeners(ev);
+  });
   div.on('plotly_legendclick',       () => { setTimeout(recalcCorrTrend, 0); return true; });
   div.on('plotly_legenddoubleclick', () => { setTimeout(recalcCorrTrend, 0); return true; });
 }
@@ -1061,7 +1120,7 @@ async function runInsight() {
 
     out.innerHTML = html;
   } finally {
-    btnAi.disabled = false; btnAi.textContent = '분석 실행';
+    btnAi.disabled = false; btnAi.textContent = '자동 진단';
   }
 }
 
@@ -1208,20 +1267,32 @@ function resetChat() {
   document.getElementById('js-hints').innerHTML = '';
 }
 
+/* ══════════════════════════════════════════════════
+   선택 해제
+   해제 경로가 여러 개(빈 영역 클릭 / 더블클릭 / 버튼 / 재조회)이므로
+   Plotly.restyle 이 다시 해제 이벤트를 부르는 되먹임을 막는다.
+   ══════════════════════════════════════════════════ */
+let clearing = false;
 function clearSelection() {
-  selectedIds = null;
-  ['js-trend', 'js-corr'].forEach(id => {
-    const div = document.getElementById(id);
-    if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
-  });
-  document.getElementById('js-dist').innerHTML = '';
-  document.getElementById('js-ai-out').innerHTML = '';
-  document.getElementById('js-stats-count').textContent = '';
-  document.getElementById('js-lift-note').textContent = '';
-  btnAi.disabled = true;
-  resetChat();
-  setStep(3, 'locked');
-  if (trendData.length) setStep(2, 'active');
+  if (clearing) return;
+  clearing = true;
+  try {
+    selectedIds = null;
+    ['js-trend', 'js-corr'].forEach(id => {
+      const div = document.getElementById(id);
+      if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
+    });
+    document.getElementById('js-dist').innerHTML = '';
+    document.getElementById('js-ai-out').innerHTML = '';
+    document.getElementById('js-stats-count').textContent = '';
+    document.getElementById('js-lift-note').textContent = '';
+    btnAi.disabled = true;
+    resetChat();
+    setStep(3, 'locked');
+    if (trendData.length) setStep(2, 'active');
+  } finally {
+    clearing = false;
+  }
 }
 </script>
 {% endblock %}
