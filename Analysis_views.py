@@ -769,6 +769,18 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
         apc = df_apc_prep.drop(
             columns=[c for c in ['lot_id', 'wf_id'] if c in df_apc_prep.columns])
 
+        # ★ 이름이 겹치는 APC 컬럼은 머지 전에 버린다.
+        #   APC 의 input_name 을 펼친 컬럼과 SRC 의 param_nm 컬럼은 이름이 겹치고
+        #   값도 사실상 같다. 그대로 두면 suffixes 규칙에 따라 X_APC 가 만들어져
+        #   같은 값을 가진 컬럼이 두 벌 저장되고 PARAMETER 목록도 두 배로 늘어난다.
+        dup = [c for c in apc.columns
+               if c != 'substrate_id' and c in df.columns]
+        if dup:
+            apc = apc.drop(columns=dup)
+            if VERBOSE:
+                print(f'  [merge] SRC 와 중복된 APC 컬럼 {len(dup)}개 제외: '
+                      f'{", ".join(dup[:8])}{" ..." if len(dup) > 8 else ""}')
+
         # inner join 사전 점검 — 키 포맷이 어긋나면 에러 없이 0행이 된다
         if VERBOSE:
             ws  = set(df['substrate_id'].astype(str).str.strip())
@@ -781,7 +793,8 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
                 print(f'          SRC 예시: {sorted(ws)[:3]}')
                 print(f'          APC 예시: {sorted(as_)[:3]}')
 
-        # 그 밖의 이름 충돌은 APC 쪽에 _APC 를 붙여 구분한다
+        # 위에서 중복을 걸렀으므로 _APC 는 원칙적으로 생기지 않는다.
+        # suffixes 는 예상 못 한 충돌에 대비한 안전장치로만 남겨둔다.
         df = df.merge(apc, on='substrate_id', how='inner',
                       suffixes=('', '_APC'))                 # inner → rework 자동 제외
 
@@ -936,6 +949,18 @@ def finalize_df(df, cond, df_src=None):
                   '— SRC_META_COLS 와 SRC 쿼리의 b.eqp_id 확인 필요')
 
     df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
+
+    # ★ 혹시 남아 있는 _APC 중복 컬럼 제거 (방어)
+    #   짝이 되는 원본 컬럼이 있을 때만 지운다 —
+    #   이름이 우연히 _APC 로 끝나는 실제 파라미터를 지우지 않기 위함.
+    apc_dup = [c for c in df.columns
+               if c.endswith('_apc') and c[:-4] in df.columns]
+    if apc_dup:
+        df = df.drop(columns=apc_dup)
+        if VERBOSE:
+            print(f'  [finalize] _APC 중복 컬럼 {len(apc_dup)}개 제거: '
+                  f'{", ".join(apc_dup[:8])}{" ..." if len(apc_dup) > 8 else ""}')
+
     df = df.rename(columns={k: v for k, v in RENAME_MAP.items() if k in df.columns})
 
     if 'lot_id' in df.columns:
@@ -1137,6 +1162,72 @@ def repair_pre_eqp_ch(oper_id=None):
 
     print(f'[repair] PRE_EQP_CH 보정 완료 — 총 {total_upd:,}행')
     return total_upd
+
+
+def drop_apc_columns(oper_id=None, dry_run=False):
+    """
+    이미 저장된 테이블에서 _APC 접미사 중복 컬럼을 삭제한다.
+
+    APC 의 input_name 을 펼친 컬럼은 SRC 의 param_nm 컬럼과 이름이 겹쳐
+    머지 과정에서 X_APC 로 갈라졌고, 값은 사실상 X 와 같다.
+    저장 로직은 컬럼 추가만 하고 삭제는 하지 않으므로 기존 테이블에는
+    그대로 남아 PARAMETER 목록을 두 배로 부풀린다.
+
+      oper_id  : 주면 그 공정만, 생략하면 cmp_analysis_* 전체
+      dry_run  : True 면 삭제하지 않고 대상만 출력
+
+    ★ 짝이 되는 원본 컬럼(X)이 있을 때만 X_APC 를 지운다.
+      이름이 우연히 _APC 로 끝나는 실제 파라미터는 건드리지 않는다.
+
+    실행 예)
+      from equipment import analysis_service as svc
+      svc.drop_apc_columns(dry_run=True)   # 먼저 대상 확인
+      svc.drop_apc_columns()               # 실제 삭제
+    """
+    conn = connections['analysis_db']
+
+    with conn.cursor() as cur:
+        if oper_id:
+            tables = [_table_name(oper_id)]
+        else:
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE tablename LIKE %s "
+                "ORDER BY tablename", ['cmp_analysis_%'])
+            tables = [r[0] for r in cur.fetchall()]
+
+        if not tables:
+            print('[apc-col] 대상 테이블 없음')
+            return 0
+
+        total = 0
+        for t in tables:
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s
+            """, [t])
+            cols = [r[0] for r in cur.fetchall()]
+            upper = {c.upper() for c in cols}
+
+            targets = [c for c in cols
+                       if c.upper().endswith('_APC') and c.upper()[:-4] in upper]
+            if not targets:
+                continue
+
+            if dry_run:
+                print(f'  [{t}] 삭제 대상 {len(targets)}개: '
+                      f'{", ".join(targets[:8])}'
+                      f'{" ..." if len(targets) > 8 else ""}')
+            else:
+                for c in targets:
+                    cur.execute(f'ALTER TABLE {t} DROP COLUMN "{c}"')
+                print(f'  [{t}] _APC 컬럼 {len(targets)}개 삭제: '
+                      f'{", ".join(targets[:8])}'
+                      f'{" ..." if len(targets) > 8 else ""}')
+            total += len(targets)
+
+    verb = '삭제 대상' if dry_run else '삭제 완료'
+    print(f'[apc-col] {verb} — 총 {total}개')
+    return total
 
 
 def save_analysis_df(df, oper_id):
