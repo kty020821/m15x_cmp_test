@@ -1,0 +1,484 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}Inline Monitoring{% endblock %}
+
+{#
+════════════════════════════════════════════════════════════
+  Inline Monitoring
+
+  [점검 시작] → 공정 목록을 받아 한 공정씩 순차 호출한다.
+  한 요청에 전 공정을 몰면 512MiB 웹서버에서 타임아웃이 나므로
+  진행률을 보여주며 나눠 호출한다.
+
+  테이블 각 행
+    · 30일 추이 스파크라인 (SVG 직접 생성 — 수백 행이라 Plotly 는 무겁다)
+      회색 띠 = 30일 min~max, 점선 = 기준 평균, 빨간 점 = 최근일
+    · 클릭하면 웨이퍼 단위 상세 차트 (Plotly)
+
+  [수정 지점]
+    · 판정 기준  → monitor_service.py 상단 상수
+    · 점검 대상  → 구닥스 INLINE_YN / PARAM_TYPE (없으면 이름 규칙)
+════════════════════════════════════════════════════════════
+#}
+
+{% block extra_css %}
+<style>
+:root {
+  --mn-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+             'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --mn-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
+  --bad:  #dc2626;
+  --warn: #f59e0b;
+  --good: #16a34a;
+  --none: #94a3b8;
+}
+.mn-page { padding: 26px 30px 80px; font-family: var(--mn-font); }
+.mn-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
+  letter-spacing: -0.02em; }
+.mn-sub { font-size: 13px; font-weight: 600; color: var(--tx-2); margin: 4px 0 18px; }
+
+/* ── 실행 바 ─────────────────────────────────── */
+.run-bar { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: 16px; padding: 16px 18px; display: flex; align-items: center;
+  gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+.btn-run { padding: 11px 30px; background: var(--accent); border: none;
+  border-radius: 12px; color: #000; font-size: 13px; font-weight: 800;
+  cursor: pointer; transition: opacity .15s; }
+.btn-run:hover { opacity: .85; }
+.btn-run:disabled { opacity: .4; cursor: not-allowed; }
+.run-info { font-size: 12px; font-weight: 600; color: var(--tx-muted); }
+.prog { flex: 1; min-width: 180px; height: 6px; background: var(--bg-2);
+  border-radius: 20px; overflow: hidden; display: none; }
+.prog.on { display: block; }
+.prog i { display: block; height: 100%; width: 0;
+  background: var(--accent); transition: width .25s; }
+
+/* ── 요약 카드 ───────────────────────────────── */
+.cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: 14px; padding: 13px 18px; min-width: 110px; cursor: pointer;
+  transition: border-color .15s; }
+.card:hover { border-color: var(--tx-muted); }
+.card.on { border-color: var(--accent); }
+.card .n { font-size: 22px; font-weight: 800; font-family: var(--mn-mono); }
+.card .l { font-size: 11px; font-weight: 700; color: var(--tx-muted);
+  letter-spacing: .03em; margin-top: 2px; }
+.card.bad  .n { color: var(--bad); }
+.card.warn .n { color: var(--warn); }
+.card.good .n { color: var(--good); }
+.card.all  .n { color: var(--tx-1); }
+
+/* ── 필터 ────────────────────────────────────── */
+.filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+  align-items: center; }
+.filters select, .filters input {
+  font-family: var(--mn-font); font-size: 12px; font-weight: 600;
+  color: var(--tx-1); background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 10px; padding: 7px 11px; outline: none; }
+.filters input { min-width: 190px; }
+
+/* ── 테이블 ──────────────────────────────────── */
+.tbl-wrap { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: 16px; overflow: hidden; }
+table.mn { width: 100%; border-collapse: collapse; }
+table.mn th { font-size: 11px; font-weight: 800; color: var(--tx-muted);
+  letter-spacing: .03em; text-align: left; padding: 11px 12px;
+  border-bottom: 1.5px solid var(--bd); white-space: nowrap; }
+table.mn td { font-size: 12px; font-weight: 600; color: var(--tx-1);
+  padding: 9px 12px; border-bottom: 1px solid rgba(128,128,128,.1);
+  vertical-align: middle; }
+table.mn tbody tr { cursor: pointer; }
+table.mn tbody tr:hover { background: var(--bg-2); }
+table.mn tbody tr.open { background: var(--bg-2); }
+.num { font-family: var(--mn-mono); text-align: right; }
+
+.badge { display: inline-block; font-size: 10px; font-weight: 800;
+  border-radius: 20px; padding: 2px 8px; white-space: nowrap; }
+.b-bad  { color: var(--bad);  background: rgba(220,38,38,.12); }
+.b-warn { color: var(--warn); background: rgba(245,158,11,.14); }
+.b-good { color: var(--good); background: rgba(22,163,74,.12); }
+.b-none { color: var(--none); background: rgba(148,163,184,.14); }
+.tag { display: inline-block; font-size: 10px; font-weight: 700;
+  font-family: var(--mn-mono); color: var(--tx-2); background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: 20px; padding: 1px 6px;
+  margin-right: 3px; }
+.streak { font-size: 10px; font-weight: 800; color: var(--bad);
+  background: rgba(220,38,38,.1); border-radius: 20px; padding: 1px 6px;
+  margin-left: 4px; font-family: var(--mn-mono); }
+.reason { font-size: 11px; font-weight: 600; color: var(--tx-2);
+  line-height: 1.55; }
+.reason .dim { color: var(--tx-muted); font-weight: 600; }
+
+/* ── 상세 ────────────────────────────────────── */
+tr.detail > td { background: var(--bg-2); padding: 0; }
+.detail-in { padding: 16px 18px; }
+.detail-head { display: flex; gap: 16px; flex-wrap: wrap;
+  font-size: 12px; font-weight: 700; color: var(--tx-2); margin-bottom: 12px; }
+.detail-head b { color: var(--tx-1); font-family: var(--mn-mono); }
+.detail-plot { width: 100%; height: 320px; }
+.eqp-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.eqp-chip { font-size: 11px; font-weight: 700; font-family: var(--mn-mono);
+  border: 1px solid var(--bd); border-radius: 10px; padding: 5px 10px;
+  background: var(--bg-3); color: var(--tx-2); }
+.eqp-chip.hot { border-color: rgba(220,38,38,.5); color: var(--bad); }
+.empty { padding: 40px; text-align: center; color: var(--tx-muted);
+  font-size: 13px; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mn-page">
+  <h1 class="mn-title">Inline Monitoring</h1>
+  <p class="mn-sub">전 공정 인라인 파라미터 자동 점검 — 30일 데이터를 기준선으로 비교합니다</p>
+
+  <div class="run-bar">
+    <button class="btn-run" id="btn-run" onclick="startCheck()">점검 시작</button>
+    <div class="prog" id="prog"><i id="prog-bar"></i></div>
+    <span class="run-info" id="run-info">이전 점검 결과를 불러오는 중...</span>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="filters">
+    <select id="f-oper" onchange="render()"><option value="">전체 공정</option></select>
+    <select id="f-type" onchange="render()">
+      <option value="">전체 타입</option>
+      <option value="THK">THK</option>
+      <option value="TIME">TIME</option>
+      <option value="DEFECT">DEFECT</option>
+      <option value="ETC">기타</option>
+    </select>
+    <input id="f-text" type="text" placeholder="파라미터 검색" oninput="render()">
+    <span class="run-info" id="cnt-info"></span>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="mn">
+      <thead>
+        <tr>
+          <th>공정</th><th>LOT_CD</th><th>파라미터</th><th>타입</th>
+          <th>상태</th><th class="num">σ / 배수</th><th class="num">범위밖</th>
+          <th style="width:150px;">30일 추이</th><th>판정 근거</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty" id="empty">점검 시작을 눌러주세요.</div>
+  </div>
+</div>
+
+<script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
+<script>
+const API_OPERS   = "{% url 'monitor-opers' %}";
+const API_RUN     = "{% url 'monitor-run' %}";
+const API_RESULTS = "{% url 'monitor-results' %}";
+const API_DETAIL  = "{% url 'monitor-detail' %}";
+
+const MN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
+
+let allResults = [];
+let filterStatus = '';
+let openKey = null;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function fmt(v, nd) {
+  if (v === null || v === undefined || isNaN(v)) return '-';
+  return Number(v).toFixed(nd === undefined ? 2 : nd);
+}
+
+/* 오류가 나도 팝업을 띄우지 않는다 (분석 페이지와 동일 방침) */
+async function postJSON(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { console.error(`API ${res.status}`, url, j.error || ''); return {}; }
+    if (j.note)  console.info('[monitor]', j.note);
+    if (j.error) console.warn('[monitor]', j.error);
+    return j;
+  } catch (e) { console.error('요청 실패', url, e); return {}; }
+}
+
+/* ══════════════════════════════════════════════════
+   점검 실행 — 공정 단위로 나눠 호출하고 진행률을 보여준다
+   ══════════════════════════════════════════════════ */
+async function startCheck() {
+  const btn = document.getElementById('btn-run');
+  const bar = document.getElementById('prog-bar');
+  const box = document.getElementById('prog');
+  const info = document.getElementById('run-info');
+
+  btn.disabled = true; btn.textContent = '점검중...';
+  box.classList.add('on'); bar.style.width = '0%';
+
+  const {opers} = await postJSON(API_OPERS, {});
+  const list = opers || [];
+  if (!list.length) {
+    info.textContent = '점검할 공정이 없습니다.';
+    btn.disabled = false; btn.textContent = '점검 시작';
+    box.classList.remove('on');
+    return;
+  }
+
+  allResults = [];
+  const notes = [];
+  for (let i = 0; i < list.length; i++) {
+    const o = list[i];
+    info.textContent = `${o.label} 점검중 (${i + 1}/${list.length})`;
+    const r = await postJSON(API_RUN, {oper_id: o.oper_id, label: o.label});
+    if (r.results) allResults = allResults.concat(r.results);
+    if (r.note) notes.push(`${o.label}: ${r.note}`);
+    bar.style.width = ((i + 1) / list.length * 100).toFixed(1) + '%';
+  }
+
+  if (notes.length) console.info('[monitor]', notes.join(' / '));
+  info.textContent = `점검 완료 — ${new Date().toLocaleString('ko-KR')}` +
+    (notes.length ? ` (건너뛴 공정 ${notes.length}개, 콘솔 참고)` : '');
+  btn.disabled = false; btn.textContent = '다시 점검';
+  setTimeout(() => box.classList.remove('on'), 600);
+
+  buildFilters(); render();
+}
+
+/* 이전 결과 불러오기 */
+async function loadSaved() {
+  const j = await postJSON(API_RESULTS, {});
+  allResults = j.results || [];
+  const info = document.getElementById('run-info');
+  info.textContent = j.run_ts
+    ? `최근 점검 ${String(j.run_ts).slice(0, 19)}`
+    : '점검 이력이 없습니다. 점검 시작을 눌러주세요.';
+  buildFilters(); render();
+}
+
+function buildFilters() {
+  const sel = document.getElementById('f-oper');
+  const cur = sel.value;
+  const seen = new Map();
+  allResults.forEach(r => seen.set(r.oper_id, r.oper_label || r.oper_id));
+  sel.innerHTML = '<option value="">전체 공정</option>' +
+    [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]))
+      .map(([id, lb]) => `<option value="${esc(id)}">${esc(lb)}</option>`).join('');
+  sel.value = cur;
+}
+
+/* ══════════════════════════════════════════════════
+   스파크라인 — 행마다 그리므로 SVG 직접 생성
+   회색 띠 = 30일 min~max, 점선 = 기준 평균, 빨간 점 = 최근일
+   ══════════════════════════════════════════════════ */
+function sparkline(r) {
+  const s = (r.series || []).filter(p => p.avg !== null);
+  if (s.length < 2) return '<span class="reason dim">-</span>';
+
+  const W = 140, H = 34, PAD = 3;
+  const vals = s.map(p => p.avg);
+  const b = r.base_stat || {};
+  const lo = Math.min(...vals, b.min ?? Infinity);
+  const hi = Math.max(...vals, b.max ?? -Infinity);
+  const span = (hi - lo) || 1;
+
+  const x = i => PAD + i * (W - PAD * 2) / (s.length - 1);
+  const y = v => H - PAD - (v - lo) / span * (H - PAD * 2);
+
+  let band = '';
+  if (b.min !== null && b.min !== undefined && b.max !== null) {
+    const y1 = y(b.max), y2 = y(b.min);
+    band = `<rect x="0" y="${y1.toFixed(1)}" width="${W}" ` +
+           `height="${Math.max(1, y2 - y1).toFixed(1)}" ` +
+           `fill="rgba(128,128,128,0.14)"/>`;
+  }
+  let mean = '';
+  if (b.avg !== null && b.avg !== undefined) {
+    const ym = y(b.avg).toFixed(1);
+    mean = `<line x1="0" y1="${ym}" x2="${W}" y2="${ym}" ` +
+           `stroke="rgba(128,128,128,0.55)" stroke-width="1" stroke-dasharray="3 2"/>`;
+  }
+
+  const d = s.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.avg).toFixed(1)}`).join('');
+  const color = r.status === '이상' ? '#dc2626'
+              : r.status === '주의' ? '#f59e0b' : '#16a34a';
+  const last = s[s.length - 1];
+
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    ${band}${mean}
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6"
+          stroke-linejoin="round"/>
+    <circle cx="${x(s.length - 1).toFixed(1)}" cy="${y(last.avg).toFixed(1)}"
+            r="3" fill="${color}"/>
+  </svg>`;
+}
+
+/* ══════════════════════════════════════════════════
+   테이블
+   ══════════════════════════════════════════════════ */
+function statusBadge(st) {
+  const m = {'이상': 'b-bad', '주의': 'b-warn', '정상': 'b-good', '기준없음': 'b-none'};
+  return `<span class="badge ${m[st] || 'b-none'}">${esc(st)}</span>`;
+}
+
+function filtered() {
+  const fo = document.getElementById('f-oper').value;
+  const ft = document.getElementById('f-type').value;
+  const fx = (document.getElementById('f-text').value || '').trim().toUpperCase();
+  return allResults.filter(r =>
+    (!filterStatus || r.status === filterStatus) &&
+    (!fo || r.oper_id === fo) &&
+    (!ft || (r.ptype || 'ETC') === ft) &&
+    (!fx || (r.param || '').toUpperCase().includes(fx)));
+}
+
+function render() {
+  // 요약 카드
+  const cnt = {'이상': 0, '주의': 0, '정상': 0};
+  allResults.forEach(r => { if (cnt[r.status] !== undefined) cnt[r.status]++; });
+  document.getElementById('cards').innerHTML = `
+    <div class="card all  ${filterStatus === '' ? 'on' : ''}" onclick="setStatus('')">
+      <div class="n">${allResults.length}</div><div class="l">전체</div></div>
+    <div class="card bad  ${filterStatus === '이상' ? 'on' : ''}" onclick="setStatus('이상')">
+      <div class="n">${cnt['이상']}</div><div class="l">이상</div></div>
+    <div class="card warn ${filterStatus === '주의' ? 'on' : ''}" onclick="setStatus('주의')">
+      <div class="n">${cnt['주의']}</div><div class="l">주의</div></div>
+    <div class="card good ${filterStatus === '정상' ? 'on' : ''}" onclick="setStatus('정상')">
+      <div class="n">${cnt['정상']}</div><div class="l">정상</div></div>`;
+
+  const rows = filtered();
+  document.getElementById('cnt-info').textContent = `${rows.length}건 표시`;
+  document.getElementById('empty').style.display = rows.length ? 'none' : 'block';
+  if (!rows.length) {
+    document.getElementById('empty').textContent =
+      allResults.length ? '조건에 맞는 항목이 없습니다.' : '점검 시작을 눌러주세요.';
+  }
+
+  document.getElementById('tbody').innerHTML = rows.map(r => {
+    const key = `${r.oper_id}|${r.lot_cd}|${r.param}`;
+    const isDef = (r.ptype || '') === 'DEFECT';
+    const sig = r.sigma === null || r.sigma === undefined ? '-'
+              : (isDef ? `×${fmt(r.sigma, 1)}` : `${r.sigma > 0 ? '+' : ''}${fmt(r.sigma, 1)}σ`);
+    const streak = (r.streak || 0) >= 2
+      ? `<span class="streak">${r.streak}일</span>` : '';
+    const tags = (r.checks || []).map(c => `<span class="tag">${esc(c)}</span>`).join('');
+    const reasons = (r.reasons || []).map(x => esc(x)).join('<br>');
+
+    return `<tr onclick="toggleDetail('${esc(key)}')" data-key="${esc(key)}"
+                class="${openKey === key ? 'open' : ''}">
+      <td>${esc(r.oper_label || r.oper_id)}</td>
+      <td class="num">${esc(r.lot_cd)}</td>
+      <td><b>${esc(r.param)}</b></td>
+      <td><span class="tag">${esc(r.ptype || 'ETC')}</span></td>
+      <td>${statusBadge(r.status)}${streak}</td>
+      <td class="num">${sig}</td>
+      <td class="num">${r.out_cnt || 0}</td>
+      <td>${sparkline(r)}</td>
+      <td><div class="reason">${tags ? tags + '<br>' : ''}${reasons}</div></td>
+    </tr>` + (openKey === key ? detailRow(r) : '');
+  }).join('');
+
+  if (openKey) {
+    const r = rows.find(x => `${x.oper_id}|${x.lot_cd}|${x.param}` === openKey);
+    if (r) drawDetail(r);
+  }
+}
+
+function setStatus(s) { filterStatus = s; render(); }
+
+function detailRow(r) {
+  const b = r.base_stat || {}, d = r.day_stat || {};
+  const eqp = (r.eqp || []).map(e => {
+    const hot = e.sigma !== null && Math.abs(e.sigma) >= 2 ? ' hot' : '';
+    const sg = e.sigma === null ? '' : ` (${e.sigma > 0 ? '+' : ''}${fmt(e.sigma, 1)}σ)`;
+    return `<span class="eqp-chip${hot}">${esc(e.eqp)} · ${fmt(e.avg)}${sg} · ${e.n}장</span>`;
+  }).join('');
+
+  return `<tr class="detail"><td colspan="9"><div class="detail-in">
+    <div class="detail-head">
+      <span>${esc(r.span || '최근일')} <b>${esc(r.day_from && r.day_from !== r.day ? r.day_from + ' ~ ' + r.day : r.day)}</b></span>
+      <span>구간 평균 <b>${fmt(d.avg)}</b> (${d.n}장)</span>
+      <span>30일 평균 <b>${fmt(b.avg)}</b> · σ <b>${fmt(b.std)}</b></span>
+      <span>30일 범위 <b>${fmt(b.min)} ~ ${fmt(b.max)}</b></span>
+      ${r.spread ? `<span>산포비 <b>${fmt(r.spread, 1)}배</b></span>` : ''}
+      ${r.drift ? `<span>드리프트 <b>${r.drift.total_sigma > 0 ? '+' : ''}${fmt(r.drift.total_sigma, 1)}σ/${r.drift.days}일</b></span>` : ''}
+    </div>
+    <div class="detail-plot" id="dp"></div>
+    ${eqp ? `<div class="eqp-grid">${eqp}</div>` : ''}
+  </div></td></tr>`;
+}
+
+function toggleDetail(key) {
+  openKey = (openKey === key) ? null : key;
+  render();
+}
+
+/* 상세 차트 — 웨이퍼 단위. 최근일만 색을 달리해 한눈에 보이게 */
+async function drawDetail(r) {
+  const div = document.getElementById('dp');
+  if (!div) return;
+
+  const j = await postJSON(API_DETAIL, {
+    oper_id: r.oper_id, lot_cd: r.lot_cd, param: r.param,
+  });
+  const pts = j.points || [];
+  if (!pts.length) { div.innerHTML = ''; return; }
+
+  const day = r.day;
+  const isDay = p => (p.date || '').slice(0, 10) === day;
+  const prev = pts.filter(p => !isDay(p));
+  const today = pts.filter(isDay);
+
+  const mk = (arr, name, color, size) => ({
+    x: arr.map(p => p.date), y: arr.map(p => p.val),
+    text: arr.map(p => `${p.LOT_ID || ''} / WF${p.WF_ID || ''}` +
+                       (p.EQP_CH_ID ? `<br>${p.EQP_CH_ID}` : (p.EQP_ID ? `<br>${p.EQP_ID}` : ''))),
+    name, mode: 'markers', type: 'scattergl',
+    marker: {size: size, color: color, opacity: .75,
+             line: {width: .5, color: 'rgba(0,0,0,.25)'}},
+    hovertemplate: '%{text}<br><b>%{y:.2f}</b><extra></extra>',
+  });
+
+  const traces = [mk(prev, '이전 30일', 'rgba(120,130,145,.55)', 7)];
+  if (today.length) {
+    const c = r.status === '이상' ? '#dc2626'
+            : r.status === '주의' ? '#f59e0b' : '#16a34a';
+    traces.push(mk(today, `최근일 (${day})`, c, 10));
+  }
+
+  const b = r.base_stat || {};
+  const shapes = [], anns = [];
+  const line = (v, col, dash, label) => {
+    if (v === null || v === undefined) return;
+    shapes.push({type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1,
+                 y0: v, y1: v, line: {color: col, width: 1.4, dash: dash}});
+    anns.push({xref: 'paper', yref: 'y', x: 1, xanchor: 'right', y: v,
+               yanchor: 'bottom', text: `<b>${label} ${fmt(v)}</b>`,
+               showarrow: false, font: {family: MN_FONT, size: 10, color: col},
+               bgcolor: 'rgba(255,255,255,.85)', borderpad: 2});
+  };
+  line(b.max, '#ef4444', 'dash', '30일 max');
+  line(b.avg, '#22c55e', 'dot',  '30일 평균');
+  line(b.min, '#ef4444', 'dash', '30일 min');
+
+  Plotly.newPlot(div, traces, {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {family: MN_FONT, color: '#555', size: 11},
+    margin: {l: 58, r: 18, t: 10, b: 42},
+    xaxis: {tickfont: {family: MN_FONT, size: 10},
+            gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
+    yaxis: {title: {text: r.param, font: {family: MN_FONT, size: 11}},
+            tickfont: {family: MN_FONT, size: 10},
+            gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
+    shapes: shapes, annotations: anns,
+    showlegend: true,
+    legend: {orientation: 'h', x: 0, y: 1.12, font: {family: MN_FONT, size: 10}},
+    hovermode: 'closest',
+    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
+                 font: {family: MN_FONT, size: 11}},
+  }, {responsive: true, displaylogo: false, displayModeBar: false});
+}
+
+loadSaved();
+</script>
+{% endblock %}
