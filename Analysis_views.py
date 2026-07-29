@@ -110,6 +110,15 @@ def _recipe_like_cond(recipe_list, col='eqp_recipe_id'):
     구닥스 RECIPE_ID 는 확장자가 붙기도 하고(.CAS), 실제 장비에서는
     파생 레시피가 돌기도 해서 접두 일치로 비교한다.
     챔버가 다른 레시피(_AB / _CD)는 구닥스에 각각 등록하면 여기서 모두 조회된다.
+
+    ★ NULL 을 통과시킨다.
+      이 컬럼은 DCP 서브쿼리(c) 를 left join 해서 얻는데, lot_id 형식이
+      달라 조인이 안 붙으면 NULL 이 된다. LIKE 는 NULL 에 대해 참이 될 수
+      없으므로, NULL 을 허용하지 않으면 레시피가 등록된 공정만 통째로
+      0행이 되어 버린다 (레시피 미등록 공정은 이 조건 자체가 없어
+      멀쩡하므로 '일부 공정만 조회 안 됨' 으로 보인다).
+      레시피로 거르는 목적은 '다른 레시피를 제외' 하는 것이지
+      '레시피를 모르는 웨이퍼를 버리는' 것이 아니다.
     """
     bases = []
     for r in recipe_list:
@@ -121,7 +130,7 @@ def _recipe_like_cond(recipe_list, col='eqp_recipe_id'):
     if not bases:
         return ""
     ors = " or ".join(f"{col} like '{b}%'" for b in bases)
-    return f"and ({ors})"
+    return f"and ({col} is null or {ors})"
 
 
 def _param_tuple(param_list):
@@ -282,9 +291,11 @@ def fetch_src(lake, cond, days=30):
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
 
-            # SUBSTRING(lot_id, 2, 3) — lot_code 가 3자리(5E2)이므로 길이도 3.
-            #   2 로 두면 3글자와 절대 같을 수 없어 DCP 조인이 전부 실패하고
+            # SUBSTRING 길이는 lot_code 자릿수에 맞춘다.
+            #   길이를 고정하면(2 또는 3) 다른 자릿수를 쓰는 공정에서
+            #   절대 일치하지 않아 DCP 조인이 통째로 실패하고,
             #   recipe 필터가 걸린 공정만 조용히 0행이 된다.
+            lot_len = len(str(lot_code))
             query = f"""
 WITH src AS (
     select a.lot_id, a.wf_id,
@@ -330,7 +341,7 @@ WITH src AS (
             select lot_id, crt_tm, eqp_recipe_id,
                    rank() over (partition by lot_id order by crt_tm asc) recipe_rank
             from lake_catalog.dcp.dcp_dcp_dcoldata_inf_{fab}
-            where ( SUBSTRING(lot_id, 2, 3) = '{lot_code}'
+            where ( SUBSTRING(lot_id, 2, {lot_len}) = '{lot_code}'
                  or SUBSTRING(lot_id, 2, 2) = 'XC'
                  or SUBSTRING(lot_id, 1, 1) = 'S' )
               and oper_id = '{oper_id}'
@@ -1228,6 +1239,56 @@ def drop_apc_columns(oper_id=None, dry_run=False):
     verb = '삭제 대상' if dry_run else '삭제 완료'
     print(f'[apc-col] {verb} — 총 {total}개')
     return total
+
+
+def save_config_snapshot(df_info):
+    """
+    구닥스 기준정보를 PostgreSQL 에 스냅샷으로 저장한다.
+
+    ★ 웹 프로세스는 사내 모듈(Lake/구닥스 클라이언트)을 쓸 수 없다.
+      그래서 Inline Monitoring 이 INLINE_YN / PARAM_TYPE 을 읽으려면
+      배치가 적재할 때 기준정보를 함께 복사해 둬야 한다.
+
+    배치(run_analysis_load.py)에서 get_config() 직후에 한 번 호출:
+
+        df_info = svc.get_config()
+        svc.save_config_snapshot(df_info)
+
+    구닥스에 아직 INLINE_YN / PARAM_TYPE 컬럼이 없으면 그 컬럼만 빠진
+    채로 저장되고, 모니터링은 이름 규칙 폴백으로 동작한다.
+    """
+    if df_info is None or len(df_info) == 0:
+        print('[config] 기준정보가 비어 있어 스냅샷을 건너뜁니다')
+        return 0
+
+    df = df_info.copy()
+    df.columns = [str(c).upper() for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    table = 'cmp_gooddocs_config'
+    conn  = connections['analysis_db']
+
+    with conn.cursor() as cur:
+        cur.execute(f'DROP TABLE IF EXISTS {table}')
+        col_defs = ", ".join(f'"{c}" VARCHAR(300)' for c in df.columns)
+        cur.execute(f'CREATE TABLE {table} '
+                    f'(id BIGSERIAL PRIMARY KEY, {col_defs})')
+
+        # 전부 텍스트로 저장한다 — 기준정보는 계산 대상이 아니고,
+        # 숫자로 캐스팅하면 LOT_CD 5E2 같은 값이 뭉개진다.
+        data = [tuple('' if pd.isna(v) else str(v) for v in row)
+                for row in df.itertuples(index=False, name=None)]
+        cols = ", ".join(f'"{c}"' for c in df.columns)
+        execute_values(cur.cursor,
+                       f'INSERT INTO {table} ({cols}) VALUES %s',
+                       data, page_size=1000)
+
+    missing = [c for c in ('INLINE_YN', 'PARAM_TYPE') if c not in df.columns]
+    print(f'[config] 기준정보 스냅샷 저장 {len(data):,}행 / 컬럼 {len(df.columns)}개')
+    if missing:
+        print(f'[config] ※ 구닥스에 {", ".join(missing)} 컬럼이 없습니다 — '
+              f'Inline Monitoring 은 이름 규칙으로 대상을 고릅니다')
+    return len(data)
 
 
 def save_analysis_df(df, oper_id):
