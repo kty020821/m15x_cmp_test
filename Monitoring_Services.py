@@ -73,7 +73,9 @@ CHAMBER_TWINS = [('PA', 'PC'), ('PB', 'PD'), ('PL', 'PR')]
 #   ※ DEFECT 규칙을 넓게 잡으면 PADCNT/DISKCNT 같은 소모품 카운터가
 #     오탐된다. defect 임이 분명한 어휘만 쓰고, 나머지는 구닥스
 #     PARAM_TYPE 으로 지정하게 둔다.
-RE_THK    = re.compile(r'THK|OCD')
+#   ※ REV(제거량 계열)도 THK 와 같은 범주로 본다 — 두께에서 파생된
+#     계측값이라 판정 규칙(평균±σ)이 동일하다.
+RE_THK    = re.compile(r'THK|OCD|REV')
 RE_TIME   = re.compile(r'\d_?TIME|TIME_?\d')
 RE_DEFECT = re.compile(r'DEFECT|SCRATCH|PARTICLE|RESIDUE|^DEF_|_DEF_|_DEF$')
 
@@ -627,4 +629,3 @@ def wafer_detail(oper_id, lot_cd, param, days=30):
             item[c] = r[3 + i]
         pts.append(item)
     return {'points': pts, 'extra': extra}
-
