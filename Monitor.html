@@ -81,6 +81,7 @@
 .card.bad  .n { color: var(--bad); }
 .card.warn .n { color: var(--warn); }
 .card.good .n { color: var(--good); }
+.card.none .n { color: var(--none); }
 .card.all  .n { color: var(--tx-1); }
 
 /* ── 필터 ────────────────────────────────────── */
@@ -187,10 +188,8 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
     <select id="f-lot" onchange="render()"><option value="">전체 LOT_CD</option></select>
     <select id="f-type" onchange="render()">
       <option value="">전체 타입</option>
-      <option value="THK">THK</option>
-      <option value="TIME">TIME</option>
-      <option value="DEFECT">DEFECT</option>
-      <option value="ETC">기타</option>
+      {% for v, l in type_options %}<option value="{{ v }}">{{ l }}</option>
+      {% endfor %}
     </select>
     <input id="f-text" type="text" placeholder="파라미터 검색" oninput="render()">
     <span class="run-info" id="cnt-info"></span>
@@ -408,7 +407,8 @@ function sparkline(r) {
    테이블
    ══════════════════════════════════════════════════ */
 function statusBadge(st) {
-  const m = {'이상': 'b-bad', '주의': 'b-warn', '정상': 'b-good', '기준없음': 'b-none'};
+  const m = {'이상': 'b-bad', '주의': 'b-warn', '정상': 'b-good',
+             '기준없음': 'b-none', '데이터없음': 'b-none', '참고': 'b-none'};
   return `<span class="badge ${m[st] || 'b-none'}">${esc(st)}</span>`;
 }
 
@@ -417,8 +417,13 @@ function filtered() {
   const fl = document.getElementById('f-lot').value;
   const ft = document.getElementById('f-type').value;
   const fx = (document.getElementById('f-text').value || '').trim().toUpperCase();
+  // '데이터없음' 카드는 판정 불가 항목 전체(기준없음 포함)를 모아 보여준다
+  const stOk = r => !filterStatus
+    || (filterStatus === '데이터없음'
+        ? ['데이터없음', '기준없음', '참고'].includes(r.status)
+        : r.status === filterStatus);
   return allResults.filter(r =>
-    (!filterStatus || r.status === filterStatus) &&
+    stOk(r) &&
     (!fo || r.oper_id === fo) &&
     (!fl || String(r.lot_cd) === fl) &&
     (!ft || (r.ptype || 'ETC') === ft) &&
@@ -427,8 +432,13 @@ function filtered() {
 
 function render() {
   // 요약 카드
-  const cnt = {'이상': 0, '주의': 0, '정상': 0};
+  //   '데이터없음' 은 점검은 했지만 값이 없어 판정 불가한 항목.
+  //   숨기면 '대상엔 있는데 결과에 없다' 가 되므로 카드로 드러낸다.
+  const cnt = {'이상': 0, '주의': 0, '정상': 0,
+               '데이터없음': 0, '기준없음': 0, '참고': 0};
   allResults.forEach(r => { if (cnt[r.status] !== undefined) cnt[r.status]++; });
+  // 판정 제외 = 값이 없거나(데이터없음/기준없음) 규칙이 없는 것(참고: 소모품)
+  const noData = cnt['데이터없음'] + cnt['기준없음'] + cnt['참고'];
   document.getElementById('cards').innerHTML = `
     <div class="card all  ${filterStatus === '' ? 'on' : ''}" onclick="setStatus('')">
       <div class="n">${allResults.length}</div><div class="l">전체</div></div>
@@ -437,7 +447,9 @@ function render() {
     <div class="card warn ${filterStatus === '주의' ? 'on' : ''}" onclick="setStatus('주의')">
       <div class="n">${cnt['주의']}</div><div class="l">주의</div></div>
     <div class="card good ${filterStatus === '정상' ? 'on' : ''}" onclick="setStatus('정상')">
-      <div class="n">${cnt['정상']}</div><div class="l">정상</div></div>`;
+      <div class="n">${cnt['정상']}</div><div class="l">정상</div></div>
+    <div class="card none ${filterStatus === '데이터없음' ? 'on' : ''}" onclick="setStatus('데이터없음')">
+      <div class="n">${noData}</div><div class="l">판정제외</div></div>`;
 
   const rows = filtered();
   document.getElementById('cnt-info').textContent = `${rows.length}건 표시`;
