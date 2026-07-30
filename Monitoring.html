@@ -27,10 +27,18 @@
   --mn-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
              'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
   --mn-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
+  /* 반경 — 분석 페이지(analysis.html)와 같은 값으로 유지 */
+  --r-sm: 10px;
+  --r-md: 12px;
+  --r-lg: 16px;
   --bad:  #dc2626;
   --warn: #f59e0b;
   --good: #16a34a;
   --none: #94a3b8;
+}
+/* 페이지 안의 입력 요소 폰트를 전부 통일 (브라우저 기본 폰트 방지) */
+.mn-page, .mn-page input, .mn-page select, .mn-page button, .mn-page table {
+  font-family: var(--mn-font);
 }
 .mn-page { padding: 26px 30px 80px; font-family: var(--mn-font); }
 .mn-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
@@ -39,10 +47,10 @@
 
 /* ── 실행 바 ─────────────────────────────────── */
 .run-bar { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: 16px; padding: 16px 18px; display: flex; align-items: center;
+  border-radius: var(--r-lg); padding: 16px 18px; display: flex; align-items: center;
   gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
 .btn-run { padding: 11px 30px; background: var(--accent); border: none;
-  border-radius: 12px; color: #000; font-size: 13px; font-weight: 800;
+  border-radius: var(--r-md); color: #000; font-size: 13px; font-weight: 800;
   cursor: pointer; transition: opacity .15s; }
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
@@ -56,7 +64,7 @@
 /* ── 요약 카드 ───────────────────────────────── */
 .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .card { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: 14px; padding: 13px 18px; min-width: 110px; cursor: pointer;
+  border-radius: var(--r-lg); padding: 13px 18px; min-width: 110px; cursor: pointer;
   transition: border-color .15s; }
 .card:hover { border-color: var(--tx-muted); }
 .card.on { border-color: var(--accent); }
@@ -69,17 +77,35 @@
 .card.all  .n { color: var(--tx-1); }
 
 /* ── 필터 ────────────────────────────────────── */
+/* 네이티브 select 은 브라우저 기본 화살표·각진 모서리가 나와 전체 톤에서
+   튄다. 분석 페이지의 검색형 드롭박스(.ss-input)와 같은 모양으로 맞춘다. */
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
   align-items: center; }
 .filters select, .filters input {
   font-family: var(--mn-font); font-size: 12px; font-weight: 600;
-  color: var(--tx-1); background: var(--bg-2); border: 1px solid var(--bd);
-  border-radius: 10px; padding: 7px 11px; outline: none; }
-.filters input { min-width: 190px; }
+  color: var(--tx-1); background-color: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 8px 12px; outline: none; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.filters select {
+  appearance: none; -webkit-appearance: none; -moz-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 10px center;
+  background-size: 11px;
+  padding-right: 30px;
+}
+.filters input { min-width: 190px; cursor: text; }
+.filters input::placeholder { color: var(--tx-muted); font-weight: 600; }
+.filters select:hover, .filters input:hover { border-color: var(--tx-muted); }
+.filters select:focus, .filters input:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
+/* 드롭 목록 자체는 브라우저가 그리므로 색만 맞춘다 */
+.filters select option { background: var(--bg-3); color: var(--tx-1); }
 
 /* ── 테이블 ──────────────────────────────────── */
 .tbl-wrap { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: 16px; overflow: hidden; }
+  border-radius: var(--r-lg); overflow: hidden; }
 table.mn { width: 100%; border-collapse: collapse; }
 table.mn th { font-size: 11px; font-weight: 800; color: var(--tx-muted);
   letter-spacing: .03em; text-align: left; padding: 11px 12px;
@@ -140,7 +166,8 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
   <div class="cards" id="cards"></div>
 
   <div class="filters">
-    <select id="f-oper" onchange="render()"><option value="">전체 공정</option></select>
+    <select id="f-oper" onchange="onOperFilter()"><option value="">전체 공정</option></select>
+    <select id="f-lot" onchange="render()"><option value="">전체 LOT_CD</option></select>
     <select id="f-type" onchange="render()">
       <option value="">전체 타입</option>
       <option value="THK">THK</option>
@@ -257,14 +284,39 @@ async function loadSaved() {
 }
 
 function buildFilters() {
-  const sel = document.getElementById('f-oper');
-  const cur = sel.value;
-  const seen = new Map();
-  allResults.forEach(r => seen.set(r.oper_id, r.oper_label || r.oper_id));
-  sel.innerHTML = '<option value="">전체 공정</option>' +
-    [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]))
+  // 공정
+  const so = document.getElementById('f-oper');
+  const curO = so.value;
+  const opers = new Map();
+  allResults.forEach(r => opers.set(r.oper_id, r.oper_label || r.oper_id));
+  so.innerHTML = '<option value="">전체 공정</option>' +
+    [...opers.entries()].sort((a, b) => a[1].localeCompare(b[1]))
       .map(([id, lb]) => `<option value="${esc(id)}">${esc(lb)}</option>`).join('');
-  sel.value = cur;
+  so.value = opers.has(curO) ? curO : '';
+
+  buildLotFilter();
+}
+
+/* LOT_CD 는 선택된 공정에 있는 것만 보여준다.
+   공정마다 도는 device 가 다르므로 전체를 늘어놓으면 빈 결과만 나온다. */
+function buildLotFilter() {
+  const sl = document.getElementById('f-lot');
+  const curL = sl.value;
+  const oper = document.getElementById('f-oper').value;
+
+  const lots = [...new Set(
+    allResults.filter(r => !oper || r.oper_id === oper)
+              .map(r => r.lot_cd).filter(v => v !== null && v !== undefined)
+  )].map(String).sort();
+
+  sl.innerHTML = '<option value="">전체 LOT_CD</option>' +
+    lots.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  sl.value = lots.includes(curL) ? curL : '';
+}
+
+function onOperFilter() {
+  buildLotFilter();          // 공정이 바뀌면 LOT_CD 목록도 갱신
+  render();
 }
 
 /* ══════════════════════════════════════════════════
@@ -323,11 +375,13 @@ function statusBadge(st) {
 
 function filtered() {
   const fo = document.getElementById('f-oper').value;
+  const fl = document.getElementById('f-lot').value;
   const ft = document.getElementById('f-type').value;
   const fx = (document.getElementById('f-text').value || '').trim().toUpperCase();
   return allResults.filter(r =>
     (!filterStatus || r.status === filterStatus) &&
     (!fo || r.oper_id === fo) &&
+    (!fl || String(r.lot_cd) === fl) &&
     (!ft || (r.ptype || 'ETC') === ft) &&
     (!fx || (r.param || '').toUpperCase().includes(fx)));
 }
