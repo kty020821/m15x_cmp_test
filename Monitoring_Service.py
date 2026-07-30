@@ -5,7 +5,8 @@ Inline Monitoring — 전 공정 자동 점검
 
   적재된 cmp_analysis_* (PostgreSQL) 만 읽는다.
   Lake/구닥스에 접근하지 않으므로 웹 프로세스에서 안전하게 돈다.
-  구닥스 기준정보는 배치가 저장한 스냅샷(cmp_gooddocs_config)을 읽는다.
+  기준정보는 셋업 페이지가 관리하는 cmp_cfg_param 을 읽는다
+  (구닥스가 불안정해 자체 DB 로 옮김. 예전 스냅샷도 호환으로 읽는다).
 
 ────────────────────────────────────────────────────────────
 점검 단위
@@ -27,13 +28,13 @@ Inline Monitoring — 전 공정 자동 점검
 Defect 파라미터는 위 규칙을 쓰지 않는다
   카운트 데이터라 0이 많고 분포가 한쪽으로 쏠려 σ 판정이 무의미하다.
   중앙값 배수 · 상위 분위수 초과 · 0→검출 전환으로 본다.
-  구분은 구닥스 PARAM_TYPE (없으면 이름 규칙 폴백).
+  구분은 기준정보의 PARAM_TYPE (없으면 이름 규칙 폴백).
 
 점검 대상 파라미터
-  1순위  구닥스 스냅샷(cmp_gooddocs_config)에 등록된 그 공정의 PARAM 전부
+  1순위  기준정보(cmp_cfg_param)에 등록된 그 공정의 PARAM 전부
          + 챔버 짝 자동 확장 (PA↔PC, PB↔PD, PL↔PR)
-         구닥스에는 점검할 항목만 넣고 관리하므로 Y/N 표시가 필요 없다.
-         INLINE_YN 컬럼이 있으면 '명시적으로 N' 인 것만 제외한다.
+         기준정보에는 점검할 항목만 넣고 관리하므로 Y/N 표시가 필요 없다.
+         use_yn 이 'N' 인 것만 제외한다.
   폴백   스냅샷이 없으면 계측값 숫자 컬럼 전부
          (메타·파생 _OFFSET/_FORMULA 제외, MONITOR_ALL_NUMERIC=False 면
           THK/TIME/DEFECT 로 분류된 것만)
@@ -53,6 +54,8 @@ from datetime import datetime
 
 from django.db import connections
 
+from . import param_types as pt
+
 # ══ 판정 기준 — 조정은 여기서만 ═══════════════════════════
 SIGMA_WARN   = 1.0     # 평균 이탈 주의
 SIGMA_ALERT  = 2.0     # 평균 이탈 이상
@@ -65,6 +68,12 @@ DRIFT_DAYS   = 7       # 드리프트 판정 기간
 DRIFT_SIGMA  = 1.0     # 기간 동안 σ 단위로 이만큼 이동하면 드리프트
 MIN_N        = 5       # 최근일 웨이퍼가 이보다 적으면 신뢰도 낮음
 
+# 소모품(PART) 판정 여부
+#   Pad/Head/Disk 사용량은 누적되며 단조 증가하고 PM 에서 리셋된다.
+#   '30일 평균 대비 σ' 로 보면 매일 이탈로 잡혀 판정이 무의미하므로
+#   기본은 참고 표시만 한다. 필요하면 True 로 켠다.
+JUDGE_PART   = False
+
 # Defect 전용
 DEF_MULT_WARN  = 2.0   # 최근 구간 평균이 30일 중앙값의 몇 배면 주의
 DEF_MULT_ALERT = 3.0   # 이상
@@ -72,7 +81,7 @@ DEF_ZERO_BASE  = 0.5   # 기준 중앙값이 이 이하면 '평소 거의 없음
 DEF_WINDOW     = 7     # ★ defect 은 '최근일' 이 아니라 최근 N일로 묶는다
 DEF_MIN_N      = 2     # defect 은 검사 장수가 원래 적다 (계측용 MIN_N 과 별도)
 
-CONFIG_TABLE  = 'cmp_gooddocs_config'   # 배치가 저장하는 구닥스 스냅샷
+CONFIG_TABLE  = 'cmp_gooddocs_config'   # 예전 구닥스 스냅샷 (이관 전 호환)
 RESULT_TABLE  = 'cmp_monitor_result'    # 최근 1회 점검 결과
 HISTORY_TABLE = 'cmp_monitor_history'   # 연속일수 계산용 이력
 
@@ -80,22 +89,16 @@ HISTORY_TABLE = 'cmp_monitor_history'   # 연속일수 계산용 이력
 #  analysis_service 는 사내 모듈 import 가 있어 웹에서 못 부르므로 복사)
 CHAMBER_TWINS = [('PA', 'PC'), ('PB', 'PD'), ('PL', 'PR')]
 
-# 이름 규칙 폴백 (구닥스에 PARAM_TYPE 이 아직 없을 때)
-#   ※ DEFECT 규칙을 넓게 잡으면 PADCNT/DISKCNT 같은 소모품 카운터가
-#     오탐된다. defect 임이 분명한 어휘만 쓰고, 나머지는 구닥스
-#     PARAM_TYPE 으로 지정하게 둔다.
-#   ※ REV(제거량 계열)도 THK 와 같은 범주로 본다 — 두께에서 파생된
-#     계측값이라 판정 규칙(평균±σ)이 동일하다.
-RE_THK    = re.compile(r'THK|OCD|REV')
-RE_TIME   = re.compile(r'\d_?TIME|TIME_?\d')
-RE_DEFECT = re.compile(r'DEFECT|SCRATCH|PARTICLE|RESIDUE|^DEF_|_DEF_|_DEF$')
+# ★ 타입 분류 규칙은 param_types.py 가 단일 소재지다.
+#   예전에는 여기에 정규식(RE_THK/RE_TIME/RE_DEFECT)을 따로 두어
+#   기준정보 셋업 쪽과 어긋났다. 규칙 수정은 param_types.py 에서만.
 
 # ── 폴백 대상 범위 ────────────────────────────────────────
 #   True  : 계측값으로 보이는 숫자 컬럼 전부 (메타·파생 제외)
 #   False : THK/TIME/DEFECT 로 분류된 것만 (좁은 예전 동작)
 #
-#   구닥스 스냅샷이 있으면 이 설정과 무관하게 구닥스 목록이 우선한다.
-#   스냅샷이 없을 때 "이름에 THK/TIME 이 든 것만 점검된다" 는 문제를
+#   기준정보가 있으면 이 설정과 무관하게 기준정보 목록이 우선한다.
+#   기준정보가 없을 때 "이름에 THK/TIME 이 든 것만 점검된다" 는 문제를
 #   막기 위한 것이다.
 MONITOR_ALL_NUMERIC = True
 
@@ -159,31 +162,38 @@ def _expand_twins(params):
 
 
 def _type_from_name(param):
-    """이름 규칙 폴백 — DEFECT 를 먼저 본다 (DEF_THK 같은 이름 대비)"""
-    p = param.upper()
-    if RE_DEFECT.search(p):
-        return 'DEFECT'
-    if RE_THK.search(p):
-        return 'THK'
-    if RE_TIME.search(p):
-        return 'TIME'
-    return 'ETC'
+    """이름으로 타입 판정 — 규칙은 param_types.classify 에 있다"""
+    return pt.classify(param)
 
 
 def _config_map(cur, oper_id):
     """
-    구닥스 스냅샷에서 {PARAM: PARAM_TYPE}.
+    기준정보에서 {PARAM: PARAM_TYPE}.
 
-    ★ 구닥스 기준정보에 등록된 파라미터는 전부 점검 대상이다.
-      구닥스에는 점검할 항목만 넣고 관리하므로 별도 Y/N 표시가 필요 없다.
-      (점검 시간도 짧아 전수 점검이 문제되지 않는다)
+    ★ 1순위는 셋업 페이지가 관리하는 cmp_cfg_param 이다.
+      구닥스가 불안정해 기준정보를 자체 DB 로 옮겼고, 그쪽이 원본이다.
+      2순위는 예전 구닥스 스냅샷(cmp_gooddocs_config) — 이관 전 호환용.
 
-      INLINE_YN 컬럼이 있으면 '명시적으로 N' 인 것만 제외한다 —
-      나중에 일부만 빼고 싶을 때를 위한 선택적 장치다.
-      값이 비어 있으면 포함한다.
+    ★ 등록된 파라미터는 전부 점검 대상이다.
+      기준정보에는 점검할 항목만 넣고 관리하므로 별도 Y/N 표시가 없어도 된다.
+      use_yn / INLINE_YN 이 있으면 '명시적으로 N' 인 것만 제외한다.
 
-    스냅샷이나 PARAM/OPER_ID 컬럼이 없으면 None (→ 이름 규칙 폴백)
+    어느 쪽에서도 못 찾으면 None (→ 이름 규칙 폴백)
     """
+    # ── 1순위: 셋업 페이지 기준정보 ──────────────────────
+    if _exists(cur, 'cmp_cfg_param'):
+        cur.execute('''
+            SELECT DISTINCT upper(param), upper(COALESCE(param_type, ''))
+            FROM cmp_cfg_param
+            WHERE upper(oper_id) = %s
+              AND COALESCE(param, '') <> ''
+              AND upper(COALESCE(use_yn, 'Y')) <> 'N'
+        ''', [str(oper_id).upper()])
+        got = {r[0]: (r[1] or '') for r in cur.fetchall() if r[0]}
+        if got:
+            return got
+
+    # ── 2순위: 구닥스 스냅샷 (이관 전 호환) ───────────────
     if not _exists(cur, CONFIG_TABLE):
         return None
     cols = {c.upper() for c, _ in _cols(cur, CONFIG_TABLE)}
@@ -191,7 +201,6 @@ def _config_map(cur, oper_id):
         return None
 
     type_sel = '"PARAM_TYPE"' if 'PARAM_TYPE' in cols else "''"
-    # 명시적 제외만 걸러낸다 (빈 값 = 포함)
     excl = ("""AND upper(COALESCE("INLINE_YN", '')) """
             """NOT IN ('N','NO','0','X','FALSE')"""
             if 'INLINE_YN' in cols else '')
@@ -209,10 +218,10 @@ def _config_map(cur, oper_id):
 def monitored_params(cur, table, oper_id):
     """
     점검할 (파라미터, 타입) 목록과 출처.
-    반환: ([(param, type), ...], '구닥스' | '기본규칙')
+    반환: ([(param, type), ...], '기준정보' | '기본규칙')
 
     선정 순서
-      1) 구닥스 스냅샷에 그 공정 PARAM 이 있으면 그것 전부 (+ 챔버 짝 확장)
+      1) 기준정보에 그 공정 PARAM 이 있으면 그것 전부 (+ 챔버 짝 확장)
       2) 없으면 폴백 — MONITOR_ALL_NUMERIC 에 따라
          계측값 숫자 컬럼 전부 / THK·TIME·DEFECT 만
 
@@ -232,10 +241,10 @@ def monitored_params(cur, table, oper_id):
                     if src[1:] == p[1:] or src[2:] == p[2:]:
                         t = st
                         break
-            expanded[p] = t or _type_from_name(p)
+            expanded[p] = pt.resolve(p, t)
         out = [(p, t) for p, t in expanded.items() if p in numeric]
         if out:
-            return sorted(out), '구닥스'
+            return sorted(out), '기준정보'
 
     # ── 폴백 ─────────────────────────────────────────────
     #   스냅샷이 없을 때. 메타/파생 컬럼만 걷어내고 계측값은 전부 본다.
@@ -246,7 +255,7 @@ def monitored_params(cur, table, oper_id):
         if c in META_COLS or RE_DERIVED.search(c):
             continue
         t = _type_from_name(c)
-        if MONITOR_ALL_NUMERIC or t in ('THK', 'TIME', 'DEFECT'):
+        if MONITOR_ALL_NUMERIC or t in ('THK', 'TIME', 'PRESSURE', 'DEFECT'):
             out.append((c, t))
     return out, '기본규칙'
 
@@ -260,10 +269,9 @@ def explain_params(oper_id):
       >>> ms.explain_params('공정ID')
 
     ★ 가장 흔한 오해
-      구닥스 스냅샷(cmp_gooddocs_config)이 있으면 그 공정에 등록된
-      파라미터가 전부 점검 대상이 되고, 이름 규칙(RE_THK 등)은 아예
-      타지 않는다. 그래서 대상에 넣거나 빼려면 구닥스 기준정보를 고치고
-      배치를 다시 돌려 스냅샷을 갱신해야 한다.
+      기준정보(cmp_cfg_param)에 그 공정이 등록돼 있으면 거기 파라미터가
+      전부 점검 대상이 되고, 이름 규칙(RE_THK 등)은 아예 타지 않는다.
+      대상을 바꾸려면 셋업 페이지에서 기준정보를 고치면 즉시 반영된다.
     """
     table = _table(oper_id)
     with _conn().cursor() as cur:
@@ -284,28 +292,24 @@ def explain_params(oper_id):
         print(f'  테이블 숫자 컬럼 {len(numeric)}개 / 점검 대상 {len(chosen)}개')
 
         if source == '기본규칙':
-            snap = _exists(cur, CONFIG_TABLE)
-            print('\n  ※ 구닥스 목록이 아니라 이름 규칙으로 고르고 있습니다.')
+            snap = _exists(cur, 'cmp_cfg_param') or _exists(cur, CONFIG_TABLE)
+            print('\n  ※ 기준정보가 아니라 이름 규칙으로 고르고 있습니다.')
             if not snap:
-                print(f'    원인: 스냅샷 테이블 {CONFIG_TABLE} 가 없습니다.')
-                print('    해결: 배치 서버에서 아래를 한 번 실행하세요.')
-                print('      from equipment import analysis_service as svc')
-                print('      svc.save_config_snapshot(svc.get_config())')
+                print('    원인: 기준정보 테이블(cmp_cfg_param)이 없습니다.')
+                print('    해결: 셋업 페이지(/monitor 옆 기준정보 셋업)에서')
+                print('          이 공정을 등록하세요.')
             else:
-                print(f'    원인: {CONFIG_TABLE} 는 있으나 이 공정의 PARAM 을')
-                print('          찾지 못했습니다. OPER_ID 표기가 일치하는지,')
-                print('          get_config() 의 dropna 로 행이 빠지지 않았는지')
-                print('          확인하세요.')
+                print('    원인: 기준정보는 있으나 이 공정의 PARAM 을 찾지')
+                print('          못했습니다. OPER_ID 표기가 일치하는지 확인하세요.')
             print(f'    현재 범위: MONITOR_ALL_NUMERIC='
                   f'{MONITOR_ALL_NUMERIC} '
                   f'({"계측값 전부" if MONITOR_ALL_NUMERIC else "THK/TIME/DEFECT만"})')
 
-        if source == '구닥스':
-            print('\n  ※ 구닥스 스냅샷에 등록된 파라미터가 전부 대상이며,')
-            print('    이름 규칙(폴백)은 사용되지 않습니다. 대상을 바꾸려면')
-            print('    구닥스 기준정보를 고치고 배치를 다시 돌려 스냅샷을')
-            print('    갱신해야 합니다.')
-            print(f'\n  구닥스 등록 {len(conf)}개:')
+        if source == '기준정보':
+            print('\n  ※ 기준정보에 등록된 파라미터가 전부 대상이며,')
+            print('    이름 규칙(폴백)은 사용되지 않습니다.')
+            print('    대상을 바꾸려면 셋업 페이지에서 고치면 즉시 반영됩니다.')
+            print(f'\n  기준정보 등록 {len(conf)}개:')
             for p in sorted(conf):
                 state = 'OK' if p in numeric else '← 테이블에 없거나 숫자 아님'
                 print(f'    {p:<34}{(conf[p] or "(타입미지정)"):<14}{state}')
@@ -319,8 +323,8 @@ def explain_params(oper_id):
             print(f'\n  제외된 숫자 컬럼 {len(skipped)}개:')
             for p in skipped:
                 t = _type_from_name(p)
-                if source == '구닥스':
-                    why = '구닥스 미등록'
+                if source == '기준정보':
+                    why = '기준정보 미등록'
                 elif p in META_COLS:
                     why = '메타 컬럼'
                 elif RE_DERIVED.search(p):
@@ -382,6 +386,30 @@ def _drift(series, base_std):
 # ══════════════════════════════════════════════════════════
 # 파라미터 1건 점검
 # ══════════════════════════════════════════════════════════
+def _no_data(lot_cd, param, ptype, why):
+    """
+    판정할 데이터가 없을 때 돌려주는 행.
+
+    ★ 예전에는 None 을 반환해 결과 테이블에서 행이 통째로 사라졌다.
+      그러면 '점검 대상에는 있는데 결과에는 없다' 가 되어 원인을 알 수 없다.
+      (특히 값이 전부 NULL 인 컬럼도 숫자 타입이면 대상에 포함되므로
+       이 경우가 드물지 않다)
+      상태로 드러내서 적재 쪽 문제임을 바로 알 수 있게 한다.
+    """
+    return {
+        'oper_id': None, 'lot_cd': lot_cd, 'param': param, 'ptype': ptype,
+        'day': None, 'day_from': None, 'span': None,
+        'day_stat': {'n': 0, 'avg': None, 'std': None,
+                     'min': None, 'max': None},
+        'base_stat': {'n': 0, 'avg': None, 'std': None, 'min': None,
+                      'max': None, 'med': None, 'p95': None},
+        'low_n': True, 'sigma': None, 'out_cnt': 0,
+        'spread': None, 'drift': None, 'eqp': [], 'series': [],
+        'checks': [], 'status': '데이터없음', 'reasons': [why],
+        'severity': 0,
+    }
+
+
 def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     cur.execute(f'''
         SELECT MAX("DATE"::date) FROM {table}
@@ -389,7 +417,9 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     ''', [lot_cd])
     day = cur.fetchone()[0]
     if day is None:
-        return None
+        return _no_data(lot_cd, param, ptype,
+                        f'이 LOT_CD 에 {param} 값이 하나도 없음 — '
+                        f'적재 단계에서 값이 들어오지 않았는지 확인')
 
     # ── 판정 구간 ────────────────────────────────────────
     # 계측값은 '최근일' 하루.
@@ -426,7 +456,9 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     ''', [lot_cd, d_from, day])
     d_n, d_avg, d_std, d_min, d_max = cur.fetchone()
     if not d_n:
-        return None
+        return _no_data(lot_cd, param, ptype,
+                        f'{span_label}({d_from} ~ {day}) 에 값이 없음 — '
+                        f'해당 기간 측정이 없었을 수 있음')
 
     r = {
         'oper_id': None, 'lot_cd': lot_cd, 'param': param, 'ptype': ptype,
@@ -449,6 +481,20 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
 
     level = 0          # 0 정상 / 1 주의 / 2 이상
     reasons, checks = [], []
+
+    # ── 소모품(PART) 은 판정하지 않는다 ───────────────────
+    #   사용량이 누적되며 단조 증가하고 PM 에서 리셋되므로
+    #   '30일 평균 대비 σ' 로 보면 매일 이탈로 잡힌다.
+    #   추이는 스파크라인과 상세 차트로 볼 수 있게 값은 그대로 담는다.
+    if ptype == 'PART' and not JUDGE_PART:
+        if b_std and float(b_std) > 0:
+            r['sigma'] = round((float(d_avg) - float(b_avg)) / float(b_std), 2)
+        r['status'] = '참고'
+        r['checks'] = []
+        r['reasons'] = ['소모품 계열 — 값이 누적되고 PM 에서 리셋되므로 '
+                        'σ 판정을 적용하지 않습니다 (추이만 참고)']
+        r['severity'] = 0
+        return r
 
     # ── Defect 은 별도 규칙 ───────────────────────────────
     if ptype == 'DEFECT':
