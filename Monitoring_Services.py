@@ -731,6 +731,36 @@ def _attach_streak(results):
             r['streak'] = streak
 
 
+def clear_results(oper_id=None, with_history=False):
+    """
+    저장된 점검 결과를 지운다.
+
+      oper_id       주면 그 공정만, 생략하면 전체
+      with_history  True 면 연속일수 계산용 이력까지 삭제
+                    (연속일수를 다시 0부터 세게 된다)
+
+    화면은 페이지를 열 때 저장된 결과를 불러오므로, 점검 대상 규칙을
+    바꾼 뒤에는 옛 결과가 남아 혼동을 준다. 그때 초기화한다.
+    """
+    with _conn().cursor() as cur:
+        _ensure_tables(cur)
+        if oper_id:
+            cur.execute(f'DELETE FROM {RESULT_TABLE} WHERE oper_id = %s',
+                        [oper_id])
+            n = cur.rowcount
+            if with_history:
+                cur.execute(f'DELETE FROM {HISTORY_TABLE} WHERE oper_id = %s',
+                            [oper_id])
+        else:
+            cur.execute(f'DELETE FROM {RESULT_TABLE}')
+            n = cur.rowcount
+            if with_history:
+                cur.execute(f'DELETE FROM {HISTORY_TABLE}')
+    print(f'[monitor] 결과 {n:,}건 삭제'
+          f'{" (이력 포함)" if with_history else ""}')
+    return n
+
+
 def load_results():
     """저장된 최근 점검 결과 전체"""
     with _conn().cursor() as cur:
