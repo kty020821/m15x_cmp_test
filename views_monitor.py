@@ -33,6 +33,7 @@ from django.db import connections
 
 from . import tech_map
 from . import monitor_service as ms
+from . import param_types as pt
 
 
 def _fail(msg, payload=None, exc=None):
@@ -50,7 +51,9 @@ def _safe(v):
 
 # ══════════════════════════════════════════════════════════
 def monitor_page(request):
-    return render(request, 'equipment/monitor.html', {})
+    # 타입 필터 항목은 param_types.py 에서 온다 (분류 규칙과 같은 소재지)
+    return render(request, 'equipment/monitor.html',
+                  {'type_options': pt.options()})
 
 
 @csrf_exempt
