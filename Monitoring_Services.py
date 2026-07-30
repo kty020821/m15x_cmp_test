@@ -29,6 +29,15 @@ Defect 파라미터는 위 규칙을 쓰지 않는다
   중앙값 배수 · 상위 분위수 초과 · 0→검출 전환으로 본다.
   구분은 구닥스 PARAM_TYPE (없으면 이름 규칙 폴백).
 
+점검 대상 파라미터
+  1순위  구닥스 스냅샷(cmp_gooddocs_config)에 등록된 그 공정의 PARAM 전부
+         + 챔버 짝 자동 확장 (PA↔PC, PB↔PD, PL↔PR)
+         구닥스에는 점검할 항목만 넣고 관리하므로 Y/N 표시가 필요 없다.
+         INLINE_YN 컬럼이 있으면 '명시적으로 N' 인 것만 제외한다.
+  폴백   스냅샷이 없으면 이름 규칙 (THK/OCD/REV, 숫자 붙은 TIME, defect 어휘)
+
+  어느 쪽이 적용됐고 무엇이 왜 빠졌는지는 explain_params(oper_id) 로 확인.
+
 출력
   심각도 점수(severity)로 정렬 — 전 공정이면 결과가 수백 건이라
   정렬이 없으면 결국 아무도 안 본다.
@@ -140,21 +149,35 @@ def _type_from_name(param):
 
 def _config_map(cur, oper_id):
     """
-    구닥스 스냅샷에서 {PARAM: PARAM_TYPE} — INLINE_YN 이 Y 인 것만.
-    스냅샷/컬럼이 없으면 None (→ 이름 규칙 폴백)
+    구닥스 스냅샷에서 {PARAM: PARAM_TYPE}.
+
+    ★ 구닥스 기준정보에 등록된 파라미터는 전부 점검 대상이다.
+      구닥스에는 점검할 항목만 넣고 관리하므로 별도 Y/N 표시가 필요 없다.
+      (점검 시간도 짧아 전수 점검이 문제되지 않는다)
+
+      INLINE_YN 컬럼이 있으면 '명시적으로 N' 인 것만 제외한다 —
+      나중에 일부만 빼고 싶을 때를 위한 선택적 장치다.
+      값이 비어 있으면 포함한다.
+
+    스냅샷이나 PARAM/OPER_ID 컬럼이 없으면 None (→ 이름 규칙 폴백)
     """
     if not _exists(cur, CONFIG_TABLE):
         return None
     cols = {c.upper() for c, _ in _cols(cur, CONFIG_TABLE)}
-    if 'PARAM' not in cols or 'INLINE_YN' not in cols:
+    if 'PARAM' not in cols or 'OPER_ID' not in cols:
         return None
 
     type_sel = '"PARAM_TYPE"' if 'PARAM_TYPE' in cols else "''"
+    # 명시적 제외만 걸러낸다 (빈 값 = 포함)
+    excl = ("""AND upper(COALESCE("INLINE_YN", '')) """
+            """NOT IN ('N','NO','0','X','FALSE')"""
+            if 'INLINE_YN' in cols else '')
     cur.execute(f'''
         SELECT DISTINCT upper("PARAM"), upper(COALESCE({type_sel}, ''))
         FROM {CONFIG_TABLE}
         WHERE upper("OPER_ID") = %s
-          AND upper(COALESCE("INLINE_YN", '')) IN ('Y','YES','1','O','TRUE')
+          AND COALESCE("PARAM", '') <> ''
+          {excl}
     ''', [str(oper_id).upper()])
     got = {r[0]: (r[1] or '') for r in cur.fetchall() if r[0]}
     return got or None
@@ -191,6 +214,75 @@ def monitored_params(cur, table, oper_id):
         if t in ('THK', 'TIME', 'DEFECT'):
             out.append((c, t))
     return out, '기본규칙'
+
+
+def explain_params(oper_id):
+    """
+    이 공정에서 무엇이 점검 대상으로 잡히고 무엇이 왜 빠졌는지 출력한다.
+
+      python manage.py shell
+      >>> from equipment import monitor_service as ms
+      >>> ms.explain_params('공정ID')
+
+    ★ 가장 흔한 오해
+      구닥스 스냅샷(cmp_gooddocs_config)이 있으면 그 공정에 등록된
+      파라미터가 전부 점검 대상이 되고, 이름 규칙(RE_THK 등)은 아예
+      타지 않는다. 그래서 대상에 넣거나 빼려면 구닥스 기준정보를 고치고
+      배치를 다시 돌려 스냅샷을 갱신해야 한다.
+    """
+    table = _table(oper_id)
+    with _conn().cursor() as cur:
+        if not _exists(cur, table):
+            print(f'{table} 없음 — 적재되지 않은 공정입니다.')
+            return
+
+        cols    = _cols(cur, table)
+        numeric = {c.upper() for c, d in cols if d.lower() in NUMERIC_TYPES}
+        nonnum  = {c.upper(): d for c, d in cols
+                   if d.lower() not in NUMERIC_TYPES}
+
+        conf = _config_map(cur, oper_id)
+        params, source = monitored_params(cur, table, oper_id)
+        chosen = {p for p, _ in params}
+
+        print(f'[{oper_id}] 대상 선정 방식: {source}')
+        print(f'  테이블 숫자 컬럼 {len(numeric)}개 / 점검 대상 {len(chosen)}개')
+
+        if source == '구닥스':
+            print('\n  ※ 구닥스 스냅샷에 등록된 파라미터가 전부 대상이며,')
+            print('    이름 규칙(폴백)은 사용되지 않습니다. 대상을 바꾸려면')
+            print('    구닥스 기준정보를 고치고 배치를 다시 돌려 스냅샷을')
+            print('    갱신해야 합니다.')
+            print(f'\n  구닥스 등록 {len(conf)}개:')
+            for p in sorted(conf):
+                state = 'OK' if p in numeric else '← 테이블에 없거나 숫자 아님'
+                print(f'    {p:<34}{(conf[p] or "(타입미지정)"):<14}{state}')
+
+        print(f'\n  점검 대상 {len(params)}개:')
+        for p, t in params:
+            print(f'    {p:<34}{t}')
+
+        skipped = sorted(numeric - chosen)
+        if skipped:
+            print(f'\n  제외된 숫자 컬럼 {len(skipped)}개:')
+            for p in skipped:
+                t = _type_from_name(p)
+                why = ('구닥스 미등록' if source == '구닥스'
+                       else f'이름 규칙상 {t} → 대상 아님')
+                print(f'    {p:<34}{t:<10}{why}')
+
+        # 계측값처럼 보이는데 타입이 어긋나 후보에서 빠진 컬럼
+        suspicious = sorted(c for c in nonnum
+                            if re.search(r'THK|OCD|REV|TIME|DEF', c))
+        if suspicious:
+            print(f'\n  ★ 계측값처럼 보이는데 숫자 타입이 아닌 컬럼 '
+                  f'{len(suspicious)}개:')
+            for c in suspicious:
+                print(f'    {c:<34}{nonnum[c]}')
+            print('    → analysis_service.repair_numeric_columns() 로 복구 가능')
+
+    return {'source': source, 'chosen': sorted(chosen),
+            'config': sorted(conf) if conf else []}
 
 
 # ══════════════════════════════════════════════════════════
@@ -480,7 +572,8 @@ def run_check(oper_id, oper_label=''):
         params, source = monitored_params(cur, table, oper_id)
         out['source'] = source
         if not params:
-            out['note'] = '점검 대상 파라미터 없음 (구닥스 INLINE_YN 확인)'
+            out['note'] = ('점검 대상 파라미터 없음 — '
+                           'explain_params(oper_id) 로 원인 확인')
             return out
 
         cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {table} '
