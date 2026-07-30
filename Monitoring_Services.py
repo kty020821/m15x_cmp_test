@@ -34,7 +34,9 @@ Defect 파라미터는 위 규칙을 쓰지 않는다
          + 챔버 짝 자동 확장 (PA↔PC, PB↔PD, PL↔PR)
          구닥스에는 점검할 항목만 넣고 관리하므로 Y/N 표시가 필요 없다.
          INLINE_YN 컬럼이 있으면 '명시적으로 N' 인 것만 제외한다.
-  폴백   스냅샷이 없으면 이름 규칙 (THK/OCD/REV, 숫자 붙은 TIME, defect 어휘)
+  폴백   스냅샷이 없으면 계측값 숫자 컬럼 전부
+         (메타·파생 _OFFSET/_FORMULA 제외, MONITOR_ALL_NUMERIC=False 면
+          THK/TIME/DEFECT 로 분류된 것만)
 
   어느 쪽이 적용됐고 무엇이 왜 빠졌는지는 explain_params(oper_id) 로 확인.
 
@@ -87,6 +89,27 @@ CHAMBER_TWINS = [('PA', 'PC'), ('PB', 'PD'), ('PL', 'PR')]
 RE_THK    = re.compile(r'THK|OCD|REV')
 RE_TIME   = re.compile(r'\d_?TIME|TIME_?\d')
 RE_DEFECT = re.compile(r'DEFECT|SCRATCH|PARTICLE|RESIDUE|^DEF_|_DEF_|_DEF$')
+
+# ── 폴백 대상 범위 ────────────────────────────────────────
+#   True  : 계측값으로 보이는 숫자 컬럼 전부 (메타·파생 제외)
+#   False : THK/TIME/DEFECT 로 분류된 것만 (좁은 예전 동작)
+#
+#   구닥스 스냅샷이 있으면 이 설정과 무관하게 구닥스 목록이 우선한다.
+#   스냅샷이 없을 때 "이름에 THK/TIME 이 든 것만 점검된다" 는 문제를
+#   막기 위한 것이다.
+MONITOR_ALL_NUMERIC = True
+
+# 계측값이 아닌 식별/관리 컬럼 (views_analysis.META_COLS 와 같은 기준)
+META_COLS = {
+    'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
+    'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
+    'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
+}
+
+# 파생/보조 컬럼 — 점검해도 의미가 약하고 결과만 부풀린다
+#   _OFFSET  : APC 보정량 (원인 분석용 참고값)
+#   _FORMULA : 적용 수식 (문자열이라 보통 숫자도 아니다)
+RE_DERIVED = re.compile(r'_OFFSET$|_FORMULA$')
 
 NUMERIC_TYPES = {'smallint', 'integer', 'bigint', 'decimal',
                  'numeric', 'real', 'double precision'}
@@ -187,6 +210,13 @@ def monitored_params(cur, table, oper_id):
     """
     점검할 (파라미터, 타입) 목록과 출처.
     반환: ([(param, type), ...], '구닥스' | '기본규칙')
+
+    선정 순서
+      1) 구닥스 스냅샷에 그 공정 PARAM 이 있으면 그것 전부 (+ 챔버 짝 확장)
+      2) 없으면 폴백 — MONITOR_ALL_NUMERIC 에 따라
+         계측값 숫자 컬럼 전부 / THK·TIME·DEFECT 만
+
+    어느 쪽이 적용됐는지는 화면 '판정 방식' 과 explain_params() 로 확인.
     """
     numeric = {c.upper() for c, d in _cols(cur, table)
                if d.lower() in NUMERIC_TYPES}
@@ -207,11 +237,16 @@ def monitored_params(cur, table, oper_id):
         if out:
             return sorted(out), '구닥스'
 
-    # 폴백 — 두께 / polishing time / defect 계열만
+    # ── 폴백 ─────────────────────────────────────────────
+    #   스냅샷이 없을 때. 메타/파생 컬럼만 걷어내고 계측값은 전부 본다.
+    #   (예전에는 THK·TIME·DEFECT 로 분류된 것만 점검해서, 이름에 그
+    #    단어가 없는 계측 파라미터가 조용히 빠졌다)
     out = []
     for c in sorted(numeric):
+        if c in META_COLS or RE_DERIVED.search(c):
+            continue
         t = _type_from_name(c)
-        if t in ('THK', 'TIME', 'DEFECT'):
+        if MONITOR_ALL_NUMERIC or t in ('THK', 'TIME', 'DEFECT'):
             out.append((c, t))
     return out, '기본규칙'
 
@@ -248,6 +283,23 @@ def explain_params(oper_id):
         print(f'[{oper_id}] 대상 선정 방식: {source}')
         print(f'  테이블 숫자 컬럼 {len(numeric)}개 / 점검 대상 {len(chosen)}개')
 
+        if source == '기본규칙':
+            snap = _exists(cur, CONFIG_TABLE)
+            print('\n  ※ 구닥스 목록이 아니라 이름 규칙으로 고르고 있습니다.')
+            if not snap:
+                print(f'    원인: 스냅샷 테이블 {CONFIG_TABLE} 가 없습니다.')
+                print('    해결: 배치 서버에서 아래를 한 번 실행하세요.')
+                print('      from equipment import analysis_service as svc')
+                print('      svc.save_config_snapshot(svc.get_config())')
+            else:
+                print(f'    원인: {CONFIG_TABLE} 는 있으나 이 공정의 PARAM 을')
+                print('          찾지 못했습니다. OPER_ID 표기가 일치하는지,')
+                print('          get_config() 의 dropna 로 행이 빠지지 않았는지')
+                print('          확인하세요.')
+            print(f'    현재 범위: MONITOR_ALL_NUMERIC='
+                  f'{MONITOR_ALL_NUMERIC} '
+                  f'({"계측값 전부" if MONITOR_ALL_NUMERIC else "THK/TIME/DEFECT만"})')
+
         if source == '구닥스':
             print('\n  ※ 구닥스 스냅샷에 등록된 파라미터가 전부 대상이며,')
             print('    이름 규칙(폴백)은 사용되지 않습니다. 대상을 바꾸려면')
@@ -267,8 +319,14 @@ def explain_params(oper_id):
             print(f'\n  제외된 숫자 컬럼 {len(skipped)}개:')
             for p in skipped:
                 t = _type_from_name(p)
-                why = ('구닥스 미등록' if source == '구닥스'
-                       else f'이름 규칙상 {t} → 대상 아님')
+                if source == '구닥스':
+                    why = '구닥스 미등록'
+                elif p in META_COLS:
+                    why = '메타 컬럼'
+                elif RE_DERIVED.search(p):
+                    why = '파생 컬럼(_OFFSET/_FORMULA)'
+                else:
+                    why = f'이름 규칙상 {t} → 대상 아님'
                 print(f'    {p:<34}{t:<10}{why}')
 
         # 계측값처럼 보이는데 타입이 어긋나 후보에서 빠진 컬럼
