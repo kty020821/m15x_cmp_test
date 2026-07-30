@@ -142,6 +142,15 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
   font-size: 12px; font-weight: 700; color: var(--tx-2); margin-bottom: 12px; }
 .detail-head b { color: var(--tx-1); font-family: var(--mn-mono); }
 .detail-plot { width: 100%; height: 320px; }
+/* 색 구분 모드 토글 — 장비가 많아 색이 어지러울 때 구간 강조로 바꾼다 */
+.mode-box { margin-left: auto; display: inline-flex; gap: 5px; }
+.mode-btn { font-family: var(--mn-font); font-size: 11px; font-weight: 700;
+  color: var(--tx-2); background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-sm); padding: 5px 11px; cursor: pointer;
+  transition: color .15s, border-color .15s; }
+.mode-btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.mode-btn.on { color: var(--tx-1); border-color: var(--accent);
+  background: var(--bg-2); }
 .eqp-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .eqp-chip { font-size: 11px; font-weight: 700; font-family: var(--mn-mono);
   border: 1px solid var(--bd); border-radius: 10px; padding: 5px 10px;
@@ -456,6 +465,12 @@ function detailRow(r) {
       <span>30일 범위 <b>${fmt(b.min)} ~ ${fmt(b.max)}</b></span>
       ${r.spread ? `<span>산포비 <b>${fmt(r.spread, 1)}배</b></span>` : ''}
       ${r.drift ? `<span>드리프트 <b>${r.drift.total_sigma > 0 ? '+' : ''}${fmt(r.drift.total_sigma, 1)}σ/${r.drift.days}일</b></span>` : ''}
+      <span class="mode-box">
+        <button class="mode-btn ${colorMode === 'eqp' ? 'on' : ''}"
+                onclick="setColorMode('eqp', event)">장비별 색</button>
+        <button class="mode-btn ${colorMode === 'span' ? 'on' : ''}"
+                onclick="setColorMode('span', event)">구간 강조</button>
+      </span>
     </div>
     <div class="detail-plot" id="dp"></div>
     ${eqp ? `<div class="eqp-grid">${eqp}</div>` : ''}
@@ -467,7 +482,27 @@ function toggleDetail(key) {
   render();
 }
 
-/* 상세 차트 — 웨이퍼 단위. 최근일만 색을 달리해 한눈에 보이게 */
+/* ══════════════════════════════════════════════════
+   상세 차트 색 구분 모드
+     'eqp'  장비 호기별 색 (기본) — 어느 설비가 튀는지 바로 보인다
+     'span' 점검 구간만 강조   — 장비가 많아 색이 어지러울 때
+   ══════════════════════════════════════════════════ */
+let colorMode = 'eqp';
+
+/* 밝은 배경에서 서로 구분되는 색. 장비 수가 이보다 많으면 순환한다 */
+const EQP_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed',
+                    '#0891b2', '#db2777', '#65a30d', '#475569', '#c2410c',
+                    '#0d9488', '#9333ea'];
+
+function setColorMode(m, ev) {
+  if (ev) ev.stopPropagation();
+  colorMode = m;
+  render();
+}
+
+/* 상세 차트 — 웨이퍼 단위.
+   기본은 장비 호기별로 색을 나누고, 점검 구간 웨이퍼는 크게 + 진한 테두리로
+   표시한다. (장비 구분이 없으면 어느 설비가 원인인지 차트에서 알 수 없다) */
 async function drawDetail(r) {
   const div = document.getElementById('dp');
   if (!div) return;
@@ -478,26 +513,74 @@ async function drawDetail(r) {
   const pts = j.points || [];
   if (!pts.length) { div.innerHTML = ''; return; }
 
-  const day = r.day;
-  const isDay = p => (p.date || '').slice(0, 10) === day;
-  const prev = pts.filter(p => !isDay(p));
-  const today = pts.filter(isDay);
+  // 점검 구간 (단일 일자일 수도, day_from ~ day 범위일 수도 있다)
+  const dTo   = r.day;
+  const dFrom = r.day_from || r.day;
+  const inSpan = p => {
+    const d = (p.date || '').slice(0, 10);
+    return d >= dFrom && d <= dTo;
+  };
 
-  const mk = (arr, name, color, size) => ({
+  // 장비 키 — 챔버까지 있으면 챔버 단위가 더 유용하다
+  const keyOf = p => p.EQP_CH_ID || p.EQP_ID || '(미확인)';
+  const hasEqp = pts.some(p => p.EQP_CH_ID || p.EQP_ID);
+
+  const mk = (arr, o) => ({
     x: arr.map(p => p.date), y: arr.map(p => p.val),
-    text: arr.map(p => `${p.LOT_ID || ''} / WF${p.WF_ID || ''}` +
-                       (p.EQP_CH_ID ? `<br>${p.EQP_CH_ID}` : (p.EQP_ID ? `<br>${p.EQP_ID}` : ''))),
-    name, mode: 'markers', type: 'scattergl',
-    marker: {size: size, color: color, opacity: .75,
-             line: {width: .5, color: 'rgba(0,0,0,.25)'}},
+    text: arr.map(p => {
+      const eq = p.EQP_CH_ID || p.EQP_ID || '';
+      return `${p.LOT_ID || ''} / WF${p.WF_ID || ''}` +
+             (eq ? `<br>${eq}` : '') +
+             (p.IDLE ? `<br>IDLE: ${p.IDLE}` : '');
+    }),
+    name: o.name, mode: 'markers', type: 'scattergl',
+    legendgroup: o.group || o.name,
+    showlegend: o.showlegend !== false,
+    marker: {size: o.size, color: o.color, opacity: o.opacity ?? .8,
+             symbol: o.symbol || 'circle',
+             line: {width: o.lineW ?? .5,
+                    color: o.lineColor || 'rgba(0,0,0,.25)'}},
     hovertemplate: '%{text}<br><b>%{y:.2f}</b><extra></extra>',
   });
 
-  const traces = [mk(prev, '이전 30일', 'rgba(120,130,145,.55)', 7)];
-  if (today.length) {
-    const c = r.status === '이상' ? '#dc2626'
-            : r.status === '주의' ? '#f59e0b' : '#16a34a';
-    traces.push(mk(today, `최근일 (${day})`, c, 10));
+  const traces = [];
+
+  if (colorMode === 'eqp' && hasEqp) {
+    const keys = [...new Set(pts.map(keyOf))].sort();
+    keys.forEach((k, i) => {
+      const color = EQP_COLORS[i % EQP_COLORS.length];
+      const base = pts.filter(p => keyOf(p) === k && !inSpan(p));
+      const hot  = pts.filter(p => keyOf(p) === k && inSpan(p));
+
+      // 기준 기간 — 옅게
+      if (base.length) {
+        traces.push(mk(base, {name: k, group: k, color: color,
+                              size: 7, opacity: .45}));
+      }
+      // 점검 구간 — 크게 + 진한 테두리 (범례는 위와 하나로 묶는다)
+      if (hot.length) {
+        traces.push(mk(hot, {name: k, group: k, color: color,
+                             size: 11, opacity: .95, lineW: 1.6,
+                             lineColor: 'rgba(20,20,20,.75)',
+                             showlegend: base.length === 0}));
+      }
+    });
+  } else {
+    // 장비 정보가 없거나 '구간 강조' 모드
+    const prev  = pts.filter(p => !inSpan(p));
+    const today = pts.filter(inSpan);
+    if (prev.length) {
+      traces.push(mk(prev, {name: '기준 기간', color: 'rgba(120,130,145,.55)',
+                            size: 7}));
+    }
+    if (today.length) {
+      const c = r.status === '이상' ? '#dc2626'
+              : r.status === '주의' ? '#f59e0b' : '#16a34a';
+      const label = dFrom === dTo ? `점검 구간 (${dTo})`
+                                  : `점검 구간 (${dFrom} ~ ${dTo})`;
+      traces.push(mk(today, {name: label, color: c, size: 10,
+                             opacity: .9, lineW: 1.2}));
+    }
   }
 
   const b = r.base_stat || {};
@@ -515,6 +598,17 @@ async function drawDetail(r) {
   line(b.avg, '#22c55e', 'dot',  '30일 평균');
   line(b.min, '#ef4444', 'dash', '30일 min');
 
+  // 점검 구간을 배경 띠로 한 번 더 표시 — 색이 장비별이라 구간이 묻히지 않게
+  if (colorMode === 'eqp' && hasEqp) {
+    const spanPts = pts.filter(inSpan).map(p => p.date).sort();
+    if (spanPts.length) {
+      shapes.push({type: 'rect', xref: 'x', yref: 'paper',
+                   x0: spanPts[0], x1: spanPts[spanPts.length - 1],
+                   y0: 0, y1: 1, fillcolor: 'rgba(220,38,38,.06)',
+                   line: {width: 0}, layer: 'below'});
+    }
+  }
+
   Plotly.newPlot(div, traces, {
     paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
     font: {family: MN_FONT, color: '#555', size: 11},
@@ -526,7 +620,8 @@ async function drawDetail(r) {
             gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
     shapes: shapes, annotations: anns,
     showlegend: true,
-    legend: {orientation: 'h', x: 0, y: 1.12, font: {family: MN_FONT, size: 10}},
+    legend: {orientation: 'h', x: 0, y: 1.14, font: {family: MN_FONT, size: 10},
+             itemsizing: 'constant'},
     hovermode: 'closest',
     hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
                  font: {family: MN_FONT, size: 11}},
