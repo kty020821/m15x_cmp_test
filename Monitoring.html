@@ -54,6 +54,13 @@
   cursor: pointer; transition: opacity .15s; }
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
+/* 저장된 결과 비우기 — 점검 대상 규칙을 바꾼 뒤 옛 결과가 남을 때 */
+.btn-clear { padding: 10px 18px; background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: var(--r-md);
+  color: var(--tx-2); font-size: 12px; font-weight: 700; cursor: pointer;
+  transition: color .15s, border-color .15s; }
+.btn-clear:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.btn-clear:disabled { opacity: .4; cursor: not-allowed; }
 .run-info { font-size: 12px; font-weight: 600; color: var(--tx-muted); }
 .prog { flex: 1; min-width: 180px; height: 6px; background: var(--bg-2);
   border-radius: 20px; overflow: hidden; display: none; }
@@ -168,6 +175,7 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 
   <div class="run-bar">
     <button class="btn-run" id="btn-run" onclick="startCheck()">점검 시작</button>
+    <button class="btn-clear" id="btn-clear" onclick="clearResults()">결과 초기화</button>
     <div class="prog" id="prog"><i id="prog-bar"></i></div>
     <span class="run-info" id="run-info">이전 점검 결과를 불러오는 중...</span>
   </div>
@@ -208,6 +216,7 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 const API_OPERS   = "{% url 'monitor-opers' %}";
 const API_RUN     = "{% url 'monitor-run' %}";
 const API_RESULTS = "{% url 'monitor-results' %}";
+const API_CLEAR   = "{% url 'monitor-clear' %}";
 const API_DETAIL  = "{% url 'monitor-detail' %}";
 
 const MN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
@@ -279,6 +288,27 @@ async function startCheck() {
   setTimeout(() => box.classList.remove('on'), 600);
 
   buildFilters(); render();
+}
+
+/* 저장된 결과 비우기.
+   화면은 페이지를 열 때 저장된 결과를 불러오므로(loadSaved), 점검 대상
+   규칙을 바꾼 뒤에는 옛 결과가 남아 새 규칙이 반영된 것처럼 보이지 않는다.
+   비운 뒤 [점검 시작] 을 다시 누르면 현재 코드 기준으로 다시 판정한다. */
+async function clearResults() {
+  const btn = document.getElementById('btn-clear');
+  btn.disabled = true;
+  try {
+    const j = await postJSON(API_CLEAR, {});
+    allResults = [];
+    openKey = null;
+    filterStatus = '';
+    buildFilters();
+    render();
+    document.getElementById('run-info').textContent =
+      `결과 ${j.deleted || 0}건을 비웠습니다. 점검 시작을 눌러주세요.`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* 이전 결과 불러오기 */
