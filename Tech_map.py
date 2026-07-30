@@ -1,178 +1,71 @@
 """
-equipment/views_monitor.py
+equipment/tech_map.py
 ════════════════════════════════════════════════════════════
-Inline Monitoring 페이지 + API
+TECH ↔ LOT_CD(device) 매핑 + OPER_ID ↔ 공정명 매핑
 
-  화면
-    · [점검 시작] → 공정 목록을 받아 한 공정씩 순차 호출
-      (한 요청에 전 공정을 몰면 512MiB 웹서버에서 타임아웃 위험)
-    · 결과 테이블 — 심각도순 정렬, 행마다 30일 추이 미니차트
-    · 행 클릭 → 웨이퍼 단위 상세 차트
+  구닥스 기준정보는 공정(OPER) 단위라 TECH↔LOT_CD 관계를 갖지 않는다.
+  (device 별로 넣으면 PARAM × device 로 행이 폭증하므로)
+  그래서 이 매핑만 따로 여기서 관리한다.
 
-  API
-    monitor/                 페이지
-    api/monitor/opers/       점검 대상 공정 목록
-    api/monitor/run/         공정 1건 점검 (POST oper_id)
-    api/monitor/results/     저장된 최근 결과
-    api/monitor/clear/       저장된 결과 초기화
-    api/monitor/detail/      웨이퍼 상세 (POST oper_id, lot_cd, param)
+  공정명도 여기서 관리한다.
+  ★ 웹 프로세스는 사내 모듈(Lake/구닥스 클라이언트)을 쓸 수 없다.
+    그래서 화면에서 구닥스를 직접 조회해 OPER_DESC 를 가져오려 하면
+    항상 실패하고, 드롭박스에 공정명 없이 OPER_ID 만 표시된다.
+    공정명은 적재 배치가 아니라 화면이 쓰는 값이므로 여기 둔다.
 
-  ※ 읽기 API 는 500 을 내지 않는다 — 200 + error 필드로 응답해
-    화면이 팝업 없이 계속 동작하게 한다 (분석 페이지와 동일 방침)
+  ★ device 가 추가되면 TECH_LOT_MAP 에 LOT_CD 한 줄,
+    공정이 추가되면 OPER_NAME_MAP 에 한 줄만 넣으면 된다.
 ════════════════════════════════════════════════════════════
 """
 
-import json
-import re
-import traceback
 
-from django.shortcuts import render
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.db import connections
-
-from . import tech_map
-from . import monitor_service as ms
+# ── TECH → LOT_CD 목록 ────────────────────────────────────
+TECH_LOT_MAP = {
+    'LUCY': ['5E2', '5E9'],
+    # 'ROSE': ['5F1', '5F2'],
+    # device 추가 시 해당 TECH 목록에 LOT_CD 만 추가
+}
 
 
-def _fail(msg, payload=None, exc=None):
-    print(f'[monitor] {msg}')
-    if exc is not None:
-        traceback.print_exc()
-    out = dict(payload or {})
-    out['error'] = msg
-    return JsonResponse(out, status=200)
+# ── OPER_ID → 공정명 ──────────────────────────────────────
+#   키는 구닥스 OPER_ID 와 정확히 같아야 한다 (대문자 기준으로 비교).
+#   여기 없는 공정은 화면에 OPER_ID 만 표시된다 — 동작에는 문제 없다.
+#   ★ 적재된 공정을 추가할 때 여기 한 줄
+OPER_NAME_MAP = {
+    # 'V5071000B': 'M1 Cu CMP',
+    # 'X106100B':  'M2 Cu CMP',
+}
 
 
-def _safe(v):
-    return bool(v) and bool(re.match(r'^[0-9A-Za-z_\-]+$', str(v)))
+def all_techs():
+    """화면 TECH 드롭박스용"""
+    return list(TECH_LOT_MAP.keys())
 
 
-# ══════════════════════════════════════════════════════════
-def monitor_page(request):
-    return render(request, 'equipment/monitor.html', {})
+def lots_of_tech(tech):
+    """해당 TECH 의 LOT_CD 목록"""
+    return TECH_LOT_MAP.get(tech, [])
 
 
-@csrf_exempt
-def monitor_opers(request):
-    """
-    점검 대상 공정 = 등록된 OPER_ID 중 테이블이 실제로 있는 것.
-    (분석 페이지와 같은 규칙 — 테이블명 역산 금지)
-    """
-    try:
-        with connections['analysis_db'].cursor() as cur:
-            cur.execute(
-                "SELECT tablename FROM pg_tables WHERE tablename LIKE %s",
-                ['cmp_analysis_%'])
-            tables = {r[0] for r in cur.fetchall()}
-
-        names = {}
-        try:
-            names = tech_map.oper_names()
-        except AttributeError:
-            print('[monitor] tech_map.oper_names() 가 없습니다 — '
-                  'tech_map.py 를 갱신하면 공정명이 표시됩니다 (동작은 계속)')
-        except Exception as e:
-            print(f'[monitor] 공정명 조회 실패: {e.__class__.__name__}: {e}')
-
-        out = []
-        for oid, desc in names.items():
-            if ms._table(oid) in tables:
-                out.append({'oper_id': oid,
-                            'label': f'{desc} ({oid})' if desc else oid})
-        if out:
-            out.sort(key=lambda o: o['label'])
-            return JsonResponse({'opers': out})
-
-        # OPER_NAME_MAP 미작성 시 화면이 비지 않도록 폴백
-        return JsonResponse({
-            'opers': [{'oper_id': t.replace('cmp_analysis_', '').upper(),
-                       'label':   t.replace('cmp_analysis_', '').upper()}
-                      for t in sorted(tables)],
-            'note': 'tech_map.OPER_NAME_MAP 미등록 — 공정명 없이 표시합니다',
-        })
-    except Exception as e:
-        return _fail(f'공정 목록 조회 실패: {e}', {'opers': []}, exc=e)
+def tech_of_lot(lot_cd):
+    """LOT_CD 로 TECH 역조회 (없으면 None)"""
+    for tech, lots in TECH_LOT_MAP.items():
+        if lot_cd in lots:
+            return tech
+    return None
 
 
-@csrf_exempt
-def monitor_run(request):
-    """공정 1건 점검"""
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
-    try:
-        body = json.loads(request.body)
-    except Exception:
-        return _fail('요청 형식 오류', {'results': []})
-
-    oper_id = body.get('oper_id')
-    label   = body.get('label', '')
-    if not _safe(oper_id):
-        return _fail('oper_id 형식 오류', {'results': []})
-
-    try:
-        return JsonResponse(ms.run_check(oper_id, label))
-    except Exception as e:
-        return _fail(f'{oper_id} 점검 실패: {e}',
-                     {'oper_id': oper_id, 'results': []}, exc=e)
+def known_lots():
+    """등록된 전체 LOT_CD"""
+    return [lc for lots in TECH_LOT_MAP.values() for lc in lots]
 
 
-@csrf_exempt
-def monitor_results(request):
-    """저장된 최근 점검 결과"""
-    try:
-        return JsonResponse(ms.load_results())
-    except Exception as e:
-        return _fail(f'결과 조회 실패: {e}',
-                     {'run_ts': None, 'results': []}, exc=e)
+def oper_names():
+    """{OPER_ID(대문자): 공정명} — 화면 OPER 드롭박스용"""
+    return {str(k).upper().strip(): str(v).strip()
+            for k, v in OPER_NAME_MAP.items() if k and v}
 
 
-@csrf_exempt
-def monitor_clear(request):
-    """
-    저장된 점검 결과 초기화.
-
-    점검 대상 규칙을 바꾼 뒤에는 옛 결과가 남아 혼동을 주므로,
-    화면에서 비우고 다시 점검할 수 있게 한다.
-    연속일수 이력(cmp_monitor_history)은 남긴다 — 지우면 '며칠 연속'
-    정보가 사라진다. 이력까지 지우려면 shell 에서
-    monitor_service.clear_results(with_history=True) 를 쓴다.
-    """
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
-    try:
-        body = json.loads(request.body) if request.body else {}
-    except Exception:
-        body = {}
-
-    oper_id = body.get('oper_id')
-    if oper_id and not _safe(oper_id):
-        return _fail('oper_id 형식 오류', {'deleted': 0})
-
-    try:
-        n = ms.clear_results(oper_id or None)
-        return JsonResponse({'deleted': n})
-    except Exception as e:
-        return _fail(f'초기화 실패: {e}', {'deleted': 0}, exc=e)
-
-
-@csrf_exempt
-def monitor_detail(request):
-    """웨이퍼 단위 상세"""
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
-    try:
-        body = json.loads(request.body)
-    except Exception:
-        return _fail('요청 형식 오류', {'points': []})
-
-    oper_id = body.get('oper_id')
-    lot_cd  = body.get('lot_cd')
-    param   = body.get('param')
-    if not (_safe(oper_id) and _safe(param)):
-        return _fail('요청 값 형식 오류', {'points': []})
-
-    try:
-        return JsonResponse(ms.wafer_detail(oper_id, lot_cd, param))
-    except Exception as e:
-        return _fail(f'상세 조회 실패: {e}', {'points': []}, exc=e)
+def name_of_oper(oper_id):
+    """OPER_ID 의 공정명 (없으면 빈 문자열)"""
+    return oper_names().get(str(oper_id).upper().strip(), '')
