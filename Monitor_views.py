@@ -14,6 +14,7 @@ Inline Monitoring 페이지 + API
     api/monitor/opers/       점검 대상 공정 목록
     api/monitor/run/         공정 1건 점검 (POST oper_id)
     api/monitor/results/     저장된 최근 결과
+    api/monitor/clear/       저장된 결과 초기화
     api/monitor/detail/      웨이퍼 상세 (POST oper_id, lot_cd, param)
 
   ※ 읽기 API 는 500 을 내지 않는다 — 200 + error 필드로 응답해
@@ -116,6 +117,35 @@ def monitor_results(request):
     except Exception as e:
         return _fail(f'결과 조회 실패: {e}',
                      {'run_ts': None, 'results': []}, exc=e)
+
+
+@csrf_exempt
+def monitor_clear(request):
+    """
+    저장된 점검 결과 초기화.
+
+    점검 대상 규칙을 바꾼 뒤에는 옛 결과가 남아 혼동을 주므로,
+    화면에서 비우고 다시 점검할 수 있게 한다.
+    연속일수 이력(cmp_monitor_history)은 남긴다 — 지우면 '며칠 연속'
+    정보가 사라진다. 이력까지 지우려면 shell 에서
+    monitor_service.clear_results(with_history=True) 를 쓴다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+
+    oper_id = body.get('oper_id')
+    if oper_id and not _safe(oper_id):
+        return _fail('oper_id 형식 오류', {'deleted': 0})
+
+    try:
+        n = ms.clear_results(oper_id or None)
+        return JsonResponse({'deleted': n})
+    except Exception as e:
+        return _fail(f'초기화 실패: {e}', {'deleted': 0}, exc=e)
 
 
 @csrf_exempt
