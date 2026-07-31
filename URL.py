@@ -23,6 +23,8 @@ urlpatterns = [
     path('api/config/suggest/',     vc.config_suggest,     name='config-suggest'),
     path('api/config/suggest-lot/', vc.config_suggest_lot, name='config-suggest-lot'),
     path('api/config/classify/',    vc.config_classify,    name='config-classify'),
+    path('api/config/reclassify/',  vc.config_reclassify,  name='config-reclassify'),
+    path('api/config/mismatch/',    vc.config_mismatch,    name='config-mismatch'),
 
     # 산포 분석 (기존)
     path('analysis/',             va.analysis_page,    name='analysis'),
