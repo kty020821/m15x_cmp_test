@@ -294,10 +294,35 @@ def _oper_names():
     if _OPER_CACHE:                    # 비어 있지 않을 때만 캐시 적중
         return _OPER_CACHE
 
-    # 1순위 — tech_map (웹에서 항상 동작)
-    names = dict(tech_map.oper_names())
+    names = {}
 
-    # 2순위 — 구닥스 (가능한 환경에서만. 지연 import 로 페이지를 지키다)
+    # ── 1순위: 기준정보 (셋업 페이지가 관리하는 원본) ────
+    #   기준정보를 자체 DB 로 옮긴 뒤에는 여기가 공정 목록의 기준이다.
+    #   tech_map 만 보면 기준정보에 등록한 공정이 드롭박스에서 빠진다.
+    try:
+        from . import config_service as cs
+        for o in cs.list_opers():
+            if str(o.get('use_yn') or 'Y').upper() == 'N':
+                continue
+            oid = str(o['oper_id']).upper().strip()
+            if oid:
+                names[oid] = (o.get('oper_desc') or '').strip()
+    except Exception as e:
+        print(f'[analysis] 기준정보 공정 목록 조회 실패: '
+              f'{e.__class__.__name__}: {e}')
+
+    # ── 2순위: tech_map (기준정보 이관 전 호환) ──────────
+    #   ★ 여기서 예외가 나면 OPER 드롭박스가 통째로 비어 페이지를 쓸 수 없다.
+    #     구버전 tech_map.py 에는 oper_names() 가 없으므로 반드시 감싼다.
+    try:
+        for oid, desc in tech_map.oper_names().items():
+            names.setdefault(str(oid).upper().strip(), desc)
+    except AttributeError:
+        print('[analysis] tech_map.oper_names() 가 없습니다 (동작은 계속)')
+    except Exception as e:
+        print(f'[analysis] tech_map 공정명 조회 실패: {e.__class__.__name__}: {e}')
+
+    # ── 3순위: 구닥스 (가능한 환경에서만) ────────────────
     try:
         from . import analysis_service as svc
         df = svc.get_config()
@@ -305,15 +330,14 @@ def _oper_names():
             oid  = str(r['OPER_ID']).upper().strip()
             desc = str(r.get('OPER_DESC') or '').strip()
             if oid and desc:
-                names.setdefault(oid, desc)    # tech_map 값을 우선
+                names.setdefault(oid, desc)    # 앞 순위 값을 우선
     except Exception as e:
-        # 웹에서는 정상적인 실패다. tech_map 에 이름이 있으면 문제 없음.
-        print(f'[analysis] 구닥스 공정명 보조 조회 생략: {e.__class__.__name__}: {e}')
+        print(f'[analysis] 기준정보 보조 조회 생략: {e.__class__.__name__}: {e}')
 
     if not names:
-        _OPER_ERROR = ('공정명을 하나도 얻지 못했습니다. '
-                       'equipment/tech_map.py 의 OPER_NAME_MAP 에 '
-                       '{OPER_ID: 공정명} 을 등록하세요.')
+        _OPER_ERROR = ('공정명을 얻지 못했습니다. 셋업 페이지에서 공정을 '
+                       '등록하거나 tech_map.OPER_NAME_MAP 에 추가하세요. '
+                       '(공정명 없이 ID 로는 계속 사용할 수 있습니다)')
         print(f'[analysis] {_OPER_ERROR}')
         return {}                      # ★ 빈 결과는 캐시하지 않음
 
@@ -323,27 +347,80 @@ def _oper_names():
     return names
 
 
-def _loaded_opers():
-    """적재된 테이블에서 oper_id 목록"""
+def _loaded_tables():
+    """적재된 분석 테이블 이름 집합 (cmp_analysis_*)"""
     with connections['analysis_db'].cursor() as cur:
         cur.execute("""
             SELECT tablename FROM pg_tables
             WHERE tablename LIKE 'cmp_analysis_%'
             ORDER BY tablename
         """)
-        return [r[0].replace('cmp_analysis_', '').upper() for r in cur.fetchall()]
+        return {r[0] for r in cur.fetchall()}
 
 
 def _oper_options():
-    """적재된 공정만. 구닥스에 이름이 없으면 ID 만 표시한다"""
-    names = _oper_names()
+    """
+    OPER 드롭박스 목록.
+
+    ★ 등록된 OPER_ID 에서 출발해 '그 ID 의 테이블이 있는가' 를 확인한다.
+      테이블명에서 OPER_ID 를 역산하면 안 된다 —
+      _an_table() 이 특수문자를 '_' 로 바꾸므로
+      V507-00E → cmp_analysis_v507_00e 가 되고, 되돌리면
+      'V507_00E' 라는 존재하지 않는 ID 가 만들어진다.
+
+      역산 방식의 또 다른 문제: 기준정보에서 빠진 공정이라도
+      과거에 한 번 적재된 테이블이 남아 있으면 계속 드롭박스에 뜬다.
+      (구닥스에 없는 OP100 이 계속 보이던 원인)
+      필요 없어진 테이블은 analysis_service.drop_analysis_table() 로 지운다.
+    """
+    names  = _oper_options_names()
+    tables = _loaded_tables()
+
+    if not tables:
+        print('[analysis] cmp_analysis_* 테이블이 없습니다 — 적재가 필요합니다')
+        return []
+
     out = []
-    for oid in _loaded_opers():
-        desc = names.get(oid, '')
-        out.append({'value': oid, 'label': f'{desc} ({oid})' if desc else oid})
-    # 이름 있는 것 먼저, 그 안에서 이름순
-    out.sort(key=lambda o: (o['label'].startswith('('), o['label']))
-    return out
+    for oid, desc in names.items():
+        if _an_table(oid) in tables:
+            out.append({'value': oid,
+                        'label': f'{desc} ({oid})' if desc else oid})
+
+    if out:
+        out.sort(key=lambda o: o['label'])
+
+        # 등록에 없는데 테이블만 남아 있는 것 — 정리 대상 안내
+        known = {_an_table(oid) for oid in names}
+        orphan = sorted(t for t in tables if t not in known)
+        if orphan:
+            print(f'[analysis] 등록에 없는 잔여 테이블 {len(orphan)}개 '
+                  f'(드롭박스에서 제외됨): {", ".join(orphan[:8])}'
+                  f'{" ..." if len(orphan) > 8 else ""}')
+        return out
+
+    # ★ 폴백 — 등록된 이름이 없거나 테이블과 하나도 매칭되지 않을 때.
+    #   여기서 빈 목록을 돌려주면 OPER 드롭박스가 비어 페이지를 못 쓴다.
+    #   공정명 없이 ID 로라도 반드시 목록을 만들어 준다.
+    print(f'[analysis] 등록된 공정명({len(names)}개)과 일치하는 테이블이 없어 '
+          f'적재 테이블 {len(tables)}개를 ID 로 표시합니다 '
+          f'(tech_map.OPER_NAME_MAP 등록 권장)')
+    return [{'value': t.replace('cmp_analysis_', '').upper(),
+             'label': t.replace('cmp_analysis_', '').upper()}
+            for t in sorted(tables)]
+
+
+def _oper_options_names():
+    """
+    _oper_options 전용 이름 조회 래퍼.
+    이름을 못 얻어도 드롭박스는 살아 있어야 하므로 예외를 삼킨다.
+    """
+    try:
+        return _oper_names() or {}
+    except Exception as e:
+        print(f'[analysis] 공정명 조회 중 예외 — ID 로 표시합니다: '
+              f'{e.__class__.__name__}: {e}')
+        traceback.print_exc()
+        return {}
 
 
 def _lots_with_data():
