@@ -142,13 +142,50 @@ def _param_tuple(param_list):
 
 
 # ══════════════════════════════════════════════════════════
-# 1. 기준정보 (구닥스)
+# 1. 기준정보
+#    ★ PostgreSQL(cmp_cfg_*)이 원본이다. 구닥스가 불안정해 자체 DB 로
+#      옮겼고, 수정은 웹 셋업 페이지(config.html)에서만 한다.
 #    컬럼(대문자, PARAM 마다 1행 · 나머지 값 반복):
 #      FAB, LOT_CD, OPER_ID, OPER_DESC, EQ_MODEL, RECIPE_ID,
-#      PARAM, PRE_OPER_ID, PRE_OPER_DESC, PRE_OPER_PARAM
+#      PARAM, PRE_OPER_ID, PRE_OPER_DESC, PRE_OPER_PARAM, PARAM_TYPE
 # ══════════════════════════════════════════════════════════
 def get_config():
-    return goodDocsGetData().dropna(axis=0)
+    """
+    기준정보 — PostgreSQL 우선, 비어 있으면 구닥스 폴백.
+
+    config_service.build_config_df() 가 구닥스가 주던 것과 똑같은
+    평면 DataFrame 을 만들어 주므로, get_oper_cond 이하 파이프라인은
+    한 줄도 바뀌지 않는다.
+
+    폴백은 이관 도중 배치가 멈추지 않게 하기 위한 것이고,
+    셋업이 끝나면 타지 않는다.
+    """
+    try:
+        from . import config_service as cfg
+        df = cfg.build_config_df()
+        if df is not None and len(df):
+            print(f'[config] 기준정보 DB 사용 — {len(df):,}행 / '
+                  f'공정 {df["OPER_ID"].nunique()}개')
+            return df
+        print('[config] cmp_cfg_* 가 비어 있어 구닥스로 폴백합니다 '
+              '(셋업 페이지에서 등록하세요)')
+    except Exception as e:
+        print(f'[config] 기준정보 DB 조회 실패 — 구닥스로 폴백: '
+              f'{e.__class__.__name__}: {e}')
+
+    # ── 폴백: 구닥스 ─────────────────────────────────────
+    #   사내 모듈이 연결돼 있지 않으면 NameError 만 나서 원인을 알기 어렵다.
+    #   무엇이 문제이고 무엇을 해야 하는지 분명히 알린다.
+    try:
+        return goodDocsGetData().dropna(axis=0)
+    except NameError:
+        raise RuntimeError(
+            '기준정보를 읽지 못했습니다.\n'
+            '  · cmp_cfg_* 테이블이 비어 있고\n'
+            '  · 구닥스 조회 함수(goodDocsGetData)도 연결돼 있지 않습니다.\n'
+            '해결: 셋업 페이지에서 공정을 등록하거나, '
+            'analysis_service.py 상단의 사내 모듈 import 를 채워주세요.\n'
+            '확인: config_service.build_config_df() 가 몇 행을 돌려주는지 보세요.')
 
 
 def get_oper_list(df_info):
