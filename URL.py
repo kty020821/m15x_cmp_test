@@ -39,5 +39,6 @@ urlpatterns = [
     path('api/monitor/run/',     vm.monitor_run,     name='monitor-run'),
     path('api/monitor/results/', vm.monitor_results, name='monitor-results'),
     path('api/monitor/clear/',   vm.monitor_clear,   name='monitor-clear'),
+    path('api/monitor/diag/',    vm.monitor_diag,    name='monitor-diag'),
     path('api/monitor/detail/',  vm.monitor_detail,  name='monitor-detail'),
 ]
