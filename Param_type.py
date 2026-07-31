@@ -12,15 +12,15 @@ equipment/param_types.py
   THK       두께·제거량 계열      판정: 평균±σ
   TIME      Polishing Time        판정: 평균±σ
   PRESSURE  압력 (존/리테이너링)  판정: 평균±σ
-  PART      소모품 (Pad/Head/Disk) 판정: 제외 (아래 설명)
+  PART      소모품 (Pad/Head/Disk/Brush/RRing)  판정: 제외 (아래 설명)
   DEFECT    Defect 카운트          판정: 중앙값 배수·분위수
   ETC       그 외                  판정: 평균±σ
 
 분류 순서 (위에서 걸리면 끝)
   1  DEFECT      defect 어휘
   2  THK         THK / OCD / REV        ← 명시적 두께 어휘
-  3  PRESSURE    Z<숫자> / W<숫자> / _RR / 압력 어휘
-  4  PART        PAD / HEAD / DISK
+  3  PRESSURE    Z<숫자> / A<숫자> / W<숫자> / _RR / 압력 어휘
+  4  PART        PAD / HEAD / DISK / BRUSH / RRING
   5  TIME 계열   이름에 TIME 이 있으면
                    독립 숫자 세그먼트 있음 → TIME  (PR_4_TIME = 4step 연마시간)
                    없음                   → PART  (PR_TIME  = Platen R 패드시간)
@@ -72,14 +72,20 @@ RE_THK_CORE = re.compile(r'THK|OCD|REV')
 RE_THK_STAT = re.compile(r'AVG|RAN')
 
 # 소모품
-RE_PART = re.compile(r'PAD|HEAD|DISK')
+#   BRUSH  세정 브러시
+#   RRING  리테이너 링 (부품 자체 — 사용량·수명)
+#   ※ 압력값인 '_RR 로 끝나는 이름'(리테이너 링 압력)과는 다르다.
+#     RRING_CNT → PART / PA_Z1_RR → PRESSURE 로 각각 갈린다.
+RE_PART = re.compile(r'PAD|HEAD|DISK|BRUSH|RRING')
 
 # 압력
 #   Z1~Z5  캐리어 헤드 존 압력
+#   A1~    존 표기 변형 (Z 와 같은 성격)
 #   W1~    존 표기 변형
 #   _RR    Retainer Ring 압력
-#   세그먼트 시작 위치만 인정한다 (SIZE_W1 은 맞고 PAZ1 은 아님)
-RE_PRESSURE = re.compile(r'(^|_)Z\d|(^|_)W\d|_RR$')
+#   세그먼트 시작 위치만 인정한다 (SIZE_W1 은 맞고 PAZ1 은 아님).
+#   그래서 AREA1 · ADD_1 처럼 A 뒤에 숫자가 바로 오지 않는 이름은 걸리지 않는다.
+RE_PRESSURE = re.compile(r'(^|_)Z\d|(^|_)A\d|(^|_)W\d|_RR$')
 
 # ★ 사용자 규칙에 없던 보강.
 #   HEAD_PRESSURE 처럼 압력인데 PART 어휘(HEAD)가 먼저 걸리는 이름이 있다.
