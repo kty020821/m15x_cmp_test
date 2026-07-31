@@ -106,7 +106,22 @@
 table.et { width: 100%; border-collapse: collapse; }
 table.et th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
   text-align: left; padding: 7px 8px; border-bottom: 1.5px solid var(--bd);
-  letter-spacing: .03em; }
+  letter-spacing: .03em;
+  /* 파라미터가 수십~수백 개라 스크롤해도 머리글이 보여야 한다 */
+  position: sticky; top: 0; background: var(--bg-3); z-index: 2; }
+
+/* 컬럼별 필터 — 머리글 안에 넣어 헤더 행이 하나로 유지되게 한다
+   (행이 둘이면 sticky top 오프셋을 픽셀로 맞춰야 해서 깨지기 쉽다) */
+.fx { display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
+  font-family: var(--cf-mono); font-size: 11px; font-weight: 700;
+  color: var(--tx-1); background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: 7px;
+  padding: 4px 7px; outline: none; }
+.fx::placeholder { color: var(--tx-muted); font-weight: 600;
+  font-family: var(--cf-font); }
+.fx:focus { border-color: var(--accent); }
+.fx.on { border-color: var(--accent); background: var(--bg-3); }
+select.fx { font-family: var(--cf-font); cursor: pointer; }
 table.et td { padding: 4px 8px; border-bottom: 1px solid rgba(128,128,128,.09); }
 table.et input, table.et select {
   width: 100%; box-sizing: border-box; font-size: 12px; font-weight: 700;
@@ -244,9 +259,15 @@ const TYPE_OPTS = [
 let opers = [];
 let cur = null;
 
+/* HTML 이스케이프.
+   ★ 작은따옴표·백틱까지 막는다.
+     값이 코드에서만 오던 때는 & < > " 로 충분했지만, 이제 사용자가
+     직접 입력하고 엑셀에서 붙여넣기까지 하므로 onclick="fn('...')" 같은
+     자리에서 따옴표 하나로 속성이 끊길 수 있다. */
 function esc(s) {
-  return String(s ?? '').replace(/[&<>"]/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  return String(s ?? '').replace(/[&<>"'`]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',
+      "'":'&#39;','`':'&#96;'}[c]));
 }
 function msg(text, isErr) {
   const el = document.getElementById('bar-msg');
@@ -296,6 +317,7 @@ async function openOper(id) {
   const j = await postJSON(API_OPER, {oper_id: id});
   if (!j.ok) { msg(j.error || '조회 실패', true); return; }
   cur = j.oper;
+  FILT.lots = {}; FILT.params = {}; FILT.defects = {};   // 공정 바뀌면 필터 초기화
   renderEditor();
   loadOpers();
 }
@@ -343,6 +365,8 @@ function renderEditor() {
         <span class="sub" id="lcnt"></span>
         <span class="sub">— 새 device 는 여기 한 줄만 추가하면 됩니다</span>
         <span class="right">
+          <button class="btn sm" id="fclr-lots" style="display:none;"
+                  onclick="clearFilter('lots')">필터 해제</button>
           <button class="btn sm danger" id="del-lots" disabled
                   onclick="delSelected('lots')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('lots')">전체 비우기</button>
@@ -355,9 +379,20 @@ function renderEditor() {
           <thead><tr>
             <th class="ck"><input type="checkbox" id="all-lots"
                 onchange="selAll('lots', this.checked)"></th>
-            <th style="width:26%;">LOT_CD *</th>
-            <th style="width:52%;">RECIPE_ID</th>
-            <th style="width:18%;">사용</th><th></th></tr></thead>
+            <th style="width:26%;">LOT_CD *
+              <input class="fx" id="fx-lots-lot_cd" placeholder="검색"
+                     oninput="setFilter('lots','lot_cd',this.value)"></th>
+            <th style="width:52%;">RECIPE_ID
+              <input class="fx" id="fx-lots-recipe_id" placeholder="검색"
+                     oninput="setFilter('lots','recipe_id',this.value)"></th>
+            <th style="width:18%;">사용
+              <select class="fx" id="fx-lots-use_yn"
+                      onchange="setFilter('lots','use_yn',this.value)">
+                <option value="">전체</option>
+                <option value="Y">사용</option>
+                <option value="N">제외</option>
+              </select></th>
+            <th></th></tr></thead>
           <tbody id="ltbody"></tbody>
         </table>
       </div>
@@ -368,6 +403,8 @@ function renderEditor() {
         <span class="sub" id="pcnt"></span>
         <span class="sub">— device 와 무관하게 공정당 한 번만</span>
         <span class="right">
+          <button class="btn sm" id="fclr-params" style="display:none;"
+                  onclick="clearFilter('params')">필터 해제</button>
           <button class="btn sm danger" id="del-params" disabled
                   onclick="delSelected('params')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('params')">전체 비우기</button>
@@ -381,9 +418,25 @@ function renderEditor() {
           <thead><tr>
             <th class="ck"><input type="checkbox" id="all-params"
                 onchange="selAll('params', this.checked)"></th>
-            <th style="width:55%;">PARAM</th>
-            <th style="width:20%;">타입</th>
-            <th style="width:18%;">사용</th><th></th></tr></thead>
+            <th style="width:55%;">PARAM
+              <input class="fx" id="fx-params-param" placeholder="포함 문자 검색"
+                     oninput="setFilter('params','param',this.value)"></th>
+            <th style="width:20%;">타입
+              <select class="fx" id="fx-params-param_type"
+                      onchange="setFilter('params','param_type',this.value)">
+                <option value="">전체</option>
+                <option value="__AUTO__">자동(미지정)</option>
+                {% for v, l in type_options %}<option value="{{ v }}">{{ v }}</option>
+                {% endfor %}
+              </select></th>
+            <th style="width:18%;">사용
+              <select class="fx" id="fx-params-use_yn"
+                      onchange="setFilter('params','use_yn',this.value)">
+                <option value="">전체</option>
+                <option value="Y">사용</option>
+                <option value="N">제외</option>
+              </select></th>
+            <th></th></tr></thead>
           <tbody id="ptbody"></tbody>
         </table>
       </div>
@@ -398,6 +451,12 @@ function renderEditor() {
                   onclick="delSelected('defects')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('defects')">전체 비우기</button>
           <button class="btn sm" onclick="openBulk('defects')">엑셀 붙여넣기</button>
+          <button class="btn sm" id="fclr-defects" style="display:none;"
+                  onclick="clearFilter('defects')">필터 해제</button>
+          <button class="btn sm danger" id="del-defects" disabled
+                  onclick="delSelected('defects')">선택 삭제</button>
+          <button class="btn sm" onclick="clearRows('defects')">전체 비우기</button>
+          <button class="btn sm" onclick="openBulk('defects')">엑셀 붙여넣기</button>
           <button class="btn sm" onclick="addDefect()">+ 추가</button>
         </span></div>
       <div class="tbl-scroll">
@@ -405,10 +464,23 @@ function renderEditor() {
           <thead><tr>
             <th class="ck"><input type="checkbox" id="all-defects"
                 onchange="selAll('defects', this.checked)"></th>
-            <th style="width:22%;">LOT_CD</th>
-            <th style="width:28%;">STEP_ID *</th>
-            <th style="width:32%;">설명</th>
-            <th style="width:14%;">사용</th><th></th></tr></thead>
+            <th style="width:22%;">LOT_CD
+              <input class="fx" id="fx-defects-lot_cd" placeholder="검색"
+                     oninput="setFilter('defects','lot_cd',this.value)"></th>
+            <th style="width:28%;">STEP_ID *
+              <input class="fx" id="fx-defects-step_id" placeholder="검색"
+                     oninput="setFilter('defects','step_id',this.value)"></th>
+            <th style="width:32%;">설명
+              <input class="fx" id="fx-defects-step_desc" placeholder="검색"
+                     oninput="setFilter('defects','step_desc',this.value)"></th>
+            <th style="width:14%;">사용
+              <select class="fx" id="fx-defects-use_yn"
+                      onchange="setFilter('defects','use_yn',this.value)">
+                <option value="">전체</option>
+                <option value="Y">사용</option>
+                <option value="N">제외</option>
+              </select></th>
+            <th></th></tr></thead>
           <tbody id="dtbody"></tbody>
         </table>
       </div>
@@ -421,13 +493,13 @@ function renderEditor() {
       <span class="msg" id="ed-msg"></span>
     </div>`;
 
+  restoreFilterInputs();       // 화면을 새로 만들었으므로 필터 값 되살리기
   renderLots(); renderParams(); renderDefects();
   refreshAutoTypes(true);      // '자동 (…)' 표시 채우기
 }
 
 /* ── device (LOT_CD + RECIPE) ──────────────── */
 function renderLots() {
-  document.getElementById('lcnt').textContent = `${cur.lots.length}행`;
   document.getElementById('ltbody').innerHTML = cur.lots.map((l, i) => `
     <tr class="${l._sel ? 'sel' : ''}">
       <td class="ck"><input type="checkbox" ${l._sel ? 'checked' : ''}
@@ -446,7 +518,7 @@ function renderLots() {
       <td><span class="row-del" onclick="delLot(${i})">×</span></td>
     </tr>`).join('')
     || '<tr><td colspan="5" class="none-row">device 가 없습니다. 추가하거나 엑셀에서 붙여넣으세요.</td></tr>';
-  updateSelUI('lots');
+  applyFilter('lots');
 }
 function addLot() { cur.lots.push({lot_cd:'', recipe_id:'', use_yn:'Y'}); renderLots(); }
 function delLot(i) { cur.lots.splice(i,1); renderLots(); }
@@ -469,7 +541,6 @@ async function suggestLots() {
 
 /* ── 파라미터 ──────────────────────────────── */
 function renderParams() {
-  document.getElementById('pcnt').textContent = `${cur.params.length}개`;
   document.getElementById('ptbody').innerHTML = cur.params.map((p, i) => `
     <tr class="${p._sel ? 'sel' : ''}">
       <td class="ck"><input type="checkbox" ${p._sel ? 'checked' : ''}
@@ -493,7 +564,7 @@ function renderParams() {
       <td><span class="row-del" onclick="delParam(${i})">×</span></td>
     </tr>`).join('')
     || '<tr><td colspan="5" class="none-row">파라미터가 없습니다. 추가하거나 엑셀에서 붙여넣으세요.</td></tr>';
-  updateSelUI('params');
+  applyFilter('params');
 }
 function addParam() { cur.params.push({param:'', param_type:'', use_yn:'Y'}); renderParams(); }
 function delParam(i) { cur.params.splice(i,1); renderParams(); }
@@ -515,7 +586,6 @@ async function suggestParams() {
 
 /* ── defect 스텝 ───────────────────────────── */
 function renderDefects() {
-  document.getElementById('dcnt').textContent = `${cur.defects.length}행`;
   document.getElementById('dtbody').innerHTML = cur.defects.map((d, i) => `
     <tr class="${d._sel ? 'sel' : ''}">
       <td class="ck"><input type="checkbox" ${d._sel ? 'checked' : ''}
@@ -537,7 +607,7 @@ function renderDefects() {
       <td><span class="row-del" onclick="delDefect(${i})">×</span></td>
     </tr>`).join('')
     || '<tr><td colspan="6" class="none-row">defect 스텝이 없습니다. 추가하거나 엑셀에서 붙여넣으세요.</td></tr>';
-  updateSelUI('defects');
+  applyFilter('defects');
 }
 function addDefect() {
   cur.defects.push({lot_cd:'', step_id:'', step_desc:'', use_yn:'Y'});
@@ -558,18 +628,24 @@ function delDefect(i) { cur.defects.splice(i,1); renderDefects(); }
 const TBL = {
   lots: {
     cols: ['lot_cd', 'recipe_id', 'use_yn'],
+    filterCols: {lot_cd: 1, recipe_id: 1, use_yn: 1},
+    tbody: 'ltbody', count: 'lcnt',
     label: 'Device',
     blank: () => ({lot_cd: '', recipe_id: '', use_yn: 'Y'}),
     render: () => renderLots(),
   },
   params: {
     cols: ['param', 'param_type', 'use_yn'],
+    filterCols: {param: 1, param_type: 1, use_yn: 1},
+    tbody: 'ptbody', count: 'pcnt',
     label: '파라미터',
     blank: () => ({param: '', param_type: '', use_yn: 'Y'}),
     render: () => renderParams(),
   },
   defects: {
     cols: ['lot_cd', 'step_id', 'step_desc', 'use_yn'],
+    filterCols: {lot_cd: 1, step_id: 1, step_desc: 1, use_yn: 1},
+    tbody: 'dtbody', count: 'dcnt',
     label: 'Defect 스텝',
     blank: () => ({lot_cd: '', step_id: '', step_desc: '', use_yn: 'Y'}),
     render: () => renderDefects(),
@@ -755,6 +831,96 @@ async function autoClassify() {
 }
 
 /* ══════════════════════════════════════════════════
+   컬럼 필터
+
+   파라미터가 수십~수백 개라 눈으로 훑는 게 불가능하다.
+   ★ 행을 다시 그리지 않고 display 로 숨긴다.
+     편집 핸들러가 cur.params[i] 처럼 배열 인덱스를 직접 참조하고,
+     붙여넣기도 data-row 로 인덱스를 쓰기 때문에 걸러낸 부분집합을
+     다시 그리면 인덱스가 어긋난다. 숨기면 그런 문제가 없다.
+   ★ 숨겨진 행은 선택이 해제된다 — 안 보이는 행이 '선택 삭제' 로
+     같이 지워지는 사고를 막기 위함.
+   ══════════════════════════════════════════════════ */
+const FILT = {};
+['lots', 'params', 'defects'].forEach(k => { FILT[k] = {}; });
+
+function hasFilter(k) {
+  return Object.values(FILT[k] || {}).some(v => String(v || '').trim() !== '');
+}
+
+function rowMatch(k, row) {
+  const f = FILT[k] || {};
+  return Object.keys(f).every(col => {
+    const q = String(f[col] ?? '').trim();
+    if (!q) return true;
+    const v = String(row[col] ?? '');
+    if (col === 'use_yn') return (v === 'N' ? 'N' : 'Y') === q;
+    if (col === 'param_type') return q === '__AUTO__' ? !v : v === q;
+    return v.toUpperCase().includes(q.toUpperCase());   // 포함 문자 검색
+  });
+}
+
+function setFilter(k, col, v) {
+  FILT[k][col] = v;
+  const el = document.getElementById(`fx-${k}-${col}`);
+  if (el) el.classList.toggle('on', String(v || '').trim() !== '');
+  applyFilter(k);
+}
+
+function clearFilter(k) {
+  FILT[k] = {};
+  Object.keys(TBL[k].filterCols).forEach(col => {
+    const el = document.getElementById(`fx-${k}-${col}`);
+    if (el) { el.value = ''; el.classList.remove('on'); }
+  });
+  applyFilter(k);
+}
+
+/* 화면을 다시 그린 뒤 필터 입력값을 되살린다 (renderEditor 가 HTML 을 새로 만듦) */
+function restoreFilterInputs() {
+  Object.keys(FILT).forEach(k => {
+    Object.keys(FILT[k]).forEach(col => {
+      const el = document.getElementById(`fx-${k}-${col}`);
+      if (el) {
+        el.value = FILT[k][col] || '';
+        el.classList.toggle('on', String(el.value || '').trim() !== '');
+      }
+    });
+  });
+}
+
+function applyFilter(k) {
+  const t = TBL[k];
+  const tbody = document.getElementById(t.tbody);
+  if (!tbody) return;
+
+  let shown = 0;
+  cur[k].forEach((row, i) => {
+    const tr = tbody.rows[i];
+    if (!tr) return;
+    const ok = rowMatch(k, row);
+    tr.style.display = ok ? '' : 'none';
+    if (ok) {
+      shown++;
+    } else if (row._sel) {
+      row._sel = false;                       // 안 보이는 행은 선택 해제
+      const cb = tr.querySelector('input[type=checkbox]');
+      if (cb) cb.checked = false;
+      tr.classList.remove('sel');
+    }
+  });
+
+  const cnt = document.getElementById(t.count);
+  if (cnt) cnt.textContent = hasFilter(k)
+    ? `${shown} / ${cur[k].length}행` : `${cur[k].length}행`;
+
+  const clr = document.getElementById('fclr-' + k);
+  if (clr) clr.style.display = hasFilter(k) ? '' : 'none';
+
+  updateSelUI(k);
+}
+
+/* ══════════════════════════════════════════════════
    행 선택 · 일괄 삭제
 
    붙여넣기로 수십 행이 한 번에 들어오므로 삭제도 일괄로 되어야 한다.
@@ -774,9 +940,9 @@ function updateSelUI(k) {
   }
   const all = document.getElementById('all-' + k);
   if (all) {
-    const total = cur[k].length;
-    all.checked = total > 0 && n === total;
-    all.indeterminate = n > 0 && n < total;
+    const vis = cur[k].filter(r => rowMatch(k, r)).length;
+    all.checked = vis > 0 && n === vis;
+    all.indeterminate = n > 0 && n < vis;
   }
 }
 
@@ -790,7 +956,8 @@ function markSel(k, i, on) {
 }
 
 function selAll(k, on) {
-  cur[k].forEach(r => { r._sel = !!on; });
+  // 필터가 걸려 있으면 보이는 행만 선택한다
+  cur[k].forEach(r => { r._sel = on ? rowMatch(k, r) : false; });
   TBL[k].render();
 }
 
@@ -806,7 +973,9 @@ function delSelected(k) {
 function clearRows(k) {
   const n = cur[k].length;
   if (!n) return;
-  if (!confirm(`${TBL[k].label} ${n}행을 모두 비울까요?`)) return;
+  // 필터가 걸려 있어도 '전체' 를 비운다는 점을 분명히 알린다
+  const note = hasFilter(k) ? '\n(필터와 무관하게 전체가 지워집니다)' : '';
+  if (!confirm(`${TBL[k].label} ${n}행을 모두 비울까요?${note}`)) return;
   cur[k] = [];
   TBL[k].render();
   edMsg(`${TBL[k].label} ${n}행을 비웠습니다`);
