@@ -777,6 +777,79 @@ def _attach_streak(results):
             r['streak'] = streak
 
 
+def diagnose():
+    """
+    각 공정의 적재·점검 상태를 한 번에 본다.
+
+    ★ shell 없이 화면에서 확인하려고 만든 것.
+      '적재는 됐는데 점검이 옛 데이터로 돈다' 같은 질문은
+      아래 네 값만 보면 대부분 바로 갈린다.
+        · 테이블 존재 여부
+        · 행수 / 최근 DATE   ← 웹이 실제로 보는 데이터
+        · 점검 대상 파라미터 수
+        · 대상 선정 방식(기준정보 / 기본규칙)
+    """
+    items, orphans = [], []
+
+    with _conn().cursor() as cur:
+        cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE %s "
+                    "ORDER BY 1", ['cmp_analysis_%'])
+        all_tables = [r[0] for r in cur.fetchall()]
+
+        # 등록된 공정 기준으로 본다 (테이블명에서 OPER_ID 를 역산하면
+        # 특수문자가 '_' 로 바뀌어 원래 ID 로 돌아오지 않는다)
+        opers = []
+        try:
+            from . import config_service as cfg
+            opers = [(o['oper_id'], o['oper_desc']) for o in cfg.list_opers()]
+        except Exception as e:
+            print(f'[monitor] 기준정보 조회 실패: {e.__class__.__name__}: {e}')
+
+        known = set()
+        for oper_id, desc in opers:
+            table = _table(oper_id)
+            known.add(table)
+            it = {'oper_id': oper_id, 'oper_desc': desc or '', 'table': table,
+                  'exists': table in all_tables, 'rows': 0, 'last_date': None,
+                  'lot_cds': [], 'n_param': 0, 'source': '', 'note': ''}
+
+            if not it['exists']:
+                it['note'] = '적재 테이블이 없습니다 — 배치가 안 돌았거나 OPER_ID 표기가 다릅니다'
+                items.append(it)
+                continue
+
+            cols = {c.upper() for c, _ in _cols(cur, table)}
+            cur.execute(f'SELECT COUNT(*) FROM {table}')
+            it['rows'] = cur.fetchone()[0]
+
+            if 'DATE' in cols:
+                cur.execute(f'SELECT MAX("DATE") FROM {table}')
+                d = cur.fetchone()[0]
+                it['last_date'] = str(d)[:19] if d else None
+            if 'LOT_CD' in cols:
+                cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {table} '
+                            f'WHERE "LOT_CD" IS NOT NULL ORDER BY 1')
+                it['lot_cds'] = [str(r[0]) for r in cur.fetchall()]
+
+            try:
+                params, source = monitored_params(cur, table, oper_id)
+                it['n_param'] = len(params)
+                it['source'] = source
+            except Exception as e:
+                it['note'] = f'점검 대상 조회 실패: {e}'
+
+            if not it['rows']:
+                it['note'] = '테이블은 있으나 행이 없습니다'
+            elif not it['n_param']:
+                it['note'] = '점검 대상 파라미터가 없습니다 — 기준정보를 확인하세요'
+            items.append(it)
+
+        orphans = sorted(t for t in all_tables if t not in known)
+
+    return {'items': items, 'orphans': orphans,
+            'n_table': len(all_tables), 'n_oper': len(opers)}
+
+
 def clear_results(oper_id=None, with_history=False):
     """
     저장된 점검 결과를 지운다.
