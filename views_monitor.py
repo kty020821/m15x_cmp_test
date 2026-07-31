@@ -15,6 +15,7 @@ Inline Monitoring 페이지 + API
     api/monitor/run/         공정 1건 점검 (POST oper_id)
     api/monitor/results/     저장된 최근 결과
     api/monitor/clear/       저장된 결과 초기화
+    api/monitor/diag/        적재·점검 상태 진단 (shell 대신 화면에서 확인)
     api/monitor/detail/      웨이퍼 상세 (POST oper_id, lot_cd, param)
 
   ※ 읽기 API 는 500 을 내지 않는다 — 200 + error 필드로 응답해
@@ -157,6 +158,18 @@ def monitor_clear(request):
         return JsonResponse({'deleted': n})
     except Exception as e:
         return _fail(f'초기화 실패: {e}', {'deleted': 0}, exc=e)
+
+
+@csrf_exempt
+def monitor_diag(request):
+    """
+    적재·점검 상태 진단.
+    테이블 존재 / 행수 / 최근 DATE / 점검 대상 수 / 선정 방식을 한 번에 본다.
+    """
+    try:
+        return JsonResponse(dict(ms.diagnose(), ok=True))
+    except Exception as e:
+        return _fail(f'진단 실패: {e}', {'items': [], 'orphans': []}, exc=e)
 
 
 @csrf_exempt
