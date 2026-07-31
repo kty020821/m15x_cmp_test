@@ -217,6 +217,7 @@ table.et tr.sel select { color: var(--tx-2); }
   <div class="bar">
     <button class="btn" onclick="importGoodDocs()">구닥스에서 가져오기</button>
     <button class="btn" onclick="runValidate()">전체 검증</button>
+    <button class="btn" onclick="checkMismatch()">타입 불일치 확인</button>
     <span class="msg" id="bar-msg"></span>
   </div>
 
@@ -288,6 +289,8 @@ const API_VALIDATE   = "{% url 'config-validate' %}";
 const API_SUGGEST    = "{% url 'config-suggest' %}";
 const API_SUGGESTLOT = "{% url 'config-suggest-lot' %}";
 const API_CLASSIFY   = "{% url 'config-classify' %}";
+const API_RECLASSIFY = "{% url 'config-reclassify' %}";
+const API_MISMATCH   = "{% url 'config-mismatch' %}";
 
 const PARAM_TYPES = {{ param_types|safe }};
 /* [[값, 표시명], ...] — 분류 규칙과 같은 소재지(param_types.py)에서 온다 */
@@ -871,6 +874,81 @@ async function autoClassify() {
   renderParams();
   edMsg(changed ? `${changed}개 파라미터의 타입을 자동 분류했습니다`
                 : '이미 자동 분류 결과와 같습니다');
+}
+
+/* ══════════════════════════════════════════════════
+   타입 불일치 정리
+
+   분류 규칙(param_types.py)을 고쳐도 이미 저장된 param_type 은
+   그대로 남는다. 그래서 규칙 변경 전에 '타입 자동 분류' 를 누른 공정과
+   그 뒤에 누른 공정이 같은 파라미터를 다른 타입으로 갖게 된다.
+   전 공정을 한 번에 맞춘다.
+   ══════════════════════════════════════════════════ */
+async function checkMismatch() {
+  msg('확인 중...');
+  const j = await postJSON(API_MISMATCH, {});
+  if (!j.ok) { msg(j.error || '조회 실패', true); return; }
+
+  const items = j.items || [];
+  if (!items.length) {
+    msg('타입 불일치 없음 — 저장된 타입이 현재 규칙과 모두 일치합니다');
+    document.getElementById('vpanel').style.display = 'none';
+    return;
+  }
+
+  // 같은 파라미터가 공정마다 다른 타입인 경우를 위로 올린다
+  const byParam = {};
+  items.forEach(i => { (byParam[i.param] = byParam[i.param] || []).push(i); });
+
+  msg(`타입 불일치 ${items.length}건 — 아래에서 확인 후 정리하세요`, true);
+  document.getElementById('vpanel').style.display = 'block';
+  document.getElementById('vlist').innerHTML = `
+    <div class="vitem bad">
+      <div class="h">저장된 타입이 현재 규칙과 다릅니다
+        <span class="tb">${items.length}건 / 파라미터 ${Object.keys(byParam).length}종</span></div>
+      ${Object.entries(byParam).slice(0, 40).map(([p, list]) => `
+        <div class="iss warn">· <b>${esc(p)}</b> —
+          ${list.map(i => `${esc(i.oper_id)}: ${esc(i.saved)}`).join(', ')}
+          → 현재 규칙 <b>${esc(list[0].auto)}</b></div>`).join('')}
+      ${Object.keys(byParam).length > 40
+        ? `<div class="iss">· 외 ${Object.keys(byParam).length - 40}종</div>` : ''}
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn pri sm" onclick="reclassifyAll('clear')">
+          자동으로 되돌리기 (권장)</button>
+        <button class="btn sm" onclick="reclassifyAll('refresh')">
+          현재 규칙으로 덮어쓰기</button>
+      </div>
+      <div class="iss" style="margin-top:8px;color:var(--tx-muted);">
+        · <b>자동으로 되돌리기</b> — 저장된 타입을 비웁니다. 읽을 때마다
+        규칙으로 분류하므로 앞으로 규칙을 고쳐도 자동으로 따라갑니다.<br>
+        · <b>덮어쓰기</b> — 지금 규칙 결과를 저장합니다. 규칙을 또 고치면
+        다시 어긋나므로 그때마다 실행해야 합니다.<br>
+        · 정리 후 인라인 모니터링에서 <b>결과 초기화 → 점검 시작</b> 을
+        해야 점검 결과의 타입도 갱신됩니다.
+      </div>
+    </div>`;
+  document.getElementById('vpanel').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+async function reclassifyAll(mode) {
+  const label = mode === 'clear' ? '자동으로 되돌리기' : '현재 규칙으로 덮어쓰기';
+  const warn = mode === 'clear'
+    ? '\n손으로 지정한 타입이 있었다면 함께 사라집니다.' : '';
+  if (!confirm(`전 공정 파라미터 타입을 ${label} 할까요?${warn}`)) return;
+
+  msg('정리 중...');
+  const j = await postJSON(API_RECLASSIFY, {mode: mode});
+  if (!j.ok) { msg(j.error || '재분류 실패', true); return; }
+
+  msg(`타입 정리 완료 — ${j.changed}건 변경 (전체 ${j.total}건). ` +
+      `인라인 모니터링에서 결과 초기화 후 다시 점검하세요`);
+  if (j.detail && j.detail.length) {
+    console.info('[config] 변경 내역',
+      j.detail.map(d => `${d.oper_id}.${d.param}: ${d.before} → ${d.after}`).join('\n'));
+  }
+  document.getElementById('vpanel').style.display = 'none';
+  if (cur && cur.oper_id) openOper(cur.oper_id);   // 열려 있던 공정 새로고침
+  loadOpers();
 }
 
 /* ══════════════════════════════════════════════════
