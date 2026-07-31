@@ -208,6 +208,75 @@ def get_oper(oper_id):
 # ══════════════════════════════════════════════════════════
 # 저장 / 삭제
 # ══════════════════════════════════════════════════════════
+def type_mismatches():
+    """
+    저장된 param_type 과 현재 규칙의 자동 분류 결과가 다른 항목.
+
+    분류 규칙(param_types.py)을 고치면 이미 저장된 타입은 그대로 남아
+    같은 파라미터가 공정마다 다른 타입을 갖게 된다. 그걸 찾아낸다.
+    """
+    ensure_tables()
+    out = []
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT p.oper_id, o.oper_desc, p.param, COALESCE(p.param_type, '')
+            FROM {T_PARAM} p LEFT JOIN {T_OPER} o ON o.oper_id = p.oper_id
+            ORDER BY p.param, p.oper_id
+        ''')
+        for oper_id, desc, param, saved in cur.fetchall():
+            auto = pt.classify(param)
+            if saved and saved != auto:
+                out.append({'oper_id': oper_id, 'oper_desc': desc or '',
+                            'param': param, 'saved': saved, 'auto': auto})
+    return out
+
+
+def reclassify_all(mode='refresh', dry_run=False):
+    """
+    전 공정의 파라미터 타입을 현재 규칙으로 정리한다.
+
+      mode='refresh'  저장된 타입을 지금 자동 분류 결과로 덮어쓴다.
+                      화면에 타입이 그대로 보이지만, 규칙을 또 고치면
+                      다시 어긋나므로 그때마다 실행해야 한다.
+
+      mode='clear'    저장된 타입을 비운다(=자동).
+                      읽을 때 param_types.resolve 가 매번 분류하므로
+                      규칙을 고치면 저장된 값을 건드리지 않아도 따라간다.
+                      ★ 이쪽이 근본 해결이다. 다만 손으로 지정한
+                        타입이 있었다면 같이 사라진다.
+
+      dry_run=True    바꾸지 않고 무엇이 바뀔지만 돌려준다.
+    """
+    ensure_tables()
+    if mode not in ('refresh', 'clear'):
+        raise ValueError("mode 는 'refresh' 또는 'clear' 여야 합니다")
+
+    changed, detail = 0, []
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT id, oper_id, param, COALESCE(param_type, '')
+            FROM {T_PARAM} ORDER BY oper_id, param
+        ''')
+        rows = cur.fetchall()
+
+        for rid, oper_id, param, saved in rows:
+            new_t = '' if mode == 'clear' else pt.classify(param)
+            if new_t == saved:
+                continue
+            if not dry_run:
+                cur.execute(f'UPDATE {T_PARAM} SET param_type = %s WHERE id = %s',
+                            [new_t, rid])
+            changed += 1
+            if len(detail) < 200:
+                detail.append({
+                    'oper_id': oper_id, 'param': param,
+                    'before': saved or '(자동)', 'after': new_t or '(자동)',
+                })
+
+    return {'mode': mode, 'dry_run': dry_run, 'total': len(rows),
+            'changed': changed, 'detail': detail}
+
+
 def save_oper(d, user=''):
     """
     공정 1건 저장 (덮어쓰기).
