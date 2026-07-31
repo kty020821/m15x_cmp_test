@@ -60,8 +60,17 @@ def monitor_page(request):
 @csrf_exempt
 def monitor_opers(request):
     """
-    점검 대상 공정 = 등록된 OPER_ID 중 테이블이 실제로 있는 것.
-    (분석 페이지와 같은 규칙 — 테이블명 역산 금지)
+    점검 대상 공정 = 등록된 OPER_ID 중 적재 테이블이 실제로 있는 것.
+
+    ★ 1순위는 기준정보(config_service.list_opers)다.
+      기준정보를 자체 DB 로 옮긴 뒤에도 여기가 tech_map.OPER_NAME_MAP 만
+      보고 있어서, 기준정보에 8개를 등록해도 tech_map 에 5개만 있으면
+      5개만 점검되는 문제가 있었다. 등록 창구가 하나면 목록도 하나여야 한다.
+
+    ★ 2순위 tech_map, 3순위 적재 테이블 그대로 — 어느 단계에서도
+      목록이 비어 화면이 멈추지 않게 한다.
+      (테이블명에서 OPER_ID 를 역산하는 건 마지막 폴백에서만.
+       특수문자가 '_' 로 바뀌어 원래 ID 로 돌아오지 않는다)
     """
     try:
         with connections['analysis_db'].cursor() as cur:
@@ -70,30 +79,58 @@ def monitor_opers(request):
                 ['cmp_analysis_%'])
             tables = {r[0] for r in cur.fetchall()}
 
-        names = {}
+        # ── 1순위: 기준정보 ──────────────────────────────
+        out, source = [], ''
         try:
-            names = tech_map.oper_names()
-        except AttributeError:
-            print('[monitor] tech_map.oper_names() 가 없습니다 — '
-                  'tech_map.py 를 갱신하면 공정명이 표시됩니다 (동작은 계속)')
+            from . import config_service as cs
+            for o in cs.list_opers():
+                if str(o.get('use_yn') or 'Y').upper() == 'N':
+                    continue                       # 미사용 공정은 제외
+                oid = o['oper_id']
+                if ms._table(oid) in tables:
+                    desc = o.get('oper_desc') or ''
+                    out.append({'oper_id': oid,
+                                'label': f'{desc} ({oid})' if desc else oid})
+            if out:
+                source = '기준정보'
         except Exception as e:
-            print(f'[monitor] 공정명 조회 실패: {e.__class__.__name__}: {e}')
+            print(f'[monitor] 기준정보 공정 목록 조회 실패: '
+                  f'{e.__class__.__name__}: {e}')
 
-        out = []
-        for oid, desc in names.items():
-            if ms._table(oid) in tables:
-                out.append({'oper_id': oid,
-                            'label': f'{desc} ({oid})' if desc else oid})
+        # ── 2순위: tech_map ──────────────────────────────
+        if not out:
+            names = {}
+            try:
+                names = tech_map.oper_names()
+            except AttributeError:
+                print('[monitor] tech_map.oper_names() 가 없습니다 (동작은 계속)')
+            except Exception as e:
+                print(f'[monitor] 공정명 조회 실패: {e.__class__.__name__}: {e}')
+            for oid, desc in names.items():
+                if ms._table(oid) in tables:
+                    out.append({'oper_id': oid,
+                                'label': f'{desc} ({oid})' if desc else oid})
+            if out:
+                source = 'tech_map'
+
         if out:
             out.sort(key=lambda o: o['label'])
-            return JsonResponse({'opers': out})
+            res = {'opers': out, 'source': source}
+            # 등록에 없는데 테이블만 남은 것 — 점검에서 빠지므로 알려준다
+            known = {ms._table(o['oper_id']) for o in out}
+            orphan = sorted(t for t in tables if t not in known)
+            if orphan:
+                res['note'] = (f'{source} 에 없어 점검에서 제외된 테이블 '
+                               f'{len(orphan)}개: {", ".join(orphan[:8])}')
+            return JsonResponse(res)
 
-        # OPER_NAME_MAP 미작성 시 화면이 비지 않도록 폴백
+        # ── 3순위: 적재 테이블 그대로 ────────────────────
         return JsonResponse({
             'opers': [{'oper_id': t.replace('cmp_analysis_', '').upper(),
                        'label':   t.replace('cmp_analysis_', '').upper()}
                       for t in sorted(tables)],
-            'note': 'tech_map.OPER_NAME_MAP 미등록 — 공정명 없이 표시합니다',
+            'source': '적재테이블',
+            'note': '기준정보에 등록된 공정이 없어 적재 테이블을 그대로 표시합니다',
         })
     except Exception as e:
         return _fail(f'공정 목록 조회 실패: {e}', {'opers': []}, exc=e)
