@@ -17,6 +17,7 @@ equipment/views_config.py
     api/config/suggest/         적재 테이블의 숫자 컬럼을 후보로 제안
     api/config/suggest-lot/     적재 테이블의 LOT_CD 를 후보로 제안
     api/config/classify/        파라미터 이름 → 타입 자동 분류
+    api/config/reclassify/      전 공정 타입 일괄 재분류 (규칙 변경 후 정리)
 
   ※ 조회 API 는 200 + error 필드로 응답한다(화면이 안 죽게).
     저장/삭제는 결과를 화면에 명확히 보여줘야 하므로 성공 여부를
@@ -175,6 +176,41 @@ def config_classify(request):
         return JsonResponse({'ok': True, 'result': cs.classify_params(params)})
     except Exception as e:
         return _fail(f'분류 실패: {e}', {'result': []}, exc=e)
+
+
+@csrf_exempt
+def config_reclassify(request):
+    """
+    전 공정 파라미터 타입 일괄 정리.
+
+    분류 규칙(param_types.py)을 고쳐도 이미 저장된 param_type 은 그대로라
+    같은 파라미터가 공정마다 다른 타입을 갖게 된다. 그걸 맞춘다.
+
+      mode=refresh  현재 규칙 결과로 덮어쓰기
+      mode=clear    비우기(자동) — 이후 규칙 변경이 자동 반영됨
+      dry_run=true  무엇이 바뀔지만 확인
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    b = _body(request)
+    try:
+        res = cs.reclassify_all(mode=b.get('mode', 'refresh'),
+                                dry_run=bool(b.get('dry_run')))
+        res['ok'] = True
+        return JsonResponse(res)
+    except ValueError as e:
+        return _fail(str(e))
+    except Exception as e:
+        return _fail(f'재분류 실패: {e}', {'changed': 0}, exc=e)
+
+
+@csrf_exempt
+def config_mismatch(request):
+    """저장된 타입과 현재 규칙이 어긋난 항목 목록"""
+    try:
+        return JsonResponse({'ok': True, 'items': cs.type_mismatches()})
+    except Exception as e:
+        return _fail(f'조회 실패: {e}', {'items': []}, exc=e)
 
 
 @csrf_exempt
