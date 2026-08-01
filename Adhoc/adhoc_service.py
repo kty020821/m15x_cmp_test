@@ -42,6 +42,10 @@ KEEP_DAYS = 7
 # 한 번에 조회할 수 있는 최대 기간 (Lake 부하·시간 보호)
 MAX_RANGE_DAYS = 400
 
+# '실행중' 인데 이 시간이 지나도록 끝나지 않으면 멈춘 것으로 보고
+# 대기로 되돌릴 수 있게 한다 (워커 재시작 등으로 스레드가 사라진 경우)
+STALE_MINUTES = 30
+
 STATUS = ('대기', '실행중', '완료', '실패', '취소')
 
 
@@ -274,6 +278,95 @@ def cleanup(days=KEEP_DAYS):
     return removed
 
 
+def claim_job(job_id):
+    """
+    요청을 '실행중' 으로 선점한다.
+
+    ★ 원자적 UPDATE 여야 한다.
+      gunicorn 워커가 여러 개면 '조회 후 갱신' 사이에 다른 워커가 끼어들어
+      같은 요청을 두 번 실행할 수 있다. WHERE 절에 상태를 넣고
+      RETURNING 으로 실제 갱신 여부를 받아야 한 번만 잡힌다.
+
+    반환: 선점 성공 여부
+    """
+    ensure_tables()
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            UPDATE {T_JOB}
+            SET status = '실행중', started_at = %s, message = '실행 준비 중',
+                finished_at = NULL
+            WHERE id = %s AND status IN ('대기', '실패')
+            RETURNING id
+        ''', [datetime.now(), int(job_id)])
+        return cur.fetchone() is not None
+
+
+def reset_stale(minutes=STALE_MINUTES):
+    """
+    '실행중' 인데 오래 멈춰 있는 요청을 '대기' 로 되돌린다.
+
+    웹에서 백그라운드 스레드로 돌리면 gunicorn 워커가 재시작될 때
+    작업이 사라지는데 상태는 '실행중' 으로 남는다. 그러면 다시 실행할
+    방법이 없으므로 되살릴 수 있게 한다.
+    """
+    ensure_tables()
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            UPDATE {T_JOB}
+            SET status = '대기',
+                message = '실행이 중단되어 대기로 되돌렸습니다 (재실행 가능)'
+            WHERE status = '실행중' AND COALESCE(started_at, requested_at) < %s
+            RETURNING id
+        ''', [cutoff])
+        ids = [r[0] for r in cur.fetchall()]
+    if ids:
+        print(f'[adhoc] 멈춘 요청 {len(ids)}건을 대기로 되돌림: {ids}')
+    return ids
+
+
+def run_job_async(job_id):
+    """
+    웹에서 백그라운드로 실행한다.
+
+    ★ 웹 요청 안에서 직접 돌리면 안 된다 — 1년치 조회는 몇 분 걸려
+      게이트웨이 타임아웃에 걸린다. 스레드로 띄우고 화면은 상태를 폴링한다.
+
+    ★ 스레드에서는 DB 커넥션을 직접 닫아야 한다.
+      Django 는 요청이 끝날 때 커넥션을 정리하는데, 스레드에는 그 훅이
+      없어서 그냥 두면 커넥션이 쌓인다.
+
+    ★ 선점에 실패하면(이미 다른 워커가 잡았거나 상태가 안 맞으면)
+      스레드를 띄우지 않는다.
+    """
+    import threading
+    from django.db import connections as _conns
+
+    if not claim_job(job_id):
+        job = get_job(job_id)
+        st = job['status'] if job else '없음'
+        return {'ok': False,
+                'error': f'실행할 수 없는 상태입니다 ({st}). '
+                         f'이미 실행 중이거나 완료된 요청입니다.'}
+
+    def _worker():
+        try:
+            run_job(job_id, claimed=True)
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                _set_status(job_id, '실패', finished=True,
+                            message=f'{e.__class__.__name__}: {e}')
+            except Exception:
+                pass
+        finally:
+            _conns.close_all()          # 스레드 커넥션 정리
+
+    t = threading.Thread(target=_worker, name=f'adhoc-{job_id}', daemon=True)
+    t.start()
+    return {'ok': True, 'job_id': job_id}
+
+
 def _set_status(job_id, status, message=None, rows=None, started=False,
                 finished=False):
     sets, vals = ['status = %s'], [status]
@@ -293,21 +386,29 @@ def _set_status(job_id, status, message=None, rows=None, started=False,
 # ══════════════════════════════════════════════════════════
 # 실행 — 배치 서버에서만 돈다 (Lake 접근 필요)
 # ══════════════════════════════════════════════════════════
-def run_job(job_id, lake=None):
+def run_job(job_id, lake=None, claimed=False):
     """
     요청 1건 실행. 기존 조회 함수를 그대로 쓰되 날짜 범위만 사용자 값으로.
 
     ★ 정기 적재와 같은 파이프라인을 탄다 —
       fetch → pivot/prepare → merge → finalize → 저장.
       다르게 만들면 같은 데이터인데 결과가 달라진다.
+
+    claimed=True 면 호출자가 이미 claim_job 으로 선점한 것이므로
+    상태 검사를 건너뛴다 (웹 백그라운드 실행 경로).
     """
     from . import analysis_service as svc
 
     job = get_job(job_id)
     if not job:
         return {'ok': False, 'error': f'요청 {job_id} 을 찾을 수 없습니다'}
-    if job['status'] not in ('대기', '실패'):
-        return {'ok': False, 'error': f"실행할 수 없는 상태입니다 ({job['status']})"}
+
+    if not claimed:
+        # 러너(run_adhoc.py)도 같은 선점 규칙을 쓴다 —
+        # 웹에서 실행 중인 요청을 러너가 중복 실행하지 않도록.
+        if not claim_job(job_id):
+            return {'ok': False,
+                    'error': f"실행할 수 없는 상태입니다 ({job['status']})"}
 
     c = job['cond']
     _set_status(job_id, '실행중', message='조회 준비 중', started=True)
@@ -390,6 +491,10 @@ def run_pending(limit=3, lake=None):
 
     results = []
     for jid in ids:
+        # 웹에서 이미 실행 중일 수 있으므로 선점에 성공한 것만 처리한다
+        if not claim_job(jid):
+            print(f'[adhoc] 요청 {jid} 은 이미 다른 곳에서 실행 중 — 건너뜀')
+            continue
         print(f'[adhoc] 요청 {jid} 실행')
-        results.append({'job_id': jid, **run_job(jid, lake=lake)})
+        results.append({'job_id': jid, **run_job(jid, lake=lake, claimed=True)})
     return {'processed': len(results), 'results': results}
