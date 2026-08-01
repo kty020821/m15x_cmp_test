@@ -79,10 +79,24 @@ def run_query(lake, query):
     return lake.get_rst().toPandas()
 
 
-def _date_chunks(days=30, freq='30D'):
-    """조회 기간을 (dt_start, dt_end, mt_start, mt_end) 단위로 분할"""
-    date_end   = date.today()
-    date_start = date_end - timedelta(days=days)
+def _date_chunks(days=30, freq='30D', date_from=None, date_to=None):
+    """
+    조회 기간을 (dt_start, dt_end, mt_start, mt_end) 단위로 분할.
+
+      기본        오늘부터 days 일 전까지 (정기 적재)
+      date_from/to 를 주면 그 구간 (1회성 임의 기간 조회)
+                  — 'YYYY-MM-DD' 또는 date 객체
+    """
+    if date_from or date_to:
+        date_start = pd.to_datetime(date_from).date() if date_from else None
+        date_end   = pd.to_datetime(date_to).date() if date_to else date.today()
+        if date_start is None:
+            date_start = date_end - timedelta(days=days)
+        if date_start > date_end:
+            date_start, date_end = date_end, date_start
+    else:
+        date_end   = date.today()
+        date_start = date_end - timedelta(days=days)
     rng = pd.date_range(start=date_start, end=date_end, freq=freq)
     if len(rng) < 2 or rng[-1].date() < date_end:
         rng = rng.append(pd.DatetimeIndex([pd.Timestamp(date_end)]))
@@ -264,11 +278,12 @@ def get_oper_cond(df_info, oper_id):
 #    idle / layer_change 플래그 + APC 파라미터
 #    ※ c.eqp_id 필수 (a 에는 없음)
 # ══════════════════════════════════════════════════════════
-def fetch_apc(lake, cond, days=30):
+def fetch_apc(lake, cond, days=30, date_from=None, date_to=None):
     fab = cond['fab']
     dfs = []
 
-    for dt_s, dt_e, mt_s, mt_e in _date_chunks(days):
+    for dt_s, dt_e, mt_s, mt_e in _date_chunks(days, date_from=date_from,
+                                                date_to=date_to):
         query = f"""
 select distinct *
 from (
@@ -311,7 +326,7 @@ where d.r2r_rank = 1
 #    측정값(long) + 사전공정 장비/챔버
 #    ※ lot 조건은 right(lot_cd, 3) — 3자리 (5E2). 2자리로 하면 0행!
 # ══════════════════════════════════════════════════════════
-def fetch_src(lake, cond, days=30):
+def fetch_src(lake, cond, days=30, date_from=None, date_to=None):
     fab      = cond['fab']
     oper_id  = cond['oper_id']
     pre_oper = str(cond.get('pre_oper_id') or '')
@@ -324,7 +339,8 @@ def fetch_src(lake, cond, days=30):
 
     dfs = []
     for lot_code in cond['lot_cd_list']:
-        for dt_s, dt_e, mt_s, mt_e in _date_chunks(days):
+        for dt_s, dt_e, mt_s, mt_e in _date_chunks(days, date_from=date_from,
+                                                    date_to=date_to):
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
 
@@ -487,7 +503,7 @@ def _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_infos):
     return d
 
 
-def fetch_mes(lake, cond, df_src, days=30):
+def fetch_mes(lake, cond, df_src, days=30, date_from=None, date_to=None):
     """
     MES(LC) 조회.
       df_src : SRC 결과 — 여기서 main_eqp_id 로 장비 목록을 뽑는다
@@ -516,7 +532,8 @@ def fetch_mes(lake, cond, df_src, days=30):
     eqp_in = "'" + "','".join(map(str, eqp_ids)) + "'"
 
     dfs = []
-    for dt_s, dt_e, _, _ in _date_chunks(days):
+    for dt_s, dt_e, _, _ in _date_chunks(days, date_from=date_from,
+                                         date_to=date_to):
         query = f"""
 select eqp_id, event_tm, last_recipe_id as recipe_id,
        resv_field_val_3 as lot_id
