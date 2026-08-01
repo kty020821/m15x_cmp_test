@@ -43,8 +43,11 @@ urlpatterns = [
     path('api/adhoc/delete/',  vh.adhoc_delete,  name='adhoc-delete'),
     path('api/adhoc/prefill/', vh.adhoc_prefill, name='adhoc-prefill'),
     path('api/adhoc/opers/',   vh.adhoc_opers,   name='adhoc-opers'),
+    path('api/adhoc/run/',     vh.adhoc_run,     name='adhoc-run'),
+    path('api/adhoc/reset/',   vh.adhoc_reset,   name='adhoc-reset'),
     path('api/issue/context/', vh.issue_context, name='issue-context'),
     path('api/issue/analyze/', vh.issue_analyze, name='issue-analyze'),
+    path('api/issue/scan/',    vh.issue_scan,    name='issue-scan'),
 
     # Inline Monitoring (신규)
     path('monitor/',             vm.monitor_page,    name='monitor'),
