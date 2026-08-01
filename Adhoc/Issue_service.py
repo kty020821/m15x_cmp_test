@@ -1,0 +1,523 @@
+"""
+equipment/issue_service.py
+════════════════════════════════════════════════════════════
+이슈 구간 분석
+
+  "이 기간이 이상했다" 혹은 "이 랏들이 이상했다" 를 사용자가 지목하면,
+  그 구간이 실제로 이상한지 판정하고 변곡점을 찾아낸다.
+
+  적재된 cmp_analysis_* 테이블이면 무엇이든 대상이 된다 —
+  정기 적재분도, 1회성 조회 결과(ADHOC_*)도 같은 코드로 분석한다.
+
+────────────────────────────────────────────────────────────
+구간 지정 방법 (mode)
+
+  range   기간   date_from ~ date_to
+  lots    랏     LOT_ID 목록 — "이 랏들만 이상했나" 를 볼 때
+  wafers  웨이퍼 id 목록 — 차트에서 드래그한 결과 등
+
+  어느 방법이든 '선택 구간' 과 '나머지(기준)' 로 갈라 비교한다.
+  ★ 기준을 전체가 아니라 '나머지' 로 잡는 이유
+    선택 구간이 전체에 포함되면 이상값이 기준선을 끌어올려
+    차이가 실제보다 작게 나온다. 빼고 비교해야 제대로 드러난다.
+
+판정 (인라인 모니터링과 같은 관점)
+  L 수준이탈  선택 평균이 기준 대비 몇 σ
+  R 범위이탈  기준 min/max 밖 웨이퍼 수
+  S 산포확대  표준편차가 몇 배
+  E 단독이탈  장비·챔버 한 대만 벗어남
+
+변곡점
+  시간순으로 놓고 "여기서 수준이 바뀌었다" 는 지점을 찾는다.
+  이진 분할(binary segmentation) — 모든 분할점에서 전후 평균 차이를
+  t 통계량으로 재고, 가장 큰 지점이 기준을 넘으면 변곡점으로 확정한 뒤
+  좌우 구간에서 다시 찾는다. 외부 라이브러리 없이 동작한다.
+════════════════════════════════════════════════════════════
+"""
+
+import re
+from datetime import datetime
+
+from django.db import connections
+
+# ── 판정 기준 (monitor_service 와 같은 값으로 유지) ────────
+SIGMA_WARN   = 1.0
+SIGMA_ALERT  = 2.0
+OUT_WARN     = 1
+OUT_ALERT    = 3
+EQP_SIGMA    = 2.0
+SPREAD_WARN  = 1.5
+SPREAD_ALERT = 2.0
+MIN_N        = 5
+
+# ── 변곡점 탐지 ───────────────────────────────────────────
+CP_MIN_SEG   = 5      # 한 구간에 이만큼은 있어야 분할을 시도한다
+CP_THRESHOLD = 3.0    # t 통계량이 이 이상이면 변곡점
+CP_MAX       = 5      # 최대 몇 개까지 찾을지
+CP_MIN_SIGMA = 0.8    # 전후 평균 차이가 이 σ 미만이면 무시 (미세 변동 제외)
+
+# LOT 판정
+LOT_MIN_N    = 3      # 랏당 웨이퍼가 이보다 적으면 신뢰도 낮음 표기
+
+
+def _conn():
+    return connections['analysis_db']
+
+
+def _table(oper_id):
+    return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
+
+
+def _exists(cur, t):
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL", [t])
+    return bool(cur.fetchone()[0])
+
+
+def _cols(cur, t):
+    cur.execute("""
+        SELECT upper(column_name) FROM information_schema.columns
+        WHERE table_name = %s
+    """, [t])
+    return {r[0] for r in cur.fetchall()}
+
+
+def _f(v, nd=3):
+    return round(float(v), nd) if v is not None else None
+
+
+def _safe_name(v):
+    return bool(v) and bool(re.match(r'^[0-9A-Za-z_]+$', str(v)))
+
+
+# ══════════════════════════════════════════════════════════
+# 대상 정보 — 화면이 구간을 지정할 수 있게 후보를 준다
+# ══════════════════════════════════════════════════════════
+def context(oper_id, lot_cd=None):
+    """
+    이 테이블에서 고를 수 있는 것들.
+      params   숫자 파라미터
+      lot_cds  device
+      lot_ids  실제 랏 (선택 대상)
+      date_min/max  데이터가 있는 기간
+    """
+    table = _table(oper_id)
+    num = {'smallint', 'integer', 'bigint', 'decimal',
+           'numeric', 'real', 'double precision'}
+    meta = {'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
+            'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
+            'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY'}
+
+    with _conn().cursor() as cur:
+        if not _exists(cur, table):
+            return {'ok': False, 'error': f'{table} 이 없습니다'}
+
+        cur.execute("""
+            SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_name = %s ORDER BY ordinal_position
+        """, [table])
+        rows = cur.fetchall()
+        params = [c.upper() for c, d in rows
+                  if d.lower() in num and c.upper() not in meta
+                  and not c.upper().endswith(('_OFFSET', '_FORMULA'))]
+        have = {c.upper() for c, _ in rows}
+
+        cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {table} '
+                    f'WHERE "LOT_CD" IS NOT NULL ORDER BY 1')
+        lot_cds = [str(r[0]) for r in cur.fetchall()]
+
+        where, args = '', []
+        if lot_cd:
+            where, args = 'WHERE "LOT_CD" = %s', [lot_cd]
+
+        cur.execute(f'SELECT MIN("DATE"), MAX("DATE"), COUNT(*) '
+                    f'FROM {table} {where}', args)
+        dmin, dmax, n = cur.fetchone()
+
+        lot_ids = []
+        if 'LOT_ID' in have:
+            # 랏 선택 후보 — 시간순이어야 눈으로 찾기 쉽다
+            cur.execute(f'''
+                SELECT "LOT_ID", COUNT(*), MIN("DATE")
+                FROM {table} {where}
+                {"AND" if where else "WHERE"} "LOT_ID" IS NOT NULL
+                GROUP BY "LOT_ID" ORDER BY MIN("DATE")
+            ''', args)
+            lot_ids = [{'lot_id': r[0], 'n': r[1],
+                        'date': str(r[2])[:19] if r[2] else ''}
+                       for r in cur.fetchall()]
+
+    return {'ok': True, 'params': params, 'lot_cds': lot_cds,
+            'lot_ids': lot_ids, 'rows': n,
+            'date_min': str(dmin)[:19] if dmin else None,
+            'date_max': str(dmax)[:19] if dmax else None}
+
+
+# ══════════════════════════════════════════════════════════
+# 구간 지정 → SQL 조건
+# ══════════════════════════════════════════════════════════
+def _sel_clause(sel, have):
+    """
+    선택 구간을 (조건문, 인자, 설명) 으로.
+    선택에 해당하지 않는 나머지는 NOT (조건) 으로 쓴다.
+    """
+    mode = (sel or {}).get('mode', 'range')
+
+    if mode == 'range':
+        d1 = str(sel.get('date_from') or '').strip()
+        d2 = str(sel.get('date_to') or '').strip()
+        if not d1 or not d2:
+            raise ValueError('이슈 구간의 시작·종료 일시를 지정하세요')
+        if d1 > d2:
+            d1, d2 = d2, d1
+        return ('"DATE" >= %s AND "DATE" <= %s', [d1, d2],
+                f'기간 {d1} ~ {d2}')
+
+    if mode == 'lots':
+        lots = [str(v).strip() for v in (sel.get('lot_ids') or []) if str(v).strip()]
+        if not lots:
+            raise ValueError('이슈 랏(LOT_ID)을 하나 이상 지정하세요')
+        if 'LOT_ID' not in have:
+            raise ValueError('이 테이블에 LOT_ID 컬럼이 없습니다')
+        ph = ",".join(["%s"] * len(lots))
+        return (f'"LOT_ID" IN ({ph})', lots,
+                f'랏 {len(lots)}개 ({", ".join(lots[:5])}'
+                f'{" 외" if len(lots) > 5 else ""})')
+
+    if mode == 'wafers':
+        ids = [int(v) for v in (sel.get('ids') or []) if str(v).strip().isdigit()]
+        if not ids:
+            raise ValueError('선택된 웨이퍼가 없습니다')
+        ph = ",".join(["%s"] * len(ids))
+        return (f'id IN ({ph})', ids, f'웨이퍼 {len(ids)}장')
+
+    raise ValueError(f'알 수 없는 구간 지정 방식: {mode}')
+
+
+def _stats(cur, table, param, where, args):
+    cur.execute(f'''
+        SELECT COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
+               MIN("{param}"), MAX("{param}"),
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY "{param}")
+        FROM {table} WHERE {where} AND "{param}" IS NOT NULL
+    ''', args)
+    n, avg, std, mn, mx, med = cur.fetchone()
+    return {'n': n or 0, 'avg': _f(avg), 'std': _f(std),
+            'min': _f(mn), 'max': _f(mx), 'med': _f(med)}
+
+
+# ══════════════════════════════════════════════════════════
+# 변곡점 탐지
+# ══════════════════════════════════════════════════════════
+def _t_stat(vals, i):
+    """분할점 i 에서 전후 평균 차이의 t 통계량"""
+    n1, n2 = i, len(vals) - i
+    if n1 < 2 or n2 < 2:
+        return 0.0, None, None
+    a, b = vals[:i], vals[i:]
+    m1 = sum(a) / n1
+    m2 = sum(b) / n2
+    v1 = sum((x - m1) ** 2 for x in a) / (n1 - 1)
+    v2 = sum((x - m2) ** 2 for x in b) / (n2 - 1)
+    sp = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)
+    if sp <= 0:
+        return (0.0, m1, m2) if m1 == m2 else (999.0, m1, m2)
+    se = (sp * (1 / n1 + 1 / n2)) ** 0.5
+    return (abs(m2 - m1) / se if se > 0 else 0.0), m1, m2
+
+
+def _find_change_points(series, base_std, depth=0, offset=0, found=None):
+    """
+    이진 분할로 변곡점을 찾는다.
+
+    series : [{'x': 라벨, 'v': 값}, ...]  시간순
+    base_std : σ 환산용 기준 표준편차
+
+    가장 강한 분할점을 찾아 확정하고, 좌우 구간에서 다시 찾는다.
+    미세한 변동까지 잡으면 노이즈가 되므로 CP_MIN_SIGMA 로 거른다.
+    """
+    if found is None:
+        found = []
+    if len(series) < CP_MIN_SEG * 2 or len(found) >= CP_MAX or depth > 3:
+        return found
+
+    vals = [s['v'] for s in series]
+    best_i, best_t, best_m1, best_m2 = None, 0.0, None, None
+    for i in range(CP_MIN_SEG, len(vals) - CP_MIN_SEG + 1):
+        t, m1, m2 = _t_stat(vals, i)
+        if t > best_t:
+            best_i, best_t, best_m1, best_m2 = i, t, m1, m2
+
+    if best_i is None or best_t < CP_THRESHOLD:
+        return found
+
+    shift = (best_m2 - best_m1)
+    shift_sigma = (shift / float(base_std)) if base_std else None
+    if shift_sigma is not None and abs(shift_sigma) < CP_MIN_SIGMA:
+        return found            # 통계적으로는 유의해도 실무적으로 미미
+
+    found.append({
+        'at': series[best_i]['x'],
+        'index': offset + best_i,
+        'before_avg': _f(best_m1), 'after_avg': _f(best_m2),
+        'shift': _f(shift), 'shift_sigma': round(shift_sigma, 2) if shift_sigma else None,
+        't': round(best_t, 2),
+        'n_before': best_i, 'n_after': len(vals) - best_i,
+        'direction': '상승' if shift > 0 else '하락',
+    })
+
+    _find_change_points(series[:best_i], base_std, depth + 1, offset, found)
+    _find_change_points(series[best_i:], base_std, depth + 1,
+                        offset + best_i, found)
+    found.sort(key=lambda c: c['index'])
+    return found
+
+
+# ══════════════════════════════════════════════════════════
+# 본체
+# ══════════════════════════════════════════════════════════
+def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
+    """
+    이슈 구간 분석.
+
+      unit='wafer' 웨이퍼 단위로 변곡점 탐지 (세밀)
+      unit='lot'   랏 평균으로 (노이즈가 적어 큰 흐름이 보인다)
+
+    반환: 판정 · 선택/기준 통계 · 변곡점 · 랏별 · 장비별 · 시계열
+    """
+    if not _safe_name(param):
+        raise ValueError('파라미터 이름 형식 오류')
+
+    table = _table(oper_id)
+    with _conn().cursor() as cur:
+        if not _exists(cur, table):
+            raise ValueError(f'{table} 이 없습니다')
+        have = _cols(cur, table)
+        if param.upper() not in have:
+            raise ValueError(f'{param} 컬럼이 없습니다')
+
+        # 대상 범위 (device 한정)
+        base_where, base_args = '1=1', []
+        if lot_cd and 'LOT_CD' in have:
+            base_where, base_args = '"LOT_CD" = %s', [lot_cd]
+
+        sel_sql, sel_args, sel_desc = _sel_clause(sel, have)
+        in_where  = f'({base_where}) AND ({sel_sql})'
+        out_where = f'({base_where}) AND NOT ({sel_sql})'
+        in_args   = base_args + sel_args
+        out_args  = base_args + sel_args
+
+        s_in  = _stats(cur, table, param, in_where, in_args)
+        s_out = _stats(cur, table, param, out_where, out_args)
+
+        r = {
+            'oper_id': oper_id, 'lot_cd': lot_cd, 'param': param,
+            'sel_desc': sel_desc, 'unit': unit,
+            'sel': s_in, 'base': s_out,
+            'sigma': None, 'out_cnt': 0, 'spread': None,
+            'checks': [], 'reasons': [], 'status': '정상',
+            'change_points': [], 'cp_note': '',
+            'lots': [], 'eqp': [], 'series': [],
+        }
+
+        if not s_in['n']:
+            r['status'] = '데이터없음'
+            r['reasons'] = ['선택한 구간에 해당하는 데이터가 없습니다']
+            return r
+        if not s_out['n']:
+            r['status'] = '기준없음'
+            r['reasons'] = ['선택 구간을 뺀 나머지 데이터가 없어 비교할 수 없습니다']
+            return r
+
+        level = 0
+        reasons, checks = [], []
+        b_avg, b_std = s_out['avg'], s_out['std']
+
+        # ── L 수준이탈 ───────────────────────────────────
+        if b_std and b_std > 0:
+            sigma = (s_in['avg'] - b_avg) / b_std
+            r['sigma'] = round(sigma, 2)
+            if abs(sigma) >= SIGMA_ALERT:
+                level = 2
+                reasons.append(f'선택 구간 평균이 나머지 대비 {sigma:+.1f}σ '
+                               f'({s_in["avg"]} vs {b_avg})')
+                checks.append('L-수준이탈')
+            elif abs(sigma) >= SIGMA_WARN:
+                level = max(level, 1)
+                reasons.append(f'선택 구간 평균이 나머지 대비 {sigma:+.1f}σ')
+                checks.append('L-수준이탈')
+
+        # ── R 범위이탈 ───────────────────────────────────
+        cur.execute(f'''
+            SELECT COUNT(*) FROM {table}
+            WHERE {in_where} AND "{param}" IS NOT NULL
+              AND ("{param}" < %s OR "{param}" > %s)
+        ''', in_args + [s_out['min'], s_out['max']])
+        out_cnt = cur.fetchone()[0]
+        r['out_cnt'] = out_cnt
+        if out_cnt >= OUT_ALERT:
+            level = 2
+            reasons.append(f'나머지 범위({s_out["min"]}~{s_out["max"]}) 밖 '
+                           f'웨이퍼 {out_cnt}장')
+            checks.append('R-범위이탈')
+        elif out_cnt >= OUT_WARN:
+            level = max(level, 1)
+            reasons.append(f'나머지 범위 밖 웨이퍼 {out_cnt}장')
+            checks.append('R-범위이탈')
+
+        # ── S 산포확대 ───────────────────────────────────
+        if b_std and b_std > 0 and s_in['std'] and s_in['n'] >= MIN_N:
+            ratio = s_in['std'] / b_std
+            r['spread'] = round(ratio, 2)
+            if ratio >= SPREAD_ALERT:
+                level = 2
+                reasons.append(f'선택 구간 산포가 나머지의 {ratio:.1f}배 '
+                               f'(σ {s_in["std"]} vs {b_std}) — 조건 혼입 의심')
+                checks.append('S-산포확대')
+            elif ratio >= SPREAD_WARN:
+                level = max(level, 1)
+                reasons.append(f'선택 구간 산포가 나머지의 {ratio:.1f}배')
+                checks.append('S-산포확대')
+
+        # ── E 단독이탈 (장비·챔버) ───────────────────────
+        key = 'EQP_CH_ID' if 'EQP_CH_ID' in have else (
+              'EQP_ID' if 'EQP_ID' in have else None)
+        if key:
+            cur.execute(f'''
+                SELECT "{key}", COUNT(*), AVG("{param}")
+                FROM {table}
+                WHERE {in_where} AND "{param}" IS NOT NULL
+                  AND COALESCE("{key}", '') <> ''
+                GROUP BY "{key}" ORDER BY 1
+            ''', in_args)
+            for eqp, n, avg in cur.fetchall():
+                es = round((float(avg) - b_avg) / b_std, 2) \
+                     if b_std and b_std > 0 else None
+                r['eqp'].append({'eqp': eqp, 'n': n, 'avg': _f(avg),
+                                 'sigma': es})
+            if len(r['eqp']) >= 2:
+                hot  = [e for e in r['eqp']
+                        if e['sigma'] is not None and abs(e['sigma']) >= EQP_SIGMA]
+                calm = [e for e in r['eqp']
+                        if e['sigma'] is not None and abs(e['sigma']) < SIGMA_WARN]
+                if len(hot) == 1 and calm:
+                    level = 2
+                    reasons.append(f"{hot[0]['eqp']} 단독 이탈 "
+                                   f"({hot[0]['sigma']:+.1f}σ, {hot[0]['n']}장)")
+                    checks.append('E-단독이탈')
+
+        r['status']  = ['정상', '주의', '이상'][level]
+        r['checks']  = checks
+        r['reasons'] = reasons or ['나머지 구간과 유의한 차이가 없습니다']
+
+        # ── 랏별 판정 — "특정 랏만 이상했나" ─────────────
+        if 'LOT_ID' in have:
+            r['lots'] = _lot_breakdown(cur, table, param, base_where, base_args,
+                                       sel_sql, sel_args, b_avg, b_std)
+
+        # ── 시계열 + 변곡점 ──────────────────────────────
+        r['series'], r['change_points'], r['cp_note'] = _series_and_cp(
+            cur, table, param, base_where, base_args,
+            sel_sql, sel_args, b_std, unit, have)
+
+        # 선택 구간 안에서 일어난 변곡점 — 이슈 구간 판정의 직접 근거
+        inside = [c for c in r['change_points'] if c.get('in_sel')]
+        if inside:
+            c = inside[0]
+            r['reasons'].append(
+                f"선택 구간 내 {c['at']} 무렵 수준이 {c['direction']} "
+                f"({c['before_avg']} → {c['after_avg']}, {c['shift_sigma']:+.1f}σ)")
+            if 'C-변곡점' not in r['checks']:
+                r['checks'].append('C-변곡점')
+
+    return r
+
+
+def _lot_breakdown(cur, table, param, base_where, base_args,
+                   sel_sql, sel_args, b_avg, b_std):
+    """
+    랏별 평균과 이탈 정도.
+    선택 구간에 든 랏은 in_sel=True 로 표시해, 지목한 랏만 이상한지
+    아니면 다른 랏도 같이 이상한지 한눈에 볼 수 있게 한다.
+    """
+    cur.execute(f'''
+        SELECT "LOT_ID", COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
+               MIN("DATE"),
+               BOOL_OR({sel_sql}) AS in_sel
+        FROM {table}
+        WHERE ({base_where}) AND "{param}" IS NOT NULL AND "LOT_ID" IS NOT NULL
+        GROUP BY "LOT_ID" ORDER BY MIN("DATE")
+    ''', sel_args + base_args)
+
+    out = []
+    for lot_id, n, avg, std, dt, in_sel in cur.fetchall():
+        sig = round((float(avg) - b_avg) / b_std, 2) \
+              if (b_std and b_std > 0 and avg is not None) else None
+        st = '정상'
+        if sig is not None:
+            if abs(sig) >= SIGMA_ALERT:
+                st = '이상'
+            elif abs(sig) >= SIGMA_WARN:
+                st = '주의'
+        out.append({
+            'lot_id': lot_id, 'n': n, 'avg': _f(avg), 'std': _f(std),
+            'sigma': sig, 'status': st, 'in_sel': bool(in_sel),
+            'date': str(dt)[:19] if dt else '',
+            'low_n': n < LOT_MIN_N,
+        })
+    return out
+
+
+def _series_and_cp(cur, table, param, base_where, base_args,
+                   sel_sql, sel_args, b_std, unit, have):
+    """시계열(차트용)과 변곡점"""
+    if unit == 'lot' and 'LOT_ID' in have:
+        cur.execute(f'''
+            SELECT "LOT_ID", MIN("DATE"), AVG("{param}"), COUNT(*),
+                   BOOL_OR({sel_sql}) AS in_sel
+            FROM {table}
+            WHERE ({base_where}) AND "{param}" IS NOT NULL
+            GROUP BY "LOT_ID" ORDER BY MIN("DATE")
+        ''', sel_args + base_args)
+        series = [{'x': str(r[1])[:19], 'label': r[0], 'v': float(r[2]),
+                   'n': r[3], 'in_sel': bool(r[4])}
+                  for r in cur.fetchall() if r[2] is not None]
+    else:
+        cur.execute(f'''
+            SELECT id, "DATE", "{param}", ({sel_sql}) AS in_sel
+            FROM {table}
+            WHERE ({base_where}) AND "{param}" IS NOT NULL
+            ORDER BY "DATE"
+        ''', sel_args + base_args)
+        series = [{'x': str(r[1])[:19], 'id': r[0], 'v': float(r[2]),
+                   'in_sel': bool(r[3])}
+                  for r in cur.fetchall()]
+
+    cps = _find_change_points(series, b_std) if len(series) >= CP_MIN_SEG * 2 else []
+
+    # 변곡점이 선택 구간 안에서 일어났는지 표시 —
+    # "이슈 구간에서 수준이 바뀌었다" 를 확인하는 핵심 정보다
+    for c in cps:
+        i = c['index']
+        c['in_sel'] = bool(series[i]['in_sel']) if 0 <= i < len(series) else False
+
+    # ★ 같은 방향 변곡점이 여러 개면 계단이 아니라 드리프트다.
+    #   이진 분할은 완만한 추세를 여러 계단으로 쪼개므로, 그대로 보여주면
+    #   "변곡점이 3개" 로 잘못 읽힌다. 성격을 함께 알려준다.
+    note = ''
+    if len(cps) >= 3 and len({c['direction'] for c in cps}) == 1:
+        total = sum(c['shift'] or 0 for c in cps)
+        note = (f"변곡점이 {len(cps)}개인데 모두 {cps[0]['direction']} 방향입니다 — "
+                f"계단식 변화가 아니라 서서히 이동하는 드리프트로 보입니다 "
+                f"(누적 {_f(total)})")
+    elif len(cps) == 1:
+        c = cps[0]
+        note = (f"{c['at']} 무렵 수준이 {c['direction']}했습니다 "
+                f"({c['before_avg']} → {c['after_avg']}, {c['shift_sigma']:+.1f}σ)")
+
+    # 차트가 무거워지지 않게 표본을 줄인다 (판정은 전체로 이미 끝났다)
+    MAX_PTS = 3000
+    if len(series) > MAX_PTS:
+        step = len(series) // MAX_PTS + 1
+        series = series[::step]
+
+    return series, cps, note
