@@ -1,0 +1,730 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}1회성 조회{% endblock %}
+
+{#
+════════════════════════════════════════════════════════════
+  1회성 임의 기간 조회
+
+  정기 적재는 30일 롤링이라 그 밖의 기간은 볼 수 없다.
+  작년 데이터처럼 한 번만 필요한 조회를 여기서 요청한다.
+
+  흐름
+    조건 입력 → 요청 등록(대기) → 배치 러너가 실행 → 완료되면 분석
+
+  ★ 웹은 Lake 를 못 읽으므로 즉시 결과가 나오지 않는다.
+    배치 서버의 run_adhoc.py 가 대기 건을 집어 실행한다.
+
+  ★ 완료된 결과는 분석 페이지에서 그대로 열린다.
+    결과 테이블이 cmp_analysis_adhoc_<id> 라 기존 분석 API 가
+    oper_id=ADHOC_<id> 로 읽을 수 있다.
+════════════════════════════════════════════════════════════
+#}
+
+{% block extra_css %}
+<style>
+:root {
+  --ah-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+             'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --ah-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
+  --r-sm: 10px; --r-md: 12px; --r-lg: 16px;
+  --bad: #dc2626; --warn: #f59e0b; --good: #16a34a; --none: #94a3b8;
+  --run: #0ea5e9;
+}
+.ah-page, .ah-page input, .ah-page select, .ah-page button,
+.ah-page textarea, .ah-page table { font-family: var(--ah-font); }
+.ah-page { padding: 26px 30px 80px; }
+.ah-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
+  letter-spacing: -.02em; }
+.ah-sub { font-size: 13px; font-weight: 600; color: var(--tx-2);
+  margin: 4px 0 18px; }
+
+.panel { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 18px 20px; margin-bottom: 16px; }
+.sec-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 12px; }
+.sec-h h3 { font-size: 13px; font-weight: 800; color: var(--tx-1); margin: 0; }
+.sec-h .sub { font-size: 11px; font-weight: 600; color: var(--tx-muted); }
+.sec-h .right { margin-left: auto; display: flex; gap: 6px; }
+
+.btn { padding: 9px 18px; border-radius: var(--r-md); font-size: 12px;
+  font-weight: 800; cursor: pointer; border: 1px solid var(--bd);
+  background: var(--bg-2); color: var(--tx-2); transition: all .15s; }
+.btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.btn.pri { background: var(--accent); color: #000; border-color: transparent; }
+.btn.pri:hover { opacity: .85; }
+.btn.sm { padding: 5px 11px; font-size: 11px; font-weight: 700; }
+.btn.danger { color: var(--bad); border-color: rgba(220,38,38,.35); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.msg { font-size: 12px; font-weight: 700; }
+.msg.ok { color: var(--good); } .msg.err { color: var(--bad); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr));
+  gap: 12px; }
+.fld { display: flex; flex-direction: column; gap: 6px; }
+.fld.wide { grid-column: 1 / -1; }
+.fld label { font-size: 11px; font-weight: 800; color: var(--tx-muted);
+  letter-spacing: .03em; }
+.fld input, .fld select, .fld textarea {
+  font-size: 12px; font-weight: 600; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-md); padding: 8px 12px; outline: none;
+  transition: border-color .15s, box-shadow .15s; }
+.fld textarea { resize: vertical; min-height: 64px;
+  font-family: var(--ah-mono); font-size: 11px; line-height: 1.6; }
+.fld input:focus, .fld select:focus, .fld textarea:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,.10); }
+.fld .hint { font-size: 10px; font-weight: 600; color: var(--tx-muted); }
+
+table.jl { width: 100%; border-collapse: collapse; }
+table.jl th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
+  text-align: left; padding: 9px 10px; border-bottom: 1.5px solid var(--bd);
+  letter-spacing: .03em; white-space: nowrap; }
+table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
+  padding: 9px 10px; border-bottom: 1px solid rgba(128,128,128,.1);
+  vertical-align: middle; }
+.mono { font-family: var(--ah-mono); font-size: 11px; color: var(--tx-2); }
+.badge { display: inline-block; font-size: 10px; font-weight: 800;
+  border-radius: 20px; padding: 2px 9px; white-space: nowrap; }
+.b-wait { color: var(--none); background: rgba(148,163,184,.16); }
+.b-run  { color: var(--run);  background: rgba(14,165,233,.14); }
+.b-done { color: var(--good); background: rgba(22,163,74,.12); }
+.b-fail { color: var(--bad);  background: rgba(220,38,38,.12); }
+.empty { padding: 36px; text-align: center; color: var(--tx-muted);
+  font-size: 13px; font-weight: 600; }
+.note { font-size: 11px; font-weight: 600; color: var(--tx-muted);
+  line-height: 1.6; margin-top: 10px; }
+
+/* ── 이슈 구간 분석 ──────────────────────────── */
+.iz { display: none; }
+.iz.on { display: block; }
+.mode-tabs { display: inline-flex; gap: 4px; }
+.mode-tab { padding: 6px 13px; border-radius: var(--r-sm); font-size: 11px;
+  font-weight: 700; cursor: pointer; border: 1px solid var(--bd);
+  background: var(--bg-2); color: var(--tx-2); transition: all .15s; }
+.mode-tab:hover { color: var(--tx-1); }
+.mode-tab.on { border-color: var(--accent); color: var(--tx-1);
+  background: var(--bg-3); }
+.mode-body { display: none; margin-top: 12px; }
+.mode-body.on { display: block; }
+.lot-pick { max-height: 240px; overflow-y: auto; border: 1px solid var(--bd);
+  border-radius: var(--r-md); padding: 8px; background: var(--bg-2); }
+.lot-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+  border-radius: 7px; font-size: 11px; font-weight: 700;
+  font-family: var(--ah-mono); color: var(--tx-1); cursor: pointer; }
+.lot-row:hover { background: var(--bg-3); }
+.lot-row.sel { background: rgba(220,38,38,.07); }
+.lot-row .dt { color: var(--tx-muted); font-weight: 600; margin-left: auto; }
+.iz-res { margin-top: 16px; }
+.verdict { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 14px; border-radius: var(--r-md); margin-bottom: 12px;
+  border: 1px solid var(--bd); }
+.verdict.bad  { border-color: rgba(220,38,38,.4); background: rgba(220,38,38,.05); }
+.verdict.warn { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.05); }
+.verdict.good { border-color: rgba(22,163,74,.35); background: rgba(22,163,74,.04); }
+.verdict .t { font-size: 15px; font-weight: 800; }
+.verdict.bad .t { color: var(--bad); }
+.verdict.warn .t { color: var(--warn); }
+.verdict.good .t { color: var(--good); }
+.verdict .d { font-size: 12px; font-weight: 700; color: var(--tx-2); }
+.rsn { font-size: 12px; font-weight: 600; color: var(--tx-1);
+  line-height: 1.75; }
+.rsn b { font-weight: 800; }
+.tag { display: inline-block; font-size: 10px; font-weight: 700;
+  font-family: var(--ah-mono); color: var(--tx-2); background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: 20px; padding: 1px 7px;
+  margin-right: 4px; }
+.kv { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px;
+  font-weight: 700; color: var(--tx-2); margin: 10px 0; }
+.kv b { color: var(--tx-1); font-family: var(--ah-mono); }
+.iz-plot { width: 100%; height: 340px; margin-top: 6px; }
+.cp-list { display: flex; flex-direction: column; gap: 6px; }
+.cp-item { font-size: 12px; font-weight: 700; color: var(--tx-1);
+  padding: 8px 11px; border: 1px solid var(--bd); border-radius: var(--r-sm);
+  background: var(--bg-2); }
+.cp-item .in { color: var(--bad); font-weight: 800; margin-left: 6px; }
+.cp-item .m { font-family: var(--ah-mono); font-weight: 700;
+  color: var(--tx-2); font-size: 11px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ah-page">
+  <h1 class="ah-title">1회성 조회</h1>
+  <p class="ah-sub">정기 적재(30일) 밖의 기간을 한 번만 조회합니다 —
+    요청하면 배치가 실행하고, 완료되면 분석 페이지에서 열립니다</p>
+
+  <!-- 조회 조건 -->
+  <div class="panel">
+    <div class="sec-h"><h3>조회 조건</h3>
+      <span class="sub">등록된 공정을 고르면 파라미터까지 채워집니다</span>
+      <span class="right">
+        <select id="pf-oper" class="btn" style="font-weight:700;"></select>
+        <button class="btn sm" onclick="prefill()">기준정보에서 채우기</button>
+      </span></div>
+
+    <div class="grid">
+      <div class="fld"><label>시작일 *</label>
+        <input id="f-date_from" type="date">
+        <span class="hint">최대 {{ max_range_days }}일 범위</span></div>
+      <div class="fld"><label>종료일 *</label>
+        <input id="f-date_to" type="date"></div>
+      <div class="fld"><label>FAB *</label>
+        <input id="f-fab" placeholder="m15x">
+        <span class="hint">Lake 테이블명에 들어갑니다</span></div>
+      <div class="fld"><label>OPER_ID *</label>
+        <input id="f-oper_id" placeholder="V5071000B"></div>
+      <div class="fld"><label>EQ_MODEL</label>
+        <input id="f-eq_model" placeholder="EBARA / KCT_NTA / OPTA">
+        <span class="hint">챔버 파라미터 자동 확장에 씁니다</span></div>
+      <div class="fld"><label>LOT_CD *</label>
+        <input id="f-lot_cds" placeholder="5E2, 5E9">
+        <span class="hint">쉼표로 구분</span></div>
+
+      <div class="fld wide"><label>RECIPE_ID</label>
+        <input id="f-recipes" placeholder="E2_M1CU_AB.CAS, E2_M1CU_CD.CAS (비우면 조건 없음)"></div>
+
+      <div class="fld"><label>사전공정 OPER_ID</label>
+        <input id="f-pre_oper_id" placeholder="T5515000C">
+        <span class="hint">입고 장비·챔버 조회 조건</span></div>
+      <div class="fld"><label>사전공정 설명</label>
+        <input id="f-pre_oper_desc" placeholder="(선택)"></div>
+      <div class="fld"><label>사전공정 PARAM</label>
+        <input id="f-pre_oper_param" placeholder="(선택)"></div>
+
+      <div class="fld wide"><label>조회할 파라미터 *</label>
+        <textarea id="f-params"
+          placeholder="CU_THK_AVG, PA_03_TIME, PA_Z1 ... (쉼표·줄바꿈·공백 구분)"></textarea>
+        <span class="hint" id="pcnt"></span></div>
+    </div>
+
+    <div style="margin-top:16px;display:flex;gap:8px;align-items:center;">
+      <button class="btn pri" onclick="submitJob()">조회 요청</button>
+      <button class="btn" onclick="clearForm()">비우기</button>
+      <span class="msg" id="form-msg"></span>
+    </div>
+    <div class="note">
+      웹에서는 Lake 를 직접 읽을 수 없어 즉시 결과가 나오지 않습니다.
+      요청은 대기 상태로 등록되고 배치 러너가 실행합니다.
+      결과는 {{ keep_days }}일 보관 후 자동 삭제됩니다.
+    </div>
+  </div>
+
+  <!-- 요청 목록 -->
+  <div class="panel">
+    <div class="sec-h"><h3>요청 목록</h3>
+      <span class="sub" id="job-cnt"></span>
+      <span class="right">
+        <label class="msg" style="color:var(--tx-muted);font-weight:600;">
+          <input type="checkbox" id="auto-refresh" checked
+                 style="vertical-align:middle;"> 자동 새로고침</label>
+        <button class="btn sm" onclick="loadJobs()">새로고침</button>
+      </span></div>
+    <table class="jl">
+      <thead><tr>
+        <th>상태</th><th>요청 내용</th><th>기간</th>
+        <th class="mono">행수</th><th>진행</th><th>요청 시각</th><th></th>
+      </tr></thead>
+      <tbody id="jbody"></tbody>
+    </table>
+    <div class="empty" id="jempty">요청이 없습니다.</div>
+  </div>
+
+  <!-- 이슈 구간 분석 -->
+  <div class="panel iz" id="iz">
+    <div class="sec-h"><h3>이슈 구간 분석</h3>
+      <span class="sub" id="iz-target"></span>
+      <span class="right">
+        <button class="btn sm" onclick="closeIssue()">닫기</button>
+      </span></div>
+
+    <div class="grid">
+      <div class="fld"><label>분석 파라미터 *</label>
+        <select id="iz-param"></select></div>
+      <div class="fld"><label>LOT_CD</label>
+        <select id="iz-lotcd" onchange="loadIssueContext()"></select></div>
+      <div class="fld"><label>변곡점 단위</label>
+        <select id="iz-unit">
+          <option value="wafer">웨이퍼 (세밀)</option>
+          <option value="lot">랏 평균 (큰 흐름)</option>
+        </select>
+        <span class="hint">랏 평균은 노이즈가 적어 추세가 잘 보입니다</span></div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <div class="sec-h" style="margin-bottom:8px;">
+        <span class="sub" style="font-weight:800;color:var(--tx-1);">이슈 구간 지정</span>
+        <span class="mode-tabs">
+          <span class="mode-tab on" data-m="range" onclick="setMode('range')">기간으로</span>
+          <span class="mode-tab" data-m="lots" onclick="setMode('lots')">랏으로</span>
+        </span>
+      </div>
+
+      <div class="mode-body on" id="mb-range">
+        <div class="grid">
+          <div class="fld"><label>시작 일시</label>
+            <input id="iz-from" placeholder="2025-08-05 00:00:00">
+            <span class="hint" id="iz-range-hint"></span></div>
+          <div class="fld"><label>종료 일시</label>
+            <input id="iz-to" placeholder="2025-08-07 23:59:59"></div>
+        </div>
+      </div>
+
+      <div class="mode-body" id="mb-lots">
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
+          <input id="iz-lotfilter" placeholder="랏 검색" style="flex:1;
+            font-size:12px;font-weight:600;color:var(--tx-1);
+            background:var(--bg-2);border:1px solid var(--bd);
+            border-radius:var(--r-md);padding:7px 11px;outline:none;"
+            oninput="renderLotPick()">
+          <button class="btn sm" onclick="clearLotSel()">선택 해제</button>
+          <span class="msg" id="iz-lotcnt" style="color:var(--tx-muted);"></span>
+        </div>
+        <div class="lot-pick" id="iz-lotpick"></div>
+        <div class="note">이상했던 랏만 골라 지정하면, 그 랏들이 나머지와
+          실제로 달랐는지 판정합니다.</div>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
+      <button class="btn pri" onclick="runIssue()">이슈 분석</button>
+      <span class="msg" id="iz-msg"></span>
+    </div>
+
+    <div class="iz-res" id="iz-res"></div>
+  </div>
+</div>
+
+<script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
+<script>
+const API_SUBMIT  = "{% url 'adhoc-submit' %}";
+const API_LIST    = "{% url 'adhoc-list' %}";
+const API_DELETE  = "{% url 'adhoc-delete' %}";
+const API_PREFILL = "{% url 'adhoc-prefill' %}";
+const API_OPERS   = "{% url 'adhoc-opers' %}";
+const URL_ANALYSIS = "{% url 'analysis' %}";
+const API_IZCTX   = "{% url 'issue-context' %}";
+const API_IZRUN   = "{% url 'issue-analyze' %}";
+const AH_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"'`]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',
+      "'":'&#39;','`':'&#96;'}[c]));
+}
+function fmsg(t, err) {
+  const el = document.getElementById('form-msg');
+  el.className = 'msg ' + (err ? 'err' : 'ok');
+  el.textContent = t;
+}
+
+async function postJSON(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { console.error(`API ${res.status}`, url, j.error || ''); return {}; }
+    return j;
+  } catch (e) { console.error('요청 실패', url, e); return {}; }
+}
+
+const g = k => (document.getElementById('f-' + k) || {}).value || '';
+const setv = (k, v) => {
+  const el = document.getElementById('f-' + k);
+  if (el) el.value = v == null ? '' : v;
+};
+
+/* ── 기준정보에서 조건 채우기 ─────────────── */
+async function loadOpers() {
+  const j = await postJSON(API_OPERS, {});
+  const sel = document.getElementById('pf-oper');
+  sel.innerHTML = '<option value="">공정 선택</option>' +
+    (j.opers || []).map(o =>
+      `<option value="${esc(o.oper_id)}">${esc(o.label)}</option>`).join('');
+}
+
+async function prefill() {
+  const id = document.getElementById('pf-oper').value;
+  if (!id) { fmsg('공정을 먼저 고르세요', true); return; }
+  const j = await postJSON(API_PREFILL, {oper_id: id});
+  if (!j.ok) { fmsg(j.error || '조건 조회 실패', true); return; }
+
+  const c = j.cond;
+  setv('fab', c.fab); setv('oper_id', c.oper_id); setv('eq_model', c.eq_model);
+  setv('lot_cds', (c.lot_cds || []).join(', '));
+  setv('recipes', (c.recipes || []).join(', '));
+  setv('pre_oper_id', c.pre_oper_id);
+  setv('pre_oper_desc', c.pre_oper_desc);
+  setv('pre_oper_param', c.pre_oper_param);
+  setv('params', (c.params || []).join(', '));
+  updateParamCount();
+  fmsg(`${c.oper_id} 조건을 채웠습니다 — 날짜만 지정하면 됩니다`);
+}
+
+function updateParamCount() {
+  const n = g('params').split(/[,\s\n]+/).filter(Boolean).length;
+  document.getElementById('pcnt').textContent = n ? `${n}개` : '';
+}
+document.getElementById('f-params').addEventListener('input', updateParamCount);
+
+function clearForm() {
+  ['date_from','date_to','fab','oper_id','eq_model','lot_cds','recipes',
+   'pre_oper_id','pre_oper_desc','pre_oper_param','params'].forEach(k => setv(k, ''));
+  updateParamCount();
+  fmsg('');
+}
+
+/* ── 요청 등록 ─────────────────────────────── */
+async function submitJob() {
+  const payload = {
+    date_from: g('date_from'), date_to: g('date_to'),
+    fab: g('fab'), oper_id: g('oper_id'), eq_model: g('eq_model'),
+    lot_cds: g('lot_cds'), recipes: g('recipes'), params: g('params'),
+    pre_oper_id: g('pre_oper_id'), pre_oper_desc: g('pre_oper_desc'),
+    pre_oper_param: g('pre_oper_param'),
+  };
+  const j = await postJSON(API_SUBMIT, payload);
+  if (!j.ok) { fmsg(j.error || '요청 실패', true); return; }
+  fmsg(`요청 등록 완료 (#${j.job_id}) — 배치가 실행하면 아래 목록에 결과가 나옵니다`);
+  loadJobs();
+}
+
+/* ── 요청 목록 ─────────────────────────────── */
+function statusBadge(s) {
+  const m = {'대기':'b-wait','실행중':'b-run','완료':'b-done',
+             '실패':'b-fail','취소':'b-wait'};
+  return `<span class="badge ${m[s] || 'b-wait'}">${esc(s)}</span>`;
+}
+
+async function loadJobs() {
+  const j = await postJSON(API_LIST, {});
+  const jobs = j.jobs || [];
+  document.getElementById('job-cnt').textContent = `${jobs.length}건`;
+  document.getElementById('jempty').style.display = jobs.length ? 'none' : 'block';
+
+  document.getElementById('jbody').innerHTML = jobs.map(job => {
+    const c = job.cond || {};
+    const open = job.status === '완료' && job.rows > 0
+      ? `<a class="btn sm" href="${URL_ANALYSIS}?oper=${encodeURIComponent(job.oper_id)}`
+        + `&lot=${encodeURIComponent((job.lot_cds || [])[0] || '')}">분석 열기</a>`
+      : '';
+    return `<tr>
+      <td>${statusBadge(job.status)}</td>
+      <td><b>${esc(c.oper_id || '')}</b>
+        <span class="mono">${esc((job.lot_cds || []).join(', '))}</span>
+        ${c.pre_oper_id ? `<br><span class="mono">사전 ${esc(c.pre_oper_id)}</span>` : ''}</td>
+      <td class="mono">${esc(c.date_from || '')} ~ ${esc(c.date_to || '')}
+        ${c.span_days ? `<br>${c.span_days}일` : ''}</td>
+      <td class="mono">${job.rows ? job.rows.toLocaleString() : '-'}</td>
+      <td class="mono">${esc(job.message || '')}</td>
+      <td class="mono">${esc(job.requested_at)}</td>
+      <td style="white-space:nowrap;">${open}
+        ${job.status === '완료' && job.rows > 0
+          ? `<button class="btn sm" onclick="openIssue('${esc(job.oper_id)}','${esc(c.oper_id||'')}')">이슈 분석</button>` : ''}
+        <button class="btn sm danger" onclick="delJob(${job.job_id})">삭제</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function delJob(id) {
+  if (!confirm(`요청 #${id} 과 결과 데이터를 삭제할까요?`)) return;
+  const j = await postJSON(API_DELETE, {job_id: id});
+  if (!j.ok) { fmsg(j.error || '삭제 실패', true); return; }
+  loadJobs();
+}
+
+/* ══════════════════════════════════════════════════
+   이슈 구간 분석
+
+   사용자가 "이 기간" 또는 "이 랏들" 이 이상했다고 지목하면
+   나머지와 비교해 판정하고, 그 구간에서 수준이 바뀐 지점(변곡점)을 찾는다.
+
+   ★ 기준은 전체가 아니라 '선택을 뺀 나머지' 다.
+     선택 구간이 전체에 섞이면 이상값이 기준을 끌어올려
+     차이가 실제보다 작게 보인다.
+   ══════════════════════════════════════════════════ */
+let izOper = null, izMode = 'range', izLots = [], izLotSel = new Set();
+
+function izMsg(t, err) {
+  const el = document.getElementById('iz-msg');
+  el.className = 'msg ' + (err ? 'err' : 'ok');
+  el.textContent = t;
+}
+
+async function openIssue(operId, label) {
+  izOper = operId;
+  izLotSel = new Set();
+  document.getElementById('iz-target').textContent =
+    `${label || operId} — 조회 결과 안에서 이슈 구간을 지정하세요`;
+  document.getElementById('iz').classList.add('on');
+  document.getElementById('iz-res').innerHTML = '';
+  izMsg('');
+  await loadIssueContext(true);
+  document.getElementById('iz').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function closeIssue() {
+  document.getElementById('iz').classList.remove('on');
+  izOper = null;
+}
+
+async function loadIssueContext(initLotCd) {
+  if (!izOper) return;
+  const lotSel = document.getElementById('iz-lotcd');
+  const j = await postJSON(API_IZCTX, {
+    oper_id: izOper,
+    lot_cd: initLotCd ? null : (lotSel.value || null),
+  });
+  if (!j.ok) { izMsg(j.error || '조회 실패', true); return; }
+
+  if (initLotCd) {
+    lotSel.innerHTML = '<option value="">전체</option>' +
+      (j.lot_cds || []).map(v =>
+        `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  }
+
+  const ps = document.getElementById('iz-param');
+  const keep = ps.value;
+  ps.innerHTML = (j.params || []).map(p =>
+    `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  if (keep && (j.params || []).includes(keep)) ps.value = keep;
+
+  // 기간 입력칸에 데이터 범위를 안내하고 기본값으로 넣어 둔다
+  document.getElementById('iz-range-hint').textContent =
+    j.date_min ? `데이터 범위 ${j.date_min} ~ ${j.date_max}` : '';
+  if (initLotCd) {
+    document.getElementById('iz-from').value = j.date_min || '';
+    document.getElementById('iz-to').value   = j.date_max || '';
+  }
+
+  izLots = j.lot_ids || [];
+  renderLotPick();
+}
+
+function setMode(m) {
+  izMode = m;
+  document.querySelectorAll('.mode-tab').forEach(el =>
+    el.classList.toggle('on', el.dataset.m === m));
+  document.getElementById('mb-range').classList.toggle('on', m === 'range');
+  document.getElementById('mb-lots').classList.toggle('on', m === 'lots');
+}
+
+function renderLotPick() {
+  const q = (document.getElementById('iz-lotfilter').value || '').toUpperCase();
+  const list = izLots.filter(l => !q || String(l.lot_id).toUpperCase().includes(q));
+  document.getElementById('iz-lotcnt').textContent =
+    `${izLotSel.size}개 선택 / ${izLots.length}랏`;
+  document.getElementById('iz-lotpick').innerHTML = list.map(l => `
+    <div class="lot-row ${izLotSel.has(l.lot_id) ? 'sel' : ''}"
+         onclick="toggleLot('${esc(l.lot_id)}')">
+      <input type="checkbox" ${izLotSel.has(l.lot_id) ? 'checked' : ''}
+             onclick="event.stopPropagation();toggleLot('${esc(l.lot_id)}')">
+      ${esc(l.lot_id)} <span style="color:var(--tx-muted);">${l.n}장</span>
+      <span class="dt">${esc(l.date)}</span>
+    </div>`).join('') ||
+    '<div class="empty" style="padding:16px;">랏이 없습니다.</div>';
+}
+
+function toggleLot(id) {
+  if (izLotSel.has(id)) izLotSel.delete(id); else izLotSel.add(id);
+  renderLotPick();
+}
+function clearLotSel() { izLotSel = new Set(); renderLotPick(); }
+
+async function runIssue() {
+  if (!izOper) return;
+  const param = document.getElementById('iz-param').value;
+  if (!param) { izMsg('분석할 파라미터를 고르세요', true); return; }
+
+  const sel = izMode === 'range'
+    ? {mode: 'range',
+       date_from: document.getElementById('iz-from').value.trim(),
+       date_to:   document.getElementById('iz-to').value.trim()}
+    : {mode: 'lots', lot_ids: [...izLotSel]};
+
+  izMsg('분석 중...');
+  const j = await postJSON(API_IZRUN, {
+    oper_id: izOper, lot_cd: document.getElementById('iz-lotcd').value || null,
+    param: param, sel: sel,
+    unit: document.getElementById('iz-unit').value,
+  });
+  if (!j.ok) { izMsg(j.error || '분석 실패', true); return; }
+  izMsg('');
+  renderIssue(j);
+}
+
+function renderIssue(r) {
+  const cls = r.status === '이상' ? 'bad'
+            : r.status === '주의' ? 'warn'
+            : (r.status === '정상' ? 'good' : '');
+  const s = r.sel || {}, b = r.base || {};
+
+  const tags = (r.checks || []).map(c => `<span class="tag">${esc(c)}</span>`).join('');
+  const reasons = (r.reasons || []).map(x => `· ${esc(x)}`).join('<br>');
+
+  // ── 변곡점 ─────────────────────────────────────
+  const cps = r.change_points || [];
+  const cpBox = `
+    <div class="sec-h" style="margin-top:18px;"><h3>변곡점</h3>
+      <span class="sub">${cps.length ? `${cps.length}곳` : '수준이 바뀐 지점 없음'}</span></div>
+    ${r.cp_note ? `<div class="rsn" style="margin-bottom:8px;">${esc(r.cp_note)}</div>` : ''}
+    <div class="cp-list">
+      ${cps.map(c => `
+        <div class="cp-item">${esc(c.at)} · <b>${esc(c.direction)}</b>
+          ${c.in_sel ? '<span class="in">이슈 구간 내</span>' : ''}
+          <div class="m">${c.before_avg} → ${c.after_avg}
+            (${c.shift_sigma > 0 ? '+' : ''}${c.shift_sigma}σ, t=${c.t},
+             앞 ${c.n_before} / 뒤 ${c.n_after})</div>
+        </div>`).join('') ||
+        '<div class="rsn" style="color:var(--tx-muted);">뚜렷한 수준 변화가 없습니다.</div>'}
+    </div>`;
+
+  // ── 랏별 ───────────────────────────────────────
+  const lots = r.lots || [];
+  const abn = lots.filter(l => l.status !== '정상');
+  const selAbn = abn.filter(l => l.in_sel).length;
+  const outAbn = abn.filter(l => !l.in_sel).length;
+  const lotBox = lots.length ? `
+    <div class="sec-h" style="margin-top:18px;"><h3>랏별 판정</h3>
+      <span class="sub">전체 ${lots.length}랏 · 이상/주의 ${abn.length}랏
+        (지정 구간 ${selAbn} · 그 밖 ${outAbn})</span></div>
+    ${outAbn ? `<div class="rsn" style="margin-bottom:8px;color:var(--warn);">
+      지정하지 않은 구간에도 벗어난 랏이 ${outAbn}개 있습니다 —
+      이슈가 지정 구간에만 있는 게 아닐 수 있습니다.</div>` : ''}
+    <table class="jl"><thead><tr>
+      <th>LOT_ID</th><th class="mono">n</th><th class="mono">평균</th>
+      <th class="mono">σ</th><th>판정</th><th>구간</th><th>시각</th>
+    </tr></thead><tbody>
+      ${lots.filter(l => l.status !== '정상' || l.in_sel).slice(0, 60).map(l => `
+        <tr>
+          <td class="mono">${esc(l.lot_id)}</td>
+          <td class="mono">${l.n}${l.low_n ? ' ⚠' : ''}</td>
+          <td class="mono">${l.avg}</td>
+          <td class="mono">${l.sigma == null ? '-'
+            : (l.sigma > 0 ? '+' : '') + l.sigma + 'σ'}</td>
+          <td>${statusBadge(l.status)}</td>
+          <td>${l.in_sel ? '<b>지정</b>' : ''}</td>
+          <td class="mono">${esc(l.date)}</td>
+        </tr>`).join('')}
+    </tbody></table>` : '';
+
+  // ── 장비별 ─────────────────────────────────────
+  const eqp = r.eqp || [];
+  const eqpBox = eqp.length ? `
+    <div class="sec-h" style="margin-top:18px;"><h3>장비·챔버별</h3>
+      <span class="sub">지정 구간 안에서</span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      ${eqp.map(e => {
+        const hot = e.sigma != null && Math.abs(e.sigma) >= 2;
+        return `<span class="tag" style="font-size:11px;padding:5px 10px;
+          ${hot ? 'color:var(--bad);border-color:rgba(220,38,38,.4);' : ''}">
+          ${esc(e.eqp)} · ${e.avg}
+          ${e.sigma == null ? '' : `(${e.sigma > 0 ? '+' : ''}${e.sigma}σ)`}
+          · ${e.n}장</span>`;
+      }).join('')}
+    </div>` : '';
+
+  document.getElementById('iz-res').innerHTML = `
+    <div class="verdict ${cls}">
+      <span class="t">${esc(r.status)}</span>
+      <span class="d">${esc(r.sel_desc || '')}</span>
+    </div>
+    <div class="rsn">${tags}${tags ? '<br>' : ''}${reasons}</div>
+    <div class="kv">
+      <span>지정 구간 <b>${s.n}장</b> 평균 <b>${s.avg}</b> σ <b>${s.std}</b></span>
+      <span>나머지 <b>${b.n}장</b> 평균 <b>${b.avg}</b> σ <b>${b.std}</b></span>
+      ${r.sigma == null ? '' : `<span>차이 <b>${r.sigma > 0 ? '+' : ''}${r.sigma}σ</b></span>`}
+      ${r.spread ? `<span>산포비 <b>${r.spread}배</b></span>` : ''}
+      <span>범위밖 <b>${r.out_cnt}장</b></span>
+    </div>
+    <div class="iz-plot" id="iz-plot"></div>
+    ${cpBox}${lotBox}${eqpBox}`;
+
+  drawIssuePlot(r);
+}
+
+function statusBadge(s) {
+  const m = {'이상':'b-fail','주의':'b-run','정상':'b-done'};
+  return `<span class="badge ${m[s] || 'b-wait'}">${esc(s)}</span>`;
+}
+
+/* 지정 구간을 색으로 구분하고 변곡점을 세로선으로 표시한다 */
+function drawIssuePlot(r) {
+  const div = document.getElementById('iz-plot');
+  if (!div) return;
+  const pts = r.series || [];
+  if (!pts.length) { div.innerHTML = ''; return; }
+
+  const mk = (arr, name, color, size) => ({
+    x: arr.map(p => p.x), y: arr.map(p => p.v),
+    text: arr.map(p => p.label ? `${p.label} (${p.n}장)` : ''),
+    name, mode: 'markers', type: 'scattergl',
+    marker: {size, color, opacity: .8,
+             line: {width: .5, color: 'rgba(0,0,0,.25)'}},
+    hovertemplate: '%{text}<br>%{x}<br><b>%{y:.2f}</b><extra></extra>',
+  });
+
+  const outSel = pts.filter(p => !p.in_sel);
+  const inSel  = pts.filter(p => p.in_sel);
+  const c = r.status === '이상' ? '#dc2626'
+          : r.status === '주의' ? '#f59e0b' : '#16a34a';
+
+  const traces = [];
+  if (outSel.length) traces.push(mk(outSel, '나머지', 'rgba(120,130,145,.55)', 7));
+  if (inSel.length)  traces.push(mk(inSel, '지정 구간', c, 10));
+
+  const shapes = [], anns = [];
+  const b = r.base || {};
+  const line = (v, col, dash, label) => {
+    if (v == null) return;
+    shapes.push({type:'line', xref:'paper', yref:'y', x0:0, x1:1,
+                 y0:v, y1:v, line:{color:col, width:1.3, dash:dash}});
+    anns.push({xref:'paper', yref:'y', x:1, xanchor:'right', y:v,
+               yanchor:'bottom', text:`<b>${label} ${v}</b>`, showarrow:false,
+               font:{family:AH_FONT, size:10, color:col},
+               bgcolor:'rgba(255,255,255,.85)', borderpad:2});
+  };
+  line(b.max, '#ef4444', 'dash', '나머지 max');
+  line(b.avg, '#22c55e', 'dot',  '나머지 평균');
+  line(b.min, '#ef4444', 'dash', '나머지 min');
+
+  // 변곡점 — 세로 점선
+  (r.change_points || []).forEach(cp => {
+    shapes.push({type:'line', xref:'x', yref:'paper', x0:cp.at, x1:cp.at,
+                 y0:0, y1:1,
+                 line:{color:'#7c3aed', width:1.6, dash:'dot'}});
+    anns.push({xref:'x', yref:'paper', x:cp.at, y:1.02, xanchor:'center',
+               text:`<b>${cp.direction} ${cp.shift_sigma > 0 ? '+' : ''}${cp.shift_sigma}σ</b>`,
+               showarrow:false,
+               font:{family:AH_FONT, size:10, color:'#7c3aed'}});
+  });
+
+  Plotly.newPlot(div, traces, {
+    paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+    font:{family:AH_FONT, color:'#555', size:11},
+    margin:{l:58, r:18, t:26, b:44},
+    xaxis:{tickfont:{family:AH_FONT, size:10},
+           gridcolor:'rgba(0,0,0,.06)', zeroline:false},
+    yaxis:{title:{text:r.param, font:{family:AH_FONT, size:11}},
+           tickfont:{family:AH_FONT, size:10},
+           gridcolor:'rgba(0,0,0,.06)', zeroline:false},
+    shapes, annotations: anns,
+    showlegend:true,
+    legend:{orientation:'h', x:0, y:1.14, font:{family:AH_FONT, size:10}},
+    hovermode:'closest',
+    hoverlabel:{bgcolor:'#fff', bordercolor:'#ddd',
+                font:{family:AH_FONT, size:11}},
+  }, {responsive:true, displaylogo:false, displayModeBar:false});
+}
+
+/* 실행 중인 요청이 있으면 주기적으로 상태를 갱신한다 */
+setInterval(() => {
+  if (document.getElementById('auto-refresh').checked) loadJobs();
+}, 10000);
+
+loadOpers();
+loadJobs();
+</script>
+{% endblock %}
