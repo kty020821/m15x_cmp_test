@@ -275,6 +275,283 @@ def _find_change_points(series, base_std, depth=0, offset=0, found=None):
 # ══════════════════════════════════════════════════════════
 # 본체
 # ══════════════════════════════════════════════════════════
+def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=200):
+    """
+    등록된 전 파라미터를 한 번에 스캔한다.
+
+    "이 구간에서 무엇이 변했나" 에 답하는 것이 목적이다.
+    파라미터를 하나씩 고를 필요 없이, 변곡이 있었던 항목을 찾아 준다.
+
+    ★ 성능 설계 — 파라미터가 100개를 넘으므로 쿼리 수를 줄여야 한다.
+      · 통계는 파라미터를 묶어 한 쿼리로 집계 (CHUNK 개씩)
+      · 변곡점용 시계열은 랏 평균으로 한 번에 가져와
+        (랏 수 × 파라미터 수) 크기로 줄인다.
+        웨이퍼 단위로 전 파라미터를 읽으면 512MiB 에서 위험하다.
+      · 랏 평균은 노이즈도 적어 큰 흐름을 보기에 오히려 낫다.
+
+    ★ PART(소모품)는 판정에서 뺀다 — 누적·리셋되는 값이라
+      구간 비교가 의미 없다. 목록에는 참고로 남긴다.
+    """
+    from . import param_types as pt
+
+    table = _table(oper_id)
+    CHUNK = 20
+
+    with _conn().cursor() as cur:
+        if not _exists(cur, table):
+            raise ValueError(f'{table} 이 없습니다')
+        have = _cols(cur, table)
+
+        params = _numeric_params(cur, table)[:max_params]
+        if not params:
+            raise ValueError('스캔할 파라미터가 없습니다')
+
+        base_where, base_args = '1=1', []
+        if lot_cd and 'LOT_CD' in have:
+            base_where, base_args = '"LOT_CD" = %s', [lot_cd]
+
+        sel_sql, sel_args, sel_desc = _sel_clause(sel, have)
+        in_where  = f'({base_where}) AND ({sel_sql})'
+        out_where = f'({base_where}) AND NOT ({sel_sql})'
+        in_args   = base_args + sel_args
+        out_args  = base_args + sel_args
+
+        # ── 1. 선택/나머지 통계 (묶어서 조회) ────────────
+        stat_in  = _bulk_stats(cur, table, params, in_where, in_args, CHUNK)
+        stat_out = _bulk_stats(cur, table, params, out_where, out_args, CHUNK)
+
+        # ── 2. 나머지 범위 밖 웨이퍼 수 ──────────────────
+        out_cnt = _bulk_out_count(cur, table, params, in_where, in_args,
+                                  stat_out, CHUNK)
+
+        # ── 3. 변곡점용 시계열 (랏 평균, 한 번에) ────────
+        series_map, sel_flag = _bulk_series(cur, table, params,
+                                            base_where, base_args,
+                                            sel_sql, sel_args, have, unit)
+
+    # ── 4. 파라미터별 판정 ───────────────────────────────
+    items = []
+    for p in params:
+        ptype = pt.classify(p)
+        s_in, s_out = stat_in.get(p, {}), stat_out.get(p, {})
+        it = _judge_one(p, ptype, s_in, s_out, out_cnt.get(p, 0),
+                        series_map.get(p, []), sel_flag)
+        items.append(it)
+
+    items.sort(key=lambda x: -x['severity'])
+
+    n_bad  = sum(1 for i in items if i['status'] == '이상')
+    n_warn = sum(1 for i in items if i['status'] == '주의')
+    n_cp   = sum(1 for i in items if i['cp_in_sel'])
+
+    return {
+        'oper_id': oper_id, 'lot_cd': lot_cd, 'sel_desc': sel_desc,
+        'unit': unit, 'n_param': len(items),
+        'n_bad': n_bad, 'n_warn': n_warn, 'n_cp': n_cp,
+        'items': items,
+    }
+
+
+def _numeric_params(cur, table):
+    """스캔 대상 숫자 컬럼 (메타·파생 제외)"""
+    num = {'smallint', 'integer', 'bigint', 'decimal',
+           'numeric', 'real', 'double precision'}
+    meta = {'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
+            'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
+            'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY'}
+    cur.execute("""
+        SELECT column_name, data_type FROM information_schema.columns
+        WHERE table_name = %s ORDER BY ordinal_position
+    """, [table])
+    return [c.upper() for c, d in cur.fetchall()
+            if d.lower() in num and c.upper() not in meta
+            and not c.upper().endswith(('_OFFSET', '_FORMULA'))]
+
+
+def _bulk_stats(cur, table, params, where, args, chunk):
+    """여러 파라미터의 통계를 한 쿼리로 — 쿼리 수를 1/chunk 로 줄인다"""
+    out = {}
+    for i in range(0, len(params), chunk):
+        grp = params[i:i + chunk]
+        sel = ", ".join(
+            f'COUNT("{p}"), AVG("{p}"), STDDEV("{p}"), MIN("{p}"), MAX("{p}")'
+            for p in grp)
+        cur.execute(f'SELECT {sel} FROM {table} WHERE {where}', args)
+        row = cur.fetchone()
+        for j, p in enumerate(grp):
+            n, avg, std, mn, mx = row[j * 5:j * 5 + 5]
+            out[p] = {'n': n or 0, 'avg': _f(avg), 'std': _f(std),
+                      'min': _f(mn), 'max': _f(mx)}
+    return out
+
+
+def _bulk_out_count(cur, table, params, where, args, stat_out, chunk):
+    """나머지 범위 밖 웨이퍼 수 — CASE 로 묶어 한 쿼리에"""
+    out = {}
+    usable = [p for p in params
+              if stat_out.get(p, {}).get('min') is not None
+              and stat_out.get(p, {}).get('max') is not None]
+    for i in range(0, len(usable), chunk):
+        grp = usable[i:i + chunk]
+        parts, vals = [], []
+        for p in grp:
+            parts.append(f'SUM(CASE WHEN "{p}" IS NOT NULL '
+                         f'AND ("{p}" < %s OR "{p}" > %s) THEN 1 ELSE 0 END)')
+            vals += [stat_out[p]['min'], stat_out[p]['max']]
+        cur.execute(f'SELECT {", ".join(parts)} FROM {table} WHERE {where}',
+                    vals + args)
+        row = cur.fetchone()
+        for j, p in enumerate(grp):
+            out[p] = int(row[j] or 0)
+    return out
+
+
+def _bulk_series(cur, table, params, base_where, base_args,
+                 sel_sql, sel_args, have, unit):
+    """
+    전 파라미터의 시계열을 한 번에 읽는다.
+
+    기본은 랏 평균 — (랏 수 × 파라미터 수) 라 가볍고 노이즈도 적다.
+    웨이퍼 단위는 파라미터가 많으면 메모리가 위험해 상세 보기에서만 쓴다.
+    """
+    if unit == 'lot' and 'LOT_ID' in have:
+        aggs = ", ".join(f'AVG("{p}")' for p in params)
+        cur.execute(f'''
+            SELECT MIN("DATE"), "LOT_ID", BOOL_OR({sel_sql}), {aggs}
+            FROM {table} WHERE {base_where}
+            GROUP BY "LOT_ID" ORDER BY MIN("DATE")
+        ''', sel_args + base_args)
+        rows = cur.fetchall()
+        labels = [{'x': str(r[0])[:19], 'label': r[1], 'in_sel': bool(r[2])}
+                  for r in rows]
+        offset = 3
+    else:
+        cols = ", ".join(f'"{p}"' for p in params)
+        cur.execute(f'''
+            SELECT "DATE", ({sel_sql}), {cols}
+            FROM {table} WHERE {base_where} ORDER BY "DATE"
+        ''', sel_args + base_args)
+        rows = cur.fetchall()
+        labels = [{'x': str(r[0])[:19], 'label': '', 'in_sel': bool(r[1])}
+                  for r in rows]
+        offset = 2
+
+    series_map = {}
+    for j, p in enumerate(params):
+        pts = []
+        for i, r in enumerate(rows):
+            v = r[offset + j]
+            if v is not None:
+                pts.append({'x': labels[i]['x'], 'v': float(v),
+                            'in_sel': labels[i]['in_sel']})
+        series_map[p] = pts
+    return series_map, labels
+
+
+def _judge_one(param, ptype, s_in, s_out, out_cnt, series, sel_flag):
+    """파라미터 1건 판정 — analyze() 와 같은 기준"""
+    it = {
+        'param': param, 'ptype': ptype,
+        'sel': s_in, 'base': s_out, 'out_cnt': out_cnt,
+        'sigma': None, 'spread': None,
+        'status': '정상', 'checks': [], 'reasons': [],
+        'cps': [], 'cp_in_sel': False, 'cp_note': '', 'severity': 0,
+    }
+
+    if not s_in.get('n'):
+        it['status'] = '데이터없음'
+        it['reasons'] = ['지정 구간에 값이 없습니다']
+        return it
+    if not s_out.get('n') or s_out.get('avg') is None:
+        it['status'] = '기준없음'
+        it['reasons'] = ['비교할 나머지 데이터가 없습니다']
+        return it
+
+    b_avg, b_std = s_out['avg'], s_out['std']
+
+    # 변곡점은 타입과 무관하게 찾는다 (PART 도 추이는 볼 가치가 있다)
+    cps = _find_change_points(series, b_std) if len(series) >= CP_MIN_SEG * 2 else []
+    for c in cps:
+        i = c['index']
+        c['in_sel'] = bool(series[i]['in_sel']) if 0 <= i < len(series) else False
+    it['cps'] = cps
+    it['cp_in_sel'] = any(c.get('in_sel') for c in cps)
+
+    if len(cps) >= 3 and len({c['direction'] for c in cps}) == 1:
+        it['cp_note'] = f"{cps[0]['direction']} 드리프트"
+
+    # 소모품은 σ 판정을 하지 않는다 (누적·리셋)
+    if ptype == 'PART':
+        it['status'] = '참고'
+        it['reasons'] = ['소모품 계열 — 구간 비교 판정 제외 (변곡점만 참고)']
+        if it['cp_in_sel']:
+            c = [x for x in cps if x.get('in_sel')][0]
+            it['reasons'].append(f"{c['at']} {c['direction']} "
+                                 f"({c['shift_sigma']:+.1f}σ)")
+        return it
+
+    level = 0
+    reasons, checks = [], []
+
+    if b_std and b_std > 0:
+        sigma = (s_in['avg'] - b_avg) / b_std
+        it['sigma'] = round(sigma, 2)
+        if abs(sigma) >= SIGMA_ALERT:
+            level = 2
+            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ '
+                           f'({s_in["avg"]} vs {b_avg})')
+            checks.append('L')
+        elif abs(sigma) >= SIGMA_WARN:
+            level = max(level, 1)
+            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ')
+            checks.append('L')
+
+    if out_cnt >= OUT_ALERT:
+        level = 2
+        reasons.append(f'나머지 범위 밖 {out_cnt}장')
+        checks.append('R')
+    elif out_cnt >= OUT_WARN:
+        level = max(level, 1)
+        reasons.append(f'나머지 범위 밖 {out_cnt}장')
+        checks.append('R')
+
+    if b_std and b_std > 0 and s_in.get('std') and s_in['n'] >= MIN_N:
+        ratio = s_in['std'] / b_std
+        it['spread'] = round(ratio, 2)
+        if ratio >= SPREAD_ALERT:
+            level = 2
+            reasons.append(f'산포가 {ratio:.1f}배 — 조건 혼입 의심')
+            checks.append('S')
+        elif ratio >= SPREAD_WARN:
+            level = max(level, 1)
+            reasons.append(f'산포가 {ratio:.1f}배')
+            checks.append('S')
+
+    # ★ 지정 구간 안에서 수준이 바뀐 것이 이 화면의 핵심 신호다
+    if it['cp_in_sel']:
+        c = [x for x in cps if x.get('in_sel')][0]
+        level = max(level, 1)
+        reasons.append(f"{c['at']} 무렵 {c['direction']} "
+                       f"({c['before_avg']} → {c['after_avg']}, "
+                       f"{c['shift_sigma']:+.1f}σ)")
+        checks.append('C')
+
+    it['status']  = ['정상', '주의', '이상'][level]
+    it['checks']  = checks
+    it['reasons'] = reasons or ['나머지와 유의한 차이 없음']
+
+    sev = level * 100
+    if it['sigma'] is not None:
+        sev += min(abs(it['sigma']), 10) * 5
+    sev += min(out_cnt, 25) * 2
+    if it['spread']:
+        sev += max(0, it['spread'] - 1) * 10
+    if it['cp_in_sel']:
+        sev += 40          # 지정 구간 내 변곡은 가장 직접적인 근거
+    it['severity'] = round(sev, 1)
+    return it
+
+
 def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
     """
     이슈 구간 분석.
