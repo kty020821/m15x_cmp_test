@@ -145,6 +145,31 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
 .cp-item .in { color: var(--bad); font-weight: 800; margin-left: 6px; }
 .cp-item .m { font-family: var(--ah-mono); font-weight: 700;
   color: var(--tx-2); font-size: 11px; }
+
+/* 스캔 결과 표 — 변곡이 있었던 항목을 위로 올린다 */
+.scan-sum { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.scan-card { border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 10px 16px; min-width: 92px; }
+.scan-card .n { font-size: 20px; font-weight: 800; font-family: var(--ah-mono); }
+.scan-card .l { font-size: 10px; font-weight: 700; color: var(--tx-muted);
+  margin-top: 2px; }
+.scan-card.bad .n { color: var(--bad); }
+.scan-card.warn .n { color: var(--warn); }
+.scan-card.cp .n { color: #7c3aed; }
+.scan-card.all .n { color: var(--tx-1); }
+table.sc { width: 100%; border-collapse: collapse; }
+table.sc th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
+  text-align: left; padding: 8px 9px; border-bottom: 1.5px solid var(--bd);
+  letter-spacing: .03em; position: sticky; top: 0; background: var(--bg-3); }
+table.sc td { font-size: 12px; font-weight: 600; padding: 8px 9px;
+  border-bottom: 1px solid rgba(128,128,128,.1); vertical-align: middle; }
+table.sc tbody tr { cursor: pointer; }
+table.sc tbody tr:hover { background: var(--bg-2); }
+table.sc tbody tr.on { background: var(--bg-2); }
+.sc-wrap { max-height: 460px; overflow-y: auto; border: 1px solid var(--bd);
+  border-radius: var(--r-md); margin-top: 4px; }
+.cp-mark { color: #7c3aed; font-weight: 800; }
+.spark { vertical-align: middle; }
 </style>
 {% endblock %}
 
@@ -198,14 +223,17 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
         <span class="hint" id="pcnt"></span></div>
     </div>
 
-    <div style="margin-top:16px;display:flex;gap:8px;align-items:center;">
+    <div style="margin-top:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
       <button class="btn pri" onclick="submitJob()">조회 요청</button>
       <button class="btn" onclick="clearForm()">비우기</button>
+      <label class="msg" style="color:var(--tx-2);font-weight:700;">
+        <input type="checkbox" id="run-now" checked style="vertical-align:middle;">
+        등록 후 바로 실행</label>
       <span class="msg" id="form-msg"></span>
     </div>
     <div class="note">
-      웹에서는 Lake 를 직접 읽을 수 없어 즉시 결과가 나오지 않습니다.
-      요청은 대기 상태로 등록되고 배치 러너가 실행합니다.
+      조회는 백그라운드로 실행됩니다 — 기간이 길면 몇 분 걸리며,
+      진행 상황은 아래 목록에 표시됩니다. 창을 닫아도 계속 진행됩니다.
       결과는 {{ keep_days }}일 보관 후 자동 삭제됩니다.
     </div>
   </div>
@@ -218,6 +246,7 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
         <label class="msg" style="color:var(--tx-muted);font-weight:600;">
           <input type="checkbox" id="auto-refresh" checked
                  style="vertical-align:middle;"> 자동 새로고침</label>
+        <button class="btn sm" onclick="resetStale()">멈춘 작업 되돌리기</button>
         <button class="btn sm" onclick="loadJobs()">새로고침</button>
       </span></div>
     <table class="jl">
@@ -239,16 +268,17 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
       </span></div>
 
     <div class="grid">
-      <div class="fld"><label>분석 파라미터 *</label>
-        <select id="iz-param"></select></div>
       <div class="fld"><label>LOT_CD</label>
         <select id="iz-lotcd" onchange="loadIssueContext()"></select></div>
       <div class="fld"><label>변곡점 단위</label>
         <select id="iz-unit">
+          <option value="lot">랏 평균 (권장)</option>
           <option value="wafer">웨이퍼 (세밀)</option>
-          <option value="lot">랏 평균 (큰 흐름)</option>
         </select>
-        <span class="hint">랏 평균은 노이즈가 적어 추세가 잘 보입니다</span></div>
+        <span class="hint">랏 평균은 노이즈가 적고 빠릅니다</span></div>
+      <div class="fld"><label>파라미터 수</label>
+        <input id="iz-pcnt" readonly style="background:transparent;border-color:transparent;">
+      </div>
     </div>
 
     <div style="margin-top:14px;">
@@ -286,11 +316,12 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
       </div>
     </div>
 
-    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-      <button class="btn pri" onclick="runIssue()">이슈 분석</button>
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn pri" onclick="runScan()">전체 파라미터 스캔</button>
       <span class="msg" id="iz-msg"></span>
     </div>
 
+    <div class="iz-res" id="iz-scan"></div>
     <div class="iz-res" id="iz-res"></div>
   </div>
 </div>
@@ -302,9 +333,12 @@ const API_LIST    = "{% url 'adhoc-list' %}";
 const API_DELETE  = "{% url 'adhoc-delete' %}";
 const API_PREFILL = "{% url 'adhoc-prefill' %}";
 const API_OPERS   = "{% url 'adhoc-opers' %}";
+const API_RUN     = "{% url 'adhoc-run' %}";
+const API_RESET   = "{% url 'adhoc-reset' %}";
 const URL_ANALYSIS = "{% url 'analysis' %}";
 const API_IZCTX   = "{% url 'issue-context' %}";
 const API_IZRUN   = "{% url 'issue-analyze' %}";
+const API_IZSCAN  = "{% url 'issue-scan' %}";
 const AH_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
 
 function esc(s) {
@@ -387,7 +421,15 @@ async function submitJob() {
   };
   const j = await postJSON(API_SUBMIT, payload);
   if (!j.ok) { fmsg(j.error || '요청 실패', true); return; }
-  fmsg(`요청 등록 완료 (#${j.job_id}) — 배치가 실행하면 아래 목록에 결과가 나옵니다`);
+
+  if (document.getElementById('run-now').checked) {
+    const r = await postJSON(API_RUN, {job_id: j.job_id});
+    fmsg(r.ok
+      ? `요청 #${j.job_id} 실행 시작 — 아래 목록에서 진행 상황을 확인하세요`
+      : `요청은 등록됐지만 실행에 실패했습니다: ${r.error || ''}`, !r.ok);
+  } else {
+    fmsg(`요청 등록 완료 (#${j.job_id}) — 목록에서 '실행' 을 누르세요`);
+  }
   loadJobs();
 }
 
@@ -420,12 +462,33 @@ async function loadJobs() {
       <td class="mono">${job.rows ? job.rows.toLocaleString() : '-'}</td>
       <td class="mono">${esc(job.message || '')}</td>
       <td class="mono">${esc(job.requested_at)}</td>
-      <td style="white-space:nowrap;">${open}
+      <td style="white-space:nowrap;">
+        ${(job.status === '대기' || job.status === '실패')
+          ? `<button class="btn sm pri" onclick="runJob(${job.job_id})">실행</button>` : ''}
+        ${open}
         ${job.status === '완료' && job.rows > 0
           ? `<button class="btn sm" onclick="openIssue('${esc(job.oper_id)}','${esc(c.oper_id||'')}')">이슈 분석</button>` : ''}
         <button class="btn sm danger" onclick="delJob(${job.job_id})">삭제</button></td>
     </tr>`;
   }).join('');
+}
+
+/* 백그라운드 실행 — 응답은 즉시 오고, 진행 상황은 목록 폴링으로 본다 */
+async function runJob(id) {
+  const j = await postJSON(API_RUN, {job_id: id});
+  if (!j.ok) { fmsg(j.error || '실행 실패', true); loadJobs(); return; }
+  fmsg(`요청 #${id} 실행 시작`);
+  loadJobs();
+}
+
+/* 워커 재시작 등으로 '실행중' 에서 멈춘 요청을 되살린다 */
+async function resetStale() {
+  const j = await postJSON(API_RESET, {});
+  if (!j.ok) { fmsg(j.error || '되돌리기 실패', true); return; }
+  const n = (j.reset || []).length;
+  fmsg(n ? `${n}건을 대기로 되돌렸습니다 — 다시 실행할 수 있습니다`
+         : '멈춘 작업이 없습니다');
+  loadJobs();
 }
 
 async function delJob(id) {
@@ -446,6 +509,7 @@ async function delJob(id) {
      차이가 실제보다 작게 보인다.
    ══════════════════════════════════════════════════ */
 let izOper = null, izMode = 'range', izLots = [], izLotSel = new Set();
+let izParams = [], izScan = null, izSel = null, izPick = null;
 
 function izMsg(t, err) {
   const el = document.getElementById('iz-msg');
@@ -485,11 +549,8 @@ async function loadIssueContext(initLotCd) {
         `<option value="${esc(v)}">${esc(v)}</option>`).join('');
   }
 
-  const ps = document.getElementById('iz-param');
-  const keep = ps.value;
-  ps.innerHTML = (j.params || []).map(p =>
-    `<option value="${esc(p)}">${esc(p)}</option>`).join('');
-  if (keep && (j.params || []).includes(keep)) ps.value = keep;
+  izParams = j.params || [];
+  document.getElementById('iz-pcnt').value = `${izParams.length}개 스캔 대상`;
 
   // 기간 입력칸에 데이터 범위를 안내하고 기본값으로 넣어 둔다
   document.getElementById('iz-range-hint').textContent =
@@ -533,26 +594,119 @@ function toggleLot(id) {
 }
 function clearLotSel() { izLotSel = new Set(); renderLotPick(); }
 
-async function runIssue() {
-  if (!izOper) return;
-  const param = document.getElementById('iz-param').value;
-  if (!param) { izMsg('분석할 파라미터를 고르세요', true); return; }
-
-  const sel = izMode === 'range'
+function currentSel() {
+  return izMode === 'range'
     ? {mode: 'range',
        date_from: document.getElementById('iz-from').value.trim(),
        date_to:   document.getElementById('iz-to').value.trim()}
     : {mode: 'lots', lot_ids: [...izLotSel]};
+}
 
-  izMsg('분석 중...');
+/* ── 전 파라미터 스캔 ─────────────────────────
+   지정한 구간에서 무엇이 변했는지 한 번에 찾는다.
+   파라미터를 하나씩 고를 필요가 없다. */
+async function runScan() {
+  if (!izOper) return;
+  izSel = currentSel();
+  izMsg('스캔 중... (파라미터가 많으면 잠시 걸립니다)');
+  document.getElementById('iz-res').innerHTML = '';
+
+  const j = await postJSON(API_IZSCAN, {
+    oper_id: izOper, lot_cd: document.getElementById('iz-lotcd').value || null,
+    sel: izSel, unit: document.getElementById('iz-unit').value,
+  });
+  if (!j.ok) { izMsg(j.error || '스캔 실패', true); return; }
+  izMsg('');
+  izScan = j;
+  renderScan(j);
+}
+
+function renderScan(j) {
+  const items = j.items || [];
+  const rows = items.map((it, i) => {
+    const cls = it.status === '이상' ? 'b-fail'
+              : it.status === '주의' ? 'b-run'
+              : it.status === '정상' ? 'b-done' : 'b-wait';
+    const cp = it.cps && it.cps.length;
+    return `<tr onclick="pickParam(${i})" data-i="${i}"
+                class="${izPick === i ? 'on' : ''}">
+      <td><b>${esc(it.param)}</b></td>
+      <td><span class="tag">${esc(it.ptype)}</span></td>
+      <td><span class="badge ${cls}">${esc(it.status)}</span></td>
+      <td class="mono">${it.sigma == null ? '-'
+        : (it.sigma > 0 ? '+' : '') + it.sigma + 'σ'}</td>
+      <td class="mono">${it.out_cnt || 0}</td>
+      <td class="mono">${it.spread ? it.spread + '배' : '-'}</td>
+      <td class="mono">${cp ? `${cp}곳` : '-'}
+        ${it.cp_in_sel ? '<span class="cp-mark">● 구간내</span>' : ''}
+        ${it.cp_note ? `<br><span style="color:var(--tx-muted);">${esc(it.cp_note)}</span>` : ''}</td>
+      <td>${sparkline(it)}</td>
+      <td style="font-size:11px;color:var(--tx-2);">
+        ${(it.reasons || []).map(x => esc(x)).join('<br>')}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('iz-scan').innerHTML = `
+    <div class="verdict ${j.n_bad ? 'bad' : (j.n_warn ? 'warn' : 'good')}">
+      <span class="t">${j.n_cp ? `변곡 ${j.n_cp}건` : '변곡 없음'}</span>
+      <span class="d">${esc(j.sel_desc)} · 파라미터 ${j.n_param}개 스캔</span>
+    </div>
+    <div class="scan-sum">
+      <div class="scan-card all"><div class="n">${j.n_param}</div><div class="l">전체</div></div>
+      <div class="scan-card bad"><div class="n">${j.n_bad}</div><div class="l">이상</div></div>
+      <div class="scan-card warn"><div class="n">${j.n_warn}</div><div class="l">주의</div></div>
+      <div class="scan-card cp"><div class="n">${j.n_cp}</div><div class="l">구간 내 변곡</div></div>
+    </div>
+    <div class="note">행을 클릭하면 그 파라미터의 상세 차트가 열립니다 —
+      지정한 구간은 다른 색으로, 변곡점은 세로 점선으로 표시됩니다.</div>
+    <div class="sc-wrap">
+      <table class="sc">
+        <thead><tr>
+          <th>파라미터</th><th>타입</th><th>판정</th><th>σ</th>
+          <th>범위밖</th><th>산포</th><th>변곡점</th><th>추이</th><th>근거</th>
+        </tr></thead>
+        <tbody>${rows || '<tr><td colspan="9" class="empty">결과가 없습니다.</td></tr>'}</tbody>
+      </table>
+    </div>`;
+}
+
+/* 표 안 미니 추이 — 지정 구간은 붉게, 변곡점은 보라 세로선 */
+function sparkline(it) {
+  const s = (it.cps || []).length ? it.cps : [];
+  const base = it.base || {};
+  const W = 110, H = 26;
+  const pts = it._spark || null;
+  // 스캔 응답에는 시계열을 싣지 않는다(무거움) — 변곡점 위치만 막대로 표시
+  if (!s.length) return `<span style="color:var(--tx-muted);font-size:11px;">-</span>`;
+  const marks = s.map(c => {
+    const x = 6 + (s.indexOf(c) + 1) * (W - 12) / (s.length + 1);
+    const col = c.in_sel ? '#dc2626' : '#7c3aed';
+    return `<line x1="${x}" y1="4" x2="${x}" y2="${H-4}" stroke="${col}"
+             stroke-width="2" stroke-linecap="round"/>`;
+  }).join('');
+  return `<svg class="spark" width="${W}" height="${H}">
+    <line x1="0" y1="${H/2}" x2="${W}" y2="${H/2}"
+          stroke="rgba(128,128,128,.3)" stroke-width="1"/>${marks}</svg>`;
+}
+
+/* 표에서 파라미터를 고르면 상세 차트 */
+async function pickParam(i) {
+  if (!izScan) return;
+  izPick = i;
+  document.querySelectorAll('table.sc tbody tr').forEach(tr =>
+    tr.classList.toggle('on', Number(tr.dataset.i) === i));
+
+  const it = izScan.items[i];
+  izMsg(`${it.param} 상세 조회 중...`);
   const j = await postJSON(API_IZRUN, {
     oper_id: izOper, lot_cd: document.getElementById('iz-lotcd').value || null,
-    param: param, sel: sel,
+    param: it.param, sel: izSel,
     unit: document.getElementById('iz-unit').value,
   });
-  if (!j.ok) { izMsg(j.error || '분석 실패', true); return; }
+  if (!j.ok) { izMsg(j.error || '조회 실패', true); return; }
   izMsg('');
   renderIssue(j);
+  document.getElementById('iz-res').scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 
 function renderIssue(r) {
