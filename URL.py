@@ -8,6 +8,7 @@ from django.urls import path
 from . import views_analysis as va
 from . import views_monitor as vm
 from . import views_config as vc
+from . import views_adhoc as vh
 
 urlpatterns = [
     # ... 기존 경로 ...
@@ -34,6 +35,16 @@ urlpatterns = [
     path('api/analysis/stats/',   va.analysis_stats,   name='analysis-stats'),
     path('api/analysis/insight/', va.analysis_insight, name='analysis-insight'),
     path('api/analysis/chat/',    va.analysis_chat,    name='analysis-chat'),
+
+    # 1회성 임의 기간 조회 (신규) — 실행은 배치 run_adhoc.py
+    path('adhoc/',             vh.adhoc_page,    name='adhoc'),
+    path('api/adhoc/submit/',  vh.adhoc_submit,  name='adhoc-submit'),
+    path('api/adhoc/list/',    vh.adhoc_list,    name='adhoc-list'),
+    path('api/adhoc/delete/',  vh.adhoc_delete,  name='adhoc-delete'),
+    path('api/adhoc/prefill/', vh.adhoc_prefill, name='adhoc-prefill'),
+    path('api/adhoc/opers/',   vh.adhoc_opers,   name='adhoc-opers'),
+    path('api/issue/context/', vh.issue_context, name='issue-context'),
+    path('api/issue/analyze/', vh.issue_analyze, name='issue-analyze'),
 
     # Inline Monitoring (신규)
     path('monitor/',             vm.monitor_page,    name='monitor'),
