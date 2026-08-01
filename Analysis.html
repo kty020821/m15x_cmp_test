@@ -1,782 +1,1329 @@
 {% extends 'base.html' %}
 {% load static %}
-{% block title %}Inline Monitoring{% endblock %}
+{% block title %}산포 분석{% endblock %}
 
 {#
 ════════════════════════════════════════════════════════════
-  Inline Monitoring
+  산포 분석 페이지
 
-  [점검 시작] → 공정 목록을 받아 한 공정씩 순차 호출한다.
-  한 요청에 전 공정을 몰면 512MiB 웹서버에서 타임아웃이 나므로
-  진행률을 보여주며 나눠 호출한다.
+  화면 흐름
+    STEP 1  대상 선택      공정·파라미터 검색 후 조회
+    STEP 2  구간 지정      트렌드에서 문제 영역 드래그
+    STEP 3  원인 분석      요인 편중 · AI 해석
 
-  테이블 각 행
-    · 30일 추이 스파크라인 (SVG 직접 생성 — 수백 행이라 Plotly 는 무겁다)
-      회색 띠 = 30일 min~max, 점선 = 기준 평균, 빨간 점 = 최근일
-    · 클릭하면 웨이퍼 단위 상세 차트 (Plotly)
+  [주의] 이 파일 안에 인자 없는 url 태그를 쓰지 말 것
+         (주석 안이라도 Django 가 파싱해서 TemplateSyntaxError)
 
   [수정 지점]
-    · 판정 기준  → monitor_service.py 상단 상수
-    · 점검 대상  → 구닥스 INLINE_YN / PARAM_TYPE (없으면 이름 규칙)
+    · 범례 항목       → views.py 의 LEGEND_OPTIONS
+    · 요인 분포 항목   → views.py 의 FACTOR_COLS
+    · LLM 연결        → views.py 의 _call_company_llm()
+    · Idle 표시 순서  → 아래 IDLE_ORDER
+    · 실제 스펙값     → 아래 getSpecLines()
+
+  [이번 수정]
+    1. 드롭박스를 선택한 직후 다시 눌러도 열리도록 (mousedown 보완)
+       - 항목 선택 시 mousedown 에서 preventDefault 하므로 포커스가
+         입력창에 남고, 이미 포커스를 가진 요소는 focus 이벤트가
+         다시 발생하지 않아 무반응이었다
+    2. 차트 빈 영역 클릭으로 선택 해제 (plotly_deselect + 빈 selected)
+    3. API 오류 시 alert 팝업 제거 → 콘솔 기록만
+    4. 상관 차트 X/Y 검색칸 확대 (150 → 230px) + 패널 폭 자동
 ════════════════════════════════════════════════════════════
 #}
 
 {% block extra_css %}
 <style>
+/* ══════════════════════════════════════════════════
+   디자인 토큰 — 차트(JS 의 CF 상수)와 같은 값으로 유지
+   ══════════════════════════════════════════════════ */
 :root {
-  --mn-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
-             'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
-  --mn-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
-  /* 반경 — 분석 페이지(analysis.html)와 같은 값으로 유지 */
+  --an-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+             'Segoe UI Rounded', 'Segoe UI', 'Noto Sans KR', 'Malgun Gothic',
+             'Helvetica Neue', sans-serif;
+  --an-mono: 'SF Mono', 'JetBrains Mono', 'IBM Plex Mono', 'Consolas', monospace;
+
+  --fs-xs:  11px;
+  --fs-sm:  12px;
+  --fs-md:  13px;
+  --fs-lg:  14px;
+  --fs-xl:  20px;
+
+  --fw-mid:   600;
+  --fw-bold:  700;
+  --fw-heavy: 800;
+
   --r-sm: 10px;
   --r-md: 12px;
   --r-lg: 16px;
-  --bad:  #dc2626;
-  --warn: #f59e0b;
-  --good: #16a34a;
-  --none: #94a3b8;
-}
-/* 페이지 안의 입력 요소 폰트를 전부 통일 (브라우저 기본 폰트 방지) */
-.mn-page, .mn-page input, .mn-page select, .mn-page button, .mn-page table {
-  font-family: var(--mn-font);
-}
-.mn-page { padding: 26px 30px 80px; font-family: var(--mn-font); }
-.mn-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
-  letter-spacing: -0.02em; }
-.mn-sub { font-size: 13px; font-weight: 600; color: var(--tx-2); margin: 4px 0 18px; }
 
-/* ── 실행 바 ─────────────────────────────────── */
-.run-bar { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: var(--r-lg); padding: 16px 18px; display: flex; align-items: center;
-  gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
-.btn-run { padding: 11px 30px; background: var(--accent); border: none;
-  border-radius: var(--r-md); color: #000; font-size: 13px; font-weight: 800;
+  --ok:   #16a34a;
+  --warn: #dc2626;
+  --info: #0ea5e9;
+}
+
+.an-page, .an-page input, .an-page select, .an-page button, .an-page table {
+  font-family: var(--an-font);
+}
+
+.an-page { padding: 26px 30px 80px; display: flex; flex-direction: column; gap: 6px; }
+.an-title { font-size: var(--fs-xl); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.02em; }
+.an-sub { font-size: var(--fs-md); font-weight: var(--fw-mid); color: var(--tx-2);
+  margin: 4px 0 16px; }
+
+/* ══ 단계 ═══════════════════════════════════════════ */
+.step { position: relative; padding-left: 34px; padding-bottom: 22px; }
+.step:last-child { padding-bottom: 0; }
+/* 단계를 잇는 세로선 */
+.step::before { content: ''; position: absolute; left: 11px; top: 26px; bottom: 0;
+  width: 2px; background: var(--bd); }
+.step:last-child::before { display: none; }
+
+.step-num { position: absolute; left: 0; top: 0; width: 24px; height: 24px;
+  border-radius: 50%; display: grid; place-items: center;
+  font-size: var(--fs-xs); font-weight: var(--fw-heavy);
+  background: var(--bg-2); color: var(--tx-muted); border: 1px solid var(--bd);
+  transition: background .2s, color .2s, border-color .2s; }
+.step-head { display: flex; align-items: center; gap: 10px; min-height: 24px;
+  margin-bottom: 11px; flex-wrap: wrap; }
+.step-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.01em; }
+.step-desc { font-size: var(--fs-xs); font-weight: var(--fw-mid); color: var(--tx-muted); }
+.step-body { transition: opacity .2s; }
+
+.step[data-state="locked"] .step-body { opacity: .38; pointer-events: none;
+  filter: saturate(.35); }
+.step[data-state="active"] .step-num { background: var(--accent); color: #000;
+  border-color: transparent; }
+.step[data-state="done"]   .step-num { background: rgba(22,163,74,.14); color: var(--ok);
+  border-color: rgba(22,163,74,.38); }
+.step[data-state="done"]::before { background: rgba(22,163,74,.28); }
+
+/* ── 필터 ────────────────────────────────────────── */
+.filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r-lg);
+  padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
+.filter-group { display: flex; flex-direction: column; gap: 7px; min-width: 178px; }
+.filter-label { font-size: var(--fs-xs); font-weight: var(--fw-heavy); color: var(--tx-muted);
+  letter-spacing: .03em; }
+
+
+/* ── 검색형 드롭박스 ─────────────────────────────── */
+.ss { position: relative; }
+.ss-input {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--an-font); font-size: var(--fs-md); font-weight: var(--fw-mid);
+  color: var(--tx-1); background-color: var(--bg-2);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 12px;
+  border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 10px 34px 10px 13px; outline: none; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.ss-input::placeholder { color: var(--tx-muted); font-weight: var(--fw-mid); }
+.ss-input:hover:not(:disabled) { border-color: var(--tx-muted); }
+.ss-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
+.ss-input:disabled { opacity: .4; cursor: not-allowed; }
+.ss.mini .ss-input { font-size: var(--fs-sm); padding: 7px 26px 7px 11px;
+  border-radius: var(--r-sm); background-position: right 9px center; background-size: 11px; }
+
+.ss-panel { position: absolute; z-index: 40; top: calc(100% + 5px); left: 0; right: 0;
+  background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r-md);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.14); padding: 5px; max-height: 268px;
+  overflow-y: auto; display: none; }
+.ss-panel.open { display: block; }
+/* mini 드롭박스는 패널을 내용 폭만큼 넓힘 (긴 파라미터명 잘림 방지) */
+.ss.mini .ss-panel { width: max-content; min-width: 100%; max-width: 360px; }
+.ss-opt { padding: 7px 11px; border-radius: 8px; cursor: pointer;
+  font-size: var(--fs-sm); font-weight: var(--fw-mid); color: var(--tx-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ss-opt:hover, .ss-opt.active { background: var(--bg-2); }
+.ss-opt.chosen { font-weight: var(--fw-bold); color: var(--accent); }
+.ss-opt mark { background: rgba(255, 210, 60, 0.35); color: inherit;
+  border-radius: 3px; padding: 0 1px; }
+.ss-none { padding: 12px 11px; text-align: center; color: var(--tx-muted);
+  font-size: var(--fs-sm); font-weight: var(--fw-mid); }
+
+.btn-run { padding: 11px 32px; background: var(--accent); border: none; border-radius: var(--r-md);
+  color: #000; font-size: var(--fs-md); font-weight: var(--fw-heavy);
   cursor: pointer; transition: opacity .15s; }
 .btn-run:hover { opacity: .85; }
 .btn-run:disabled { opacity: .4; cursor: not-allowed; }
-/* 저장된 결과 비우기 — 점검 대상 규칙을 바꾼 뒤 옛 결과가 남을 때 */
-.btn-clear { padding: 10px 18px; background: var(--bg-2);
-  border: 1px solid var(--bd); border-radius: var(--r-md);
-  color: var(--tx-2); font-size: 12px; font-weight: 700; cursor: pointer;
-  transition: color .15s, border-color .15s; }
+
+/* ── 차트 ────────────────────────────────────────── */
+.chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 1200px) { .chart-row { grid-template-columns: 1fr; } }
+
+.chart-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 18px; }
+.chart-head { display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
+.chart-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.01em; }
+.chart-title .r2badge { font-size: var(--fs-sm); font-weight: var(--fw-bold);
+  color: var(--accent); margin-left: 10px; font-family: var(--an-mono); }
+.chart-ctrls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.mini-label { font-size: var(--fs-xs); color: var(--tx-2); font-weight: var(--fw-bold); }
+.plot-area { width: 100%; height: 430px; }
+/* 차트 안 모든 글자(제목·축·눈금·범례·주석) 굵게 */
+.plot-area .main-svg text { font-weight: var(--fw-bold) !important; }
+/* 빈 상태는 문구 없이 옅은 자리만 */
+.plot-area:empty { border-radius: var(--r-md);
+  background: repeating-linear-gradient(45deg,
+    rgba(128,128,128,0.035) 0 10px, transparent 10px 20px); }
+
+/* ══ 결과 ═══════════════════════════════════════════ */
+.res-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 16px 18px; }
+.res-head { display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px; gap: 10px; }
+.res-title { font-size: var(--fs-lg); font-weight: var(--fw-heavy); color: var(--tx-1);
+  letter-spacing: -0.01em; }
+.res-note { font-size: var(--fs-xs); color: var(--tx-muted); font-weight: var(--fw-bold);
+  margin-left: 6px; }
+.res-cnt { font-size: var(--fs-sm); color: var(--accent); font-weight: var(--fw-bold);
+  font-family: var(--an-mono); }
+.btn-clear { padding: 6px 13px; background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-sm); color: var(--tx-2); font-size: var(--fs-xs);
+  font-weight: var(--fw-bold); cursor: pointer; transition: color .15s, border-color .15s; }
 .btn-clear:hover { color: var(--tx-1); border-color: var(--tx-muted); }
-.btn-clear:disabled { opacity: .4; cursor: not-allowed; }
-.run-info { font-size: 12px; font-weight: 600; color: var(--tx-muted); }
-.prog { flex: 1; min-width: 180px; height: 6px; background: var(--bg-2);
-  border-radius: 20px; overflow: hidden; display: none; }
-.prog.on { display: block; }
-.prog i { display: block; height: 100%; width: 0;
-  background: var(--accent); transition: width .25s; }
 
-/* ── 요약 카드 ───────────────────────────────── */
-.cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-.card { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: var(--r-lg); padding: 13px 18px; min-width: 110px; cursor: pointer;
-  transition: border-color .15s; }
-.card:hover { border-color: var(--tx-muted); }
-.card.on { border-color: var(--accent); }
-.card .n { font-size: 22px; font-weight: 800; font-family: var(--mn-mono); }
-.card .l { font-size: 11px; font-weight: 700; color: var(--tx-muted);
-  letter-spacing: .03em; margin-top: 2px; }
-.card.bad  .n { color: var(--bad); }
-.card.warn .n { color: var(--warn); }
-.card.good .n { color: var(--good); }
-.card.none .n { color: var(--none); }
-.card.all  .n { color: var(--tx-1); }
+/* 요인 분포 */
+.factor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 0; }
+.fcol { border-left: 1px solid rgba(128,128,128,0.12); padding: 0 11px; min-width: 0; }
+.fcol:first-child { border-left: none; padding-left: 0; }
+.fcol-head { font-size: var(--fs-xs); font-weight: var(--fw-bold); color: var(--tx-muted);
+  letter-spacing: .03em; padding-bottom: 7px; margin-bottom: 4px;
+  border-bottom: 1.5px solid var(--bd); }
+.fitem { display: flex; justify-content: space-between; align-items: baseline;
+  gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(128,128,128,0.09); }
+.fitem:last-child { border-bottom: none; }
+.fitem .k { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--tx-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fitem .v { font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--tx-2);
+  font-family: var(--an-mono); flex-shrink: 0; }
+.fitem.dim .k { font-weight: var(--fw-mid); color: var(--tx-muted); }
+/* 전체 대비 몰려 있는 항목 */
+.fitem.hot .k { color: var(--warn); }
+.fitem.hot .v { color: var(--warn); }
+.lift-tag { font-size: 10px; font-weight: var(--fw-heavy); color: var(--warn);
+  background: rgba(220,38,38,.12); border-radius: 20px; padding: 1px 5px;
+  margin-left: 4px; font-family: var(--an-mono); }
 
-/* ── 진단 패널 ───────────────────────────────── */
-/* shell 없이 화면에서 적재·점검 상태를 확인하려고 둔 영역 */
-.panel-diag { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: var(--r-lg); overflow: hidden; margin-bottom: 16px; }
-.diag-h { font-size: 13px; font-weight: 800; color: var(--tx-1);
-  padding: 13px 16px; border-bottom: 1px solid var(--bd); }
-.diag-h span { font-size: 11px; font-weight: 700; color: var(--tx-muted);
-  margin-left: 8px; }
-.panel-diag td { font-family: var(--mn-font); }
-.panel-diag .mono { font-family: var(--mn-mono); font-size: 11px;
-  color: var(--tx-2); }
-.diag-bad { color: var(--bad); font-weight: 700; }
-.diag-warn { color: var(--warn); font-weight: 700; }
-.diag-ok { color: var(--good); font-weight: 700; }
-
-/* ── 필터 ────────────────────────────────────── */
-/* 네이티브 select 은 브라우저 기본 화살표·각진 모서리가 나와 전체 톤에서
-   튄다. 분석 페이지의 검색형 드롭박스(.ss-input)와 같은 모양으로 맞춘다. */
-.filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
-  align-items: center; }
-.filters select, .filters input {
-  font-family: var(--mn-font); font-size: 12px; font-weight: 600;
-  color: var(--tx-1); background-color: var(--bg-2);
+/* ── AI 분석 ─────────────────────────────────────── */
+.ai-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 16px 18px; }
+.btn-ai { padding: 9px 20px; background: var(--accent); border: none;
+  border-radius: var(--r-sm); color: #000; font-size: var(--fs-sm);
+  font-weight: var(--fw-heavy); cursor: pointer; transition: opacity .15s; }
+.btn-ai:hover { opacity: .85; }
+.btn-ai:disabled { opacity: .45; cursor: not-allowed; }
+.ai-out { margin-top: 14px; font-size: var(--fs-md); line-height: 1.75; color: var(--tx-1); }
+.ai-out h3 { font-size: var(--fs-sm); font-weight: var(--fw-heavy); color: var(--accent);
+  margin: 16px 0 5px; letter-spacing: .01em; }
+.ai-out h3:first-child { margin-top: 0; }
+.ai-out p { margin: 0 0 7px; }
+.ai-out strong { font-weight: var(--fw-heavy); }
+.ai-note { font-size: var(--fs-xs); font-weight: var(--fw-mid); color: var(--tx-muted);
+  margin-top: 12px; line-height: 1.6; }
+.ai-toggle { margin-top: 14px; }
+.ai-toggle summary { cursor: pointer; list-style: none; display: inline-flex;
+  align-items: center; gap: 6px; font-size: var(--fs-xs);
+  font-weight: var(--fw-bold); color: var(--tx-muted); user-select: none; }
+.ai-toggle summary::-webkit-details-marker { display: none; }
+.ai-toggle summary::before { content: '▸'; font-size: 10px; transition: transform .15s; }
+.ai-toggle[open] summary::before { transform: rotate(90deg); }
+.ai-toggle summary:hover { color: var(--tx-1); }
+.ai-prompt { border: 1px dashed var(--bd); border-radius: var(--r-md);
+  padding: 12px 14px; margin-top: 8px; background: var(--bg-2);
+  font-family: var(--an-mono); font-size: var(--fs-sm); line-height: 1.65;
+  color: var(--tx-2); white-space: pre-wrap; max-height: 420px; overflow-y: auto; }
+/* ── 대화형 분석 ──────────────────────────────────── */
+.chat-log { display: flex; flex-direction: column; gap: 10px;
+  margin-top: 14px; max-height: 460px; overflow-y: auto; padding-right: 4px; }
+.chat-log:empty { display: none; }
+.msg { max-width: 88%; padding: 10px 13px; border-radius: var(--r-md);
+  font-size: var(--fs-md); line-height: 1.7; }
+.msg.me { align-self: flex-end; background: var(--bg-2);
+  border: 1px solid var(--bd); color: var(--tx-1); font-weight: var(--fw-mid); }
+.msg.ai { align-self: flex-start; background: transparent; padding-left: 0; }
+.msg.ai h3 { font-size: var(--fs-sm); font-weight: var(--fw-heavy);
+  color: var(--accent); margin: 12px 0 4px; }
+.msg.ai h3:first-child { margin-top: 0; }
+.msg.ai p { margin: 0 0 6px; }
+.msg.ai p:last-child { margin-bottom: 0; }
+.msg.err { align-self: flex-start; color: var(--warn); font-weight: var(--fw-mid); }
+.msg-params { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.msg-chip { font-family: var(--an-mono); font-size: 10px; font-weight: var(--fw-bold);
+  color: var(--tx-2); background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 20px; padding: 2px 7px; }
+.chat-bar { display: flex; gap: 8px; margin-top: 14px; align-items: flex-end; }
+.chat-input { flex: 1; box-sizing: border-box; resize: none;
+  font-family: var(--an-font); font-size: var(--fs-md); font-weight: var(--fw-mid);
+  color: var(--tx-1); background: var(--bg-2);
   border: 1px solid var(--bd); border-radius: var(--r-md);
-  padding: 8px 12px; outline: none; cursor: pointer;
-  transition: border-color .15s, box-shadow .15s;
-}
-.filters select {
-  appearance: none; -webkit-appearance: none; -moz-appearance: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.6 4.6L6 8l3.4-3.4' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat; background-position: right 10px center;
-  background-size: 11px;
-  padding-right: 30px;
-}
-.filters input { min-width: 190px; cursor: text; }
-.filters input::placeholder { color: var(--tx-muted); font-weight: 600; }
-.filters select:hover, .filters input:hover { border-color: var(--tx-muted); }
-.filters select:focus, .filters input:focus {
-  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
-/* 드롭 목록 자체는 브라우저가 그리므로 색만 맞춘다 */
-.filters select option { background: var(--bg-3); color: var(--tx-1); }
-
-/* ── 테이블 ──────────────────────────────────── */
-.tbl-wrap { background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: var(--r-lg); overflow: hidden; }
-table.mn { width: 100%; border-collapse: collapse; }
-table.mn th { font-size: 11px; font-weight: 800; color: var(--tx-muted);
-  letter-spacing: .03em; text-align: left; padding: 11px 12px;
-  border-bottom: 1.5px solid var(--bd); white-space: nowrap; }
-table.mn td { font-size: 12px; font-weight: 600; color: var(--tx-1);
-  padding: 9px 12px; border-bottom: 1px solid rgba(128,128,128,.1);
-  vertical-align: middle; }
-table.mn tbody tr { cursor: pointer; }
-table.mn tbody tr:hover { background: var(--bg-2); }
-table.mn tbody tr.open { background: var(--bg-2); }
-.num { font-family: var(--mn-mono); text-align: right; }
-
-.badge { display: inline-block; font-size: 10px; font-weight: 800;
-  border-radius: 20px; padding: 2px 8px; white-space: nowrap; }
-.b-bad  { color: var(--bad);  background: rgba(220,38,38,.12); }
-.b-warn { color: var(--warn); background: rgba(245,158,11,.14); }
-.b-good { color: var(--good); background: rgba(22,163,74,.12); }
-.b-none { color: var(--none); background: rgba(148,163,184,.14); }
-.tag { display: inline-block; font-size: 10px; font-weight: 700;
-  font-family: var(--mn-mono); color: var(--tx-2); background: var(--bg-2);
-  border: 1px solid var(--bd); border-radius: 20px; padding: 1px 6px;
-  margin-right: 3px; }
-.streak { font-size: 10px; font-weight: 800; color: var(--bad);
-  background: rgba(220,38,38,.1); border-radius: 20px; padding: 1px 6px;
-  margin-left: 4px; font-family: var(--mn-mono); }
-.reason { font-size: 11px; font-weight: 600; color: var(--tx-2);
-  line-height: 1.55; }
-.reason .dim { color: var(--tx-muted); font-weight: 600; }
-
-/* ── 상세 ────────────────────────────────────── */
-tr.detail > td { background: var(--bg-2); padding: 0; }
-.detail-in { padding: 16px 18px; }
-.detail-head { display: flex; gap: 16px; flex-wrap: wrap;
-  font-size: 12px; font-weight: 700; color: var(--tx-2); margin-bottom: 12px; }
-.detail-head b { color: var(--tx-1); font-family: var(--mn-mono); }
-.detail-plot { width: 100%; height: 320px; }
-/* 색 구분 모드 토글 — 장비가 많아 색이 어지러울 때 구간 강조로 바꾼다 */
-.mode-box { margin-left: auto; display: inline-flex; gap: 5px; }
-.mode-btn { font-family: var(--mn-font); font-size: 11px; font-weight: 700;
-  color: var(--tx-2); background: var(--bg-3); border: 1px solid var(--bd);
-  border-radius: var(--r-sm); padding: 5px 11px; cursor: pointer;
+  padding: 10px 13px; outline: none; line-height: 1.5; max-height: 120px;
+  transition: border-color .15s, box-shadow .15s; }
+.chat-input::placeholder { color: var(--tx-muted); }
+.chat-input:focus { border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(125,125,125,0.10); }
+.chat-input:disabled { opacity: .45; cursor: not-allowed; }
+.chat-hint { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.hint-btn { font-size: var(--fs-xs); font-weight: var(--fw-bold);
+  color: var(--tx-2); background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 20px; padding: 5px 11px; cursor: pointer;
   transition: color .15s, border-color .15s; }
-.mode-btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
-.mode-btn.on { color: var(--tx-1); border-color: var(--accent);
-  background: var(--bg-2); }
-.eqp-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-.eqp-chip { font-size: 11px; font-weight: 700; font-family: var(--mn-mono);
-  border: 1px solid var(--bd); border-radius: 10px; padding: 5px 10px;
-  background: var(--bg-3); color: var(--tx-2); }
-.eqp-chip.hot { border-color: rgba(220,38,38,.5); color: var(--bad); }
-.empty { padding: 40px; text-align: center; color: var(--tx-muted);
-  font-size: 13px; font-weight: 600; }
+.hint-btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.typing { display: inline-flex; gap: 3px; }
+.typing i { width: 5px; height: 5px; border-radius: 50%;
+  background: var(--tx-muted); animation: blink 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay: .2s; }
+.typing i:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+.ai-fallback { border: 1px dashed var(--bd); border-radius: var(--r-md);
+  padding: 12px 14px; margin-top: 12px; background: var(--bg-2);
+  font-family: var(--an-mono); font-size: var(--fs-sm); line-height: 1.65;
+  color: var(--tx-2); white-space: pre-wrap; }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="mn-page">
-  <h1 class="mn-title">Inline Monitoring</h1>
-  <p class="mn-sub">전 공정 인라인 파라미터 자동 점검 — 30일 데이터를 기준선으로 비교합니다</p>
-
-  <div class="run-bar">
-    <button class="btn-run" id="btn-run" onclick="startCheck()">점검 시작</button>
-    <button class="btn-clear" id="btn-clear" onclick="clearResults()">결과 초기화</button>
-    <button class="btn-clear" id="btn-diag" onclick="runDiag()">상태 진단</button>
-    <div class="prog" id="prog"><i id="prog-bar"></i></div>
-    <span class="run-info" id="run-info">이전 점검 결과를 불러오는 중...</span>
+<div class="an-page">
+  <div>
+    <h1 class="an-title">산포 분석</h1>
+    <p class="an-sub">공정 파라미터 트렌드 및 산포 요인 분석</p>
   </div>
 
-  <div class="cards" id="cards"></div>
-
-  <div class="filters">
-    <select id="f-oper" onchange="onOperFilter()"><option value="">전체 공정</option></select>
-    <select id="f-lot" onchange="render()"><option value="">전체 LOT_CD</option></select>
-    <select id="f-type" onchange="render()">
-      <option value="">전체 타입</option>
-      {% for v, l in type_options %}<option value="{{ v }}">{{ l }}</option>
-      {% endfor %}
-    </select>
-    <input id="f-text" type="text" placeholder="파라미터 검색" oninput="render()">
-    <span class="run-info" id="cnt-info"></span>
-  </div>
-
-  <div class="panel-diag" id="diag" style="display:none;">
-    <div class="diag-h">적재 · 점검 상태
-      <span id="diag-sum"></span>
-      <button class="btn-clear" style="float:right;"
-              onclick="document.getElementById('diag').style.display='none'">닫기</button>
+  <!-- ══ STEP 1 ══════════════════════════════════ -->
+  <section class="step" id="step-1" data-state="active">
+    <div class="step-num">1</div>
+    <div class="step-head">
+      <span class="step-title">대상 선택</span>
+      <span class="step-desc">공정과 파라미터를 검색해 조회합니다</span>
     </div>
-    <table class="mn">
-      <thead><tr><th>공정</th><th>테이블</th><th class="num">행수</th>
-        <th>최근 DATE</th><th>LOT_CD</th><th class="num">점검대상</th>
-        <th>선정방식</th><th>비고</th></tr></thead>
-      <tbody id="diag-body"></tbody>
-    </table>
-  </div>
+    <div class="step-body">
+      <div class="filter-panel">
+        <div class="filter-group">
+          <span class="filter-label">TECH</span>
+          <div class="ss" id="ss-tech"></div>
+          {# 옵션 공급용 — 화면에는 보이지 않음 #}
+          <select id="raw-tech" hidden>
+            {% for t in tech_list %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">LOT_CD</span>
+          <div class="ss" id="ss-lot"></div>
+        </div>
+        <div class="filter-group" style="min-width:250px;">
+          <span class="filter-label">OPER</span>
+          <div class="ss" id="ss-oper"></div>
+        </div>
+        <div class="filter-group" style="min-width:230px;">
+          <span class="filter-label">PARAMETER</span>
+          <div class="ss" id="ss-param"></div>
+        </div>
+        <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
+      </div>
+    </div>
+  </section>
 
-  <div class="tbl-wrap">
-    <table class="mn">
-      <thead>
-        <tr>
-          <th>공정</th><th>LOT_CD</th><th>파라미터</th><th>타입</th>
-          <th>상태</th><th class="num">σ / 배수</th><th class="num">범위밖</th>
-          <th style="width:150px;">30일 추이</th><th>판정 근거</th>
-        </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-    <div class="empty" id="empty">점검 시작을 눌러주세요.</div>
-  </div>
+  <!-- ══ STEP 2 ══════════════════════════════════ -->
+  <section class="step" id="step-2" data-state="locked">
+    <div class="step-num">2</div>
+    <div class="step-head">
+      <span class="step-title">문제 구간 지정</span>
+      <span class="step-desc">트렌드에서 이상 구간을 드래그하면 오른쪽 차트에도 함께 표시됩니다 (빈 곳을 클릭하면 해제)</span>
+    </div>
+    <div class="step-body">
+      <div class="chart-row">
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="chart-title">Trend</span>
+            <div class="chart-ctrls">
+              <span class="mini-label">범례</span>
+              <div class="ss mini" id="ss-legend" style="width:132px;"></div>
+              <select id="raw-legend" hidden>
+                {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="plot-area" id="js-trend"></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <span class="chart-title">Correlation <span class="r2badge" id="js-corr-r2"></span></span>
+            <div class="chart-ctrls">
+              <span class="mini-label">X</span>
+              <div class="ss mini" id="ss-corr-x" style="width:230px;"></div>
+              <span class="mini-label">Y</span>
+              <div class="ss mini" id="ss-corr-y" style="width:230px;"></div>
+            </div>
+          </div>
+          <div class="plot-area" id="js-corr"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ STEP 3 ══════════════════════════════════ -->
+  <section class="step" id="step-3" data-state="locked">
+    <div class="step-num">3</div>
+    <div class="step-head">
+      <span class="step-title">원인 분석</span>
+      <span class="step-desc">선택 구간에 몰려 있는 조건을 찾아냅니다</span>
+    </div>
+    <div class="step-body">
+      <div class="res-card" style="margin-bottom:18px;">
+        <div class="res-head">
+          <span class="res-title">요인 분포<span class="res-note" id="js-lift-note"></span></span>
+          <div style="display:flex;align-items:center;gap:12px;">
+            <span class="res-cnt" id="js-stats-count"></span>
+            <button class="btn-clear" onclick="clearSelection()">선택 해제</button>
+          </div>
+        </div>
+        <div class="factor-grid" id="js-dist"></div>
+      </div>
+
+      <div class="ai-card">
+        <div class="res-head">
+          <span class="res-title">AI 분석<span class="res-note">선택 구간에 대해 물어보세요</span></span>
+          <button class="btn-ai" id="btn-ai" onclick="runInsight()">자동 진단</button>
+        </div>
+        <div class="ai-out" id="js-ai-out"></div>
+
+        <div class="chat-log" id="js-chat"></div>
+
+        <div class="chat-bar">
+          <textarea class="chat-input" id="js-q" rows="1" disabled
+                    placeholder="예: S7_P3_04_TIME 분포가 어때?"></textarea>
+          <button class="btn-ai" id="btn-send" onclick="sendChat()" disabled>전송</button>
+        </div>
+
+        <div class="chat-hint" id="js-hints"></div>
+      </div>
+    </div>
+  </section>
 </div>
 
+<!-- Plotly: 사내망 CDN 차단 → static 직접 서빙 -->
 <script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
 <script>
-const API_OPERS   = "{% url 'monitor-opers' %}";
-const API_RUN     = "{% url 'monitor-run' %}";
-const API_RESULTS = "{% url 'monitor-results' %}";
-const API_CLEAR   = "{% url 'monitor-clear' %}";
-const API_DIAG    = "{% url 'monitor-diag' %}";
-const API_DETAIL  = "{% url 'monitor-detail' %}";
+/* API URL 은 반드시 Django url 태그로 생성 (프록시 경로 자동 부착) */
+const API_OPTIONS   = "{% url 'analysis-options' %}";
+const API_TREND     = "{% url 'analysis-trend' %}";
+const API_CORR      = "{% url 'analysis-corr' %}";
+const API_STATS     = "{% url 'analysis-stats' %}";
+const API_INSIGHT   = "{% url 'analysis-insight' %}";
+const API_CHAT      = "{% url 'analysis-chat' %}";
 
-const MN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
+/* 차트 타이포 — 위 CSS 토큰과 같은 값 */
+const AN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
+const CF = {
+  title:     {family: AN_FONT, size: 14, color: '#2a2a2a'},
+  axisTitle: {family: AN_FONT, size: 12, color: '#555'},
+  tick:      {family: AN_FONT, size: 11, color: '#666'},
+  legend:    {family: AN_FONT, size: 11, color: '#555'},
+  hover:     {family: AN_FONT, size: 12, color: '#333'},
+};
 
-let allResults = [];
-let filterStatus = '';
-let openKey = null;
+/* ★ Idle 표시 순서 (목록에 없는 값은 뒤에 건수순) */
+const IDLE_ORDER = ['Normal',
+  'idle_1', 'idle_2', 'idle_3', 'idle_4',
+  'layer_1', 'layer_2', 'layer_3', 'layer_4'];
 
+/* 요인 분포 열당 최대 표시 개수 */
+const FACTOR_MAX = 8;
+
+let trendData    = [];
+let corrParams   = [];
+let currentParam = '';
+let selectedIds  = null;
+
+const btnRun = document.getElementById('btn-run');
+const btnAi  = document.getElementById('btn-ai');
+
+/* ── 단계 상태 ─────────────────────────────────── */
+function setStep(n, state) {
+  const el = document.getElementById('step-' + n);
+  if (el) el.dataset.state = state;
+}
+
+/* ── 숫자 포맷 ─────────────────────────────────── */
+function fmt1(v) {
+  if (v === null || v === undefined || isNaN(v)) return '-';
+  return Number(v).toFixed(1);
+}
+function fmt2(v) {
+  if (v === null || v === undefined || isNaN(v)) return '-';
+  return Number(v).toFixed(2);
+}
+function fmt3(v) {
+  if (v === null || v === undefined || isNaN(v)) return '-';
+  return Number(v).toFixed(3);
+}
 function esc(s) {
-  return String(s ?? '').replace(/[&<>"]/g, c =>
+  return String(s).replace(/[&<>"]/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
-function fmt(v, nd) {
-  if (v === null || v === undefined || isNaN(v)) return '-';
-  return Number(v).toFixed(nd === undefined ? 2 : nd);
-}
 
-/* 오류가 나도 팝업을 띄우지 않는다 (분석 페이지와 동일 방침) */
+/* ══════════════════════════════════════════════════
+   API 호출
+   실패해도 팝업을 띄우지 않는다. 조회 중 컬럼 하나가 비었다는 이유로
+   경고창이 뜨면 작업 흐름이 끊기므로, 콘솔에만 남기고 화면은
+   빈 차트를 유지한다. 서버도 읽기 API 는 200 + error 필드로 응답한다.
+   ══════════════════════════════════════════════════ */
 async function postJSON(url, payload) {
   try {
     const res = await fetch(url, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload || {}),
+      body: JSON.stringify(payload),
     });
     const j = await res.json().catch(() => ({}));
-    if (!res.ok) { console.error(`API ${res.status}`, url, j.error || ''); return {}; }
-    if (j.note)  console.info('[monitor]', j.note);
-    if (j.error) console.warn('[monitor]', j.error);
+    if (!res.ok) {
+      console.error(`API 오류 ${res.status}`, url, j.error || '');
+      return j.error ? j : {};
+    }
+    if (j.note)  console.info('[analysis]', j.note);
+    if (j.error) console.warn('[analysis]', j.error);
     return j;
-  } catch (e) { console.error('요청 실패', url, e); return {}; }
+  } catch (e) {
+    console.error('API 요청 실패', url, e);
+    return {};
+  }
 }
 
 /* ══════════════════════════════════════════════════
-   점검 실행 — 공정 단위로 나눠 호출하고 진행률을 보여준다
+   검색형 드롭박스
+   입력한 문자가 포함된 항목만 추려서 보여준다
    ══════════════════════════════════════════════════ */
-async function startCheck() {
-  const btn = document.getElementById('btn-run');
-  const bar = document.getElementById('prog-bar');
-  const box = document.getElementById('prog');
-  const info = document.getElementById('run-info');
+class SearchSelect {
+  constructor(rootId, {placeholder = '검색', onChange = null} = {}) {
+    this.root = document.getElementById(rootId);
+    this.onChange = onChange;
+    this.options = [];
+    this.value = '';
+    this.label = '';
+    this.activeIdx = -1;
 
-  btn.disabled = true; btn.textContent = '점검중...';
-  box.classList.add('on'); bar.style.width = '0%';
+    this.root.innerHTML =
+      `<input class="ss-input" type="text" placeholder="${placeholder}" autocomplete="off" disabled>
+       <div class="ss-panel"></div>`;
+    this.input = this.root.querySelector('.ss-input');
+    this.panel = this.root.querySelector('.ss-panel');
 
-  const {opers} = await postJSON(API_OPERS, {});
-  const list = opers || [];
-  if (!list.length) {
-    // ★ 여기서 그냥 return 하면 이전 결과가 화면에 남아
-    //   방금 점검한 것처럼 보인다. 반드시 비운다.
-    allResults = [];
-    buildFilters(); render();
-    info.textContent = '점검할 공정이 없습니다 (기준정보·적재 테이블 확인)';
-    btn.disabled = false; btn.textContent = '점검 시작';
-    box.classList.remove('on');
+    /* 패널 열기 — focus 만으로는 부족하다.
+       항목을 고를 때 mousedown 에서 preventDefault 를 하므로 포커스가
+       입력창에 그대로 남는데, 이미 포커스를 가진 요소를 다시 클릭해도
+       focus 이벤트는 발생하지 않는다. 그래서 "선택 → 바로 다시 클릭" 이
+       무반응이었고, 다른 곳을 눌러 포커스를 뺀 뒤에야 열렸다.
+       mousedown 으로 그 경우를 직접 처리한다. */
+    this.input.addEventListener('focus', () => { this.input.select(); this.open(''); });
+
+    this.input.addEventListener('mousedown', (e) => {
+      if (this.input.disabled) return;
+      if (this.panel.classList.contains('open')) {
+        e.preventDefault();            // 포커스는 둔 채 닫기만 (토글)
+        this.close(true);
+      } else if (document.activeElement === this.input) {
+        e.preventDefault();
+        this.input.select();
+        this.open('');                 // focus 가 안 나는 경우를 여기서 처리
+      }
+      // 포커스가 없으면 뒤이어 발생할 focus 이벤트가 열어준다
+    });
+
+    this.input.addEventListener('input', () => this.open(this.input.value));
+    this.input.addEventListener('keydown', (e) => this.onKey(e));
+    document.addEventListener('mousedown', (e) => {
+      if (!this.root.contains(e.target)) this.close(true);
+    });
+  }
+
+  setOptions(list) {
+    this.options = list || [];
+    this.setValue('', '');
+    this.input.disabled = this.options.length === 0;
+    this.input.placeholder = this.options.length ? '검색 또는 선택' : '-';
+  }
+
+  setValue(v, label) {
+    this.value = v || '';
+    this.label = label || '';
+    this.input.value = this.label;
+    if (this.onChange) this.onChange(this.value);
+  }
+
+  filtered(q) {
+    const s = (q || '').trim().toLowerCase();
+    if (!s) return this.options;
+    return this.options.filter(o => o.label.toLowerCase().includes(s));
+  }
+
+  open(q) {
+    const list = this.filtered(q);
+    this.activeIdx = -1;
+    if (!list.length) {
+      this.panel.innerHTML = `<div class="ss-none">일치하는 항목 없음</div>`;
+    } else {
+      const s = (q || '').trim();
+      this.panel.innerHTML = list.map((o, i) => {
+        let html = esc(o.label);
+        if (s) {                              // 일치 구간 강조
+          const idx = o.label.toLowerCase().indexOf(s.toLowerCase());
+          if (idx >= 0) {
+            html = esc(o.label.slice(0, idx)) +
+                   '<mark>' + esc(o.label.slice(idx, idx + s.length)) + '</mark>' +
+                   esc(o.label.slice(idx + s.length));
+          }
+        }
+        const chosen = o.value === this.value ? ' chosen' : '';
+        return `<div class="ss-opt${chosen}" data-i="${i}" title="${esc(o.label)}">${html}</div>`;
+      }).join('');
+      this.panel.querySelectorAll('.ss-opt').forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();       // 입력창 mousedown 토글과 겹치지 않게
+          const o = list[Number(el.dataset.i)];
+          this.setValue(o.value, o.label);
+          this.close();
+        });
+      });
+    }
+    this.panel.classList.add('open');
+    this._list = list;
+  }
+
+  close(restore) {
+    this.panel.classList.remove('open');
+    if (restore) this.input.value = this.label;   // 검색어만 치고 나가면 되돌림
+  }
+
+  onKey(e) {
+    const list = this._list || [];
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!this.panel.classList.contains('open')) { this.open(this.input.value); return; }
+      this.activeIdx += (e.key === 'ArrowDown' ? 1 : -1);
+      if (this.activeIdx < 0) this.activeIdx = list.length - 1;
+      if (this.activeIdx >= list.length) this.activeIdx = 0;
+      this.panel.querySelectorAll('.ss-opt').forEach((el, i) =>
+        el.classList.toggle('active', i === this.activeIdx));
+      const act = this.panel.querySelector('.ss-opt.active');
+      if (act) act.scrollIntoView({block: 'nearest'});
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const i = this.activeIdx >= 0 ? this.activeIdx : (list.length === 1 ? 0 : -1);
+      if (i >= 0) { this.setValue(list[i].value, list[i].label); this.close(); }
+    } else if (e.key === 'Escape') {
+      this.close(true); this.input.blur();
+    }
+  }
+}
+
+/* 숨겨둔 select 에서 옵션을 읽어온다 (템플릿이 채워준 값) */
+function optsFromSelect(id) {
+  const el = document.getElementById(id);
+  if (!el) return [];
+  return Array.from(el.options)
+    .filter(o => o.value)
+    .map(o => ({value: o.value, label: o.textContent.trim()}));
+}
+
+const ssTech   = new SearchSelect('ss-tech',   {placeholder: '선택', onChange: onTechChange});
+const ssLot    = new SearchSelect('ss-lot',    {placeholder: '-',   onChange: onLotChange});
+const ssOper   = new SearchSelect('ss-oper',   {placeholder: '-',   onChange: onOperChange});
+const ssParam  = new SearchSelect('ss-param',  {placeholder: '-',   onChange: onParamChange});
+const ssCorrX  = new SearchSelect('ss-corr-x', {placeholder: '-',   onChange: () => drawCorr()});
+const ssCorrY  = new SearchSelect('ss-corr-y', {placeholder: '-',   onChange: () => drawCorr()});
+const ssLegend = new SearchSelect('ss-legend', {placeholder: '-',   onChange: onLegendChange});
+
+ssTech.setOptions(optsFromSelect('raw-tech'));
+
+/* ══════════════════════════════════════════════════
+   1회성 조회 결과 열기
+
+   ?oper=ADHOC_12&lot=5E2 로 들어오면 그 결과를 바로 분석한다.
+   1회성 결과는 기준정보에 등록된 공정이 아니라 OPER 목록에 없으므로,
+   옵션에 임시로 넣어 준 뒤 선택한다.
+   (결과 테이블이 cmp_analysis_adhoc_12 라 분석 API 는 그대로 동작한다)
+   ══════════════════════════════════════════════════ */
+async function openFromUrl() {
+  const q = new URLSearchParams(location.search);
+  const oper = q.get('oper');
+  const lot  = q.get('lot');
+  if (!oper) return;
+
+  const isAdhoc = /^ADHOC_/i.test(oper);
+  ssLot.setOptions(lot ? [{value: lot, label: lot}] : []);
+  if (lot) ssLot.setValue(lot, lot);
+
+  const label = isAdhoc ? `1회성 조회 #${oper.replace(/^ADHOC_/i, '')}` : oper;
+  ssOper.setOptions([{value: oper, label: label}]);
+  ssOper.setValue(oper, label);       // onOperChange 가 파라미터를 불러온다
+
+  if (isAdhoc) {
+    const sub = document.querySelector('.an-sub');
+    if (sub) sub.textContent =
+      `1회성 조회 결과를 분석 중입니다 (${oper}) — 정기 적재 데이터가 아닙니다`;
+  }
+}
+
+// 범례는 항상 하나가 선택돼 있어야 한다
+const legendOpts = optsFromSelect('raw-legend');
+ssLegend.setOptions(legendOpts);
+if (legendOpts.length) ssLegend.setValue(legendOpts[0].value, legendOpts[0].label);
+
+openFromUrl();      // ?oper=... 로 들어온 1회성 조회 결과 처리
+
+/* ── 종속 드롭박스 ─────────────────────────────── */
+async function onTechChange(v) {
+  ssLot.setOptions([]); ssOper.setOptions([]); ssParam.setOptions([]);
+  if (!v) return;
+  const {options} = await postJSON(API_OPTIONS, {level: 'lot_cd', tech: v});
+  ssLot.setOptions((options || []).map(o => ({value: o, label: o})));
+}
+
+async function onLotChange(v) {
+  ssOper.setOptions([]); ssParam.setOptions([]);
+  if (!v) return;
+  const {options} = await postJSON(API_OPTIONS, {level: 'oper'});
+  ssOper.setOptions(options || []);
+}
+
+async function onOperChange(v) {
+  ssParam.setOptions([]); ssCorrX.setOptions([]); ssCorrY.setOptions([]);
+  btnRun.disabled = true;
+  if (!v) return;
+  const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: v});
+  if (error) { console.warn('파라미터 목록 조회 실패:', error); return; }
+  corrParams = options || [];
+  const opts = corrParams.map(o => ({value: o, label: o}));
+  ssParam.setOptions(opts);
+  ssCorrX.setOptions(opts);
+  ssCorrY.setOptions(opts);
+}
+
+function onParamChange(v) { btnRun.disabled = !v; }
+function onLegendChange() { drawTrend(); drawCorr(); }
+
+/* ── 조회 (STEP 1 → 2) ─────────────────────────── */
+async function runQuery() {
+  btnRun.disabled = true; btnRun.textContent = '조회중...';
+  try {
+    const {data, param, error} = await postJSON(API_TREND, {
+      oper_id: ssOper.value, lot_cd: ssLot.value, param: ssParam.value,
+    });
+    if (error) { console.warn('트렌드 조회 실패:', error); return; }
+    trendData = data || [];
+    currentParam = param;
+    drawTrend();
+
+    if (!ssCorrX.value) ssCorrX.setValue(param, param);
+    if (!ssCorrY.value && corrParams.length > 1) {
+      const other = corrParams.find(c => c !== param) || corrParams[0];
+      ssCorrY.setValue(other, other);
+    }
+    drawCorr();
+
+    clearSelection();
+    setStep(1, 'done');
+    setStep(2, 'active');
+    document.getElementById('step-2').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  } finally {
+    btnRun.disabled = false; btnRun.textContent = '조회';
+  }
+}
+
+/* ── 차트 공통 ─────────────────────────────────── */
+function baseLayout(xTitle, yTitle, titleText) {
+  return {
+    title: { text: `<b>${titleText}</b>`, font: CF.title,
+             x: 0.5, xanchor: 'center', y: 0.98, yanchor: 'top' },
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {family: AN_FONT, color: '#555', size: 12},
+    margin: {l: 62, r: 20, t: 52, b: 58},
+    xaxis: {title: {text: xTitle, font: CF.axisTitle}, tickfont: CF.tick,
+      gridcolor: 'rgba(0,0,0,0.07)', griddash: 'dot', zeroline: false,
+      linecolor: 'rgba(0,0,0,0.15)'},
+    yaxis: {title: {text: yTitle, font: CF.axisTitle}, tickfont: CF.tick,
+      gridcolor: 'rgba(0,0,0,0.07)', griddash: 'dot', zeroline: false,
+      linecolor: 'rgba(0,0,0,0.15)'},
+    dragmode: 'select', hovermode: 'closest',
+    // 값이 한 종류뿐이면 트레이스가 1개인데, Plotly 는 그때 범례를 자동으로 숨긴다
+    showlegend: true,
+    legend: {orientation: 'h', x: 0.5, xanchor: 'center', y: -0.2, font: CF.legend},
+    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd', font: CF.hover},
+  };
+}
+
+function legendLabel(col, val) {
+  if (val === null || val === undefined || val === '') {
+    return col === 'IDLE' ? 'Normal' : '(없음)';
+  }
+  return val;
+}
+
+function groupByLegend(data, legendCol, xKey, yKey) {
+  const groups = {};
+  data.forEach(d => {
+    const key = legendLabel(legendCol, d[legendCol]);
+    if (!groups[key]) groups[key] = {x: [], y: [], ids: [], text: []};
+    groups[key].x.push(d[xKey]);
+    groups[key].y.push(d[yKey]);
+    groups[key].ids.push(d.id);
+    groups[key].text.push(`${d.LOT_ID} / WF${d.WF_ID}<br>${legendCol}: ${key}`);
+  });
+  return groups;
+}
+
+function orderedLegendKeys(legendCol, groups) {
+  const keys = Object.keys(groups);
+  if (legendCol !== 'IDLE') return keys.sort();
+  return keys.sort((a, b) => {
+    const ia = IDLE_ORDER.indexOf(a), ib = IDLE_ORDER.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+function markerTrace(name, g) {
+  return {
+    x: g.x, y: g.y, customdata: g.ids, text: g.text, name: String(name),
+    mode: 'markers', type: 'scattergl',
+    marker: {size: 9, opacity: 0.8, line: {width: 0.5, color: 'rgba(0,0,0,0.22)'}},
+    unselected: {marker: {opacity: 0.12}},
+  };
+}
+
+/* ══════════════════════════════════════════════════
+   차트 이벤트 등록
+   · 빈 영역을 클릭하면 Plotly 는 plotly_selected 를 points 없이 주거나
+     plotly_deselect 를 보낸다. 예전 코드는 둘 다 무시해서(그냥 return)
+     더블클릭 말고는 선택이 풀리지 않았다.
+   · newPlot 을 다시 호출해도 핸들러가 겹쳐 쌓이지 않도록 먼저 비운다.
+     (겹치면 onSelected 가 여러 번 돌아 요청도 중복으로 나간다)
+   ══════════════════════════════════════════════════ */
+function bindChartEvents(div, otherId) {
+  ['plotly_selected', 'plotly_deselect', 'plotly_doubleclick'].forEach(ev => {
+    if (div.removeAllListeners) div.removeAllListeners(ev);
+  });
+
+  div.on('plotly_selected', (ev) => {
+    if (!ev || !ev.points || !ev.points.length) { clearSelection(); return; }
+    const ids = ev.points.map(p => p.customdata);
+    highlightIn(otherId, ids);          // 반대쪽 차트에도 같은 웨이퍼 표시
+    onSelected(ids);
+  });
+
+  div.on('plotly_deselect',    clearSelection);   // 드래그 박스 밖 클릭
+  div.on('plotly_doubleclick', clearSelection);
+}
+
+/* ── Trend ─────────────────────────────────────── */
+function drawTrend() {
+  if (!trendData.length) return;
+  const legendCol = ssLegend.value;
+  const groups = groupByLegend(trendData, legendCol, 'date', 'val');
+
+  const traces = orderedLegendKeys(legendCol, groups).map(name => {
+    const t = markerTrace(name, groups[name]);
+    t.hovertemplate = '%{text}<br><b>%{y:.2f}</b><extra></extra>';
+    return t;
+  });
+
+  const title  = `${ssTech.value} · ${ssLot.value} · ${currentParam}`;
+  const layout = baseLayout('DATE', currentParam, title);
+  addSpecShapes(layout, trendData.map(d => d.val));
+
+  const div = document.getElementById('js-trend');
+  Plotly.newPlot(div, traces, layout,
+    {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
+
+  bindChartEvents(div, 'js-corr');
+}
+
+/* ── Correlation ───────────────────────────────── */
+async function drawCorr() {
+  const xc = ssCorrX.value, yc = ssCorrY.value;
+  if (!xc || !yc || !ssOper.value || !ssLot.value) return;
+
+  const {data, r2, trend, error} = await postJSON(API_CORR, {
+    oper_id: ssOper.value, lot_cd: ssLot.value, x_col: xc, y_col: yc,
+  });
+  if (error) { console.warn('상관 조회 실패:', error); return; }
+
+  document.getElementById('js-corr-r2').textContent =
+    (r2 !== null && r2 !== undefined) ? `R² = ${fmt3(r2)}` : '';
+
+  if (!data || !data.length) {
+    document.getElementById('js-corr').innerHTML = '';
     return;
   }
 
-  allResults = [];
-  const notes = [];
-  for (let i = 0; i < list.length; i++) {
-    const o = list[i];
-    info.textContent = `${o.label} 점검중 (${i + 1}/${list.length})`;
-    const r = await postJSON(API_RUN, {oper_id: o.oper_id, label: o.label});
-    if (r.results) allResults = allResults.concat(r.results);
-    if (r.note) notes.push(`${o.label}: ${r.note}`);
-    bar.style.width = ((i + 1) / list.length * 100).toFixed(1) + '%';
+  const legendCol = ssLegend.value;
+  const groups = groupByLegend(data, legendCol, 'x', 'y');
+
+  const traces = orderedLegendKeys(legendCol, groups).map(name => {
+    const t = markerTrace(name, groups[name]);
+    t.hovertemplate = `%{text}<br>${xc}: %{x:.2f}<br>${yc}: %{y:.2f}<extra></extra>`;
+    return t;
+  });
+
+  const layout = baseLayout(xc, yc, `${xc} vs ${yc}`);
+
+  if (trend) {
+    // SVG scatter 는 WebGL 산점도보다 위 레이어에 그려진다
+    traces.push({
+      x: trend.x, y: trend.y, mode: 'lines', type: 'scatter',
+      name: '추세선', line: {color: '#ef4444', width: 2.2, dash: 'dash'},
+      hoverinfo: 'skip', showlegend: true,
+    });
+
+    const sign = trend.intercept >= 0 ? '+' : '−';
+    const eq   = `y = ${fmt2(trend.slope)}x ${sign} ${fmt2(Math.abs(trend.intercept))}`;
+    layout.annotations = (layout.annotations || []).concat([{
+      x: trend.x[1], y: trend.y[1], xref: 'x', yref: 'y',
+      text: `<b>${eq}</b>`, showarrow: false,
+      xanchor: 'right', yanchor: trend.slope >= 0 ? 'top' : 'bottom',
+      xshift: -4, yshift: trend.slope >= 0 ? -6 : 6,
+      font: {family: AN_FONT, size: 11, color: '#ef4444'},
+      bgcolor: 'rgba(255,255,255,0.85)', borderpad: 3,
+    }]);
   }
 
-  if (notes.length) console.info('[monitor]', notes.join(' / '));
-  info.textContent = `점검 완료 ${new Date().toLocaleString('ko-KR')}` +
-    dayInfo(allResults) +
-    (notes.length ? ` · 건너뛴 공정 ${notes.length}개(콘솔 참고)` : '');
-  btn.disabled = false; btn.textContent = '다시 점검';
-  setTimeout(() => box.classList.remove('on'), 600);
+  const div = document.getElementById('js-corr');
+  Plotly.newPlot(div, traces, layout,
+    {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
 
-  buildFilters(); render();
-}
+  // 이미 선택된 구간이 있으면 다시 그린 뒤에도 유지
+  if (selectedIds) highlightIn('js-corr', selectedIds);
 
-/* 저장된 결과 비우기.
-   화면은 페이지를 열 때 저장된 결과를 불러오므로(loadSaved), 점검 대상
-   규칙을 바꾼 뒤에는 옛 결과가 남아 새 규칙이 반영된 것처럼 보이지 않는다.
-   비운 뒤 [점검 시작] 을 다시 누르면 현재 코드 기준으로 다시 판정한다. */
-async function clearResults() {
-  const btn = document.getElementById('btn-clear');
-  btn.disabled = true;
-  try {
-    const j = await postJSON(API_CLEAR, {});
-    allResults = [];
-    openKey = null;
-    filterStatus = '';
-    buildFilters();
-    render();
-    document.getElementById('run-info').textContent =
-      `결과 ${j.deleted || 0}건을 비웠습니다. 점검 시작을 눌러주세요.`;
-  } finally {
-    btn.disabled = false;
-  }
+  bindChartEvents(div, 'js-trend');
+
+  // 범례로 항목을 켜고 끄면 추세선과 R² 를 다시 계산한다
+  // (이벤트는 표시 상태가 바뀌기 전에 발생하므로 다음 틱에 처리)
+  ['plotly_legendclick', 'plotly_legenddoubleclick'].forEach(ev => {
+    if (div.removeAllListeners) div.removeAllListeners(ev);
+  });
+  div.on('plotly_legendclick',       () => { setTimeout(recalcCorrTrend, 0); return true; });
+  div.on('plotly_legenddoubleclick', () => { setTimeout(recalcCorrTrend, 0); return true; });
 }
 
 /* ══════════════════════════════════════════════════
-   상태 진단
-
-   '적재는 됐는데 점검이 옛 데이터로 돈다' 같은 질문을
-   화면에서 바로 확인할 수 있게 한다. 최근 DATE 가 핵심이다 —
-   웹이 실제로 보고 있는 데이터의 날짜다.
+   차트 간 교차 표시
+   한쪽에서 드래그한 웨이퍼를 다른 차트에서도 강조
+   (customdata 없는 추세선 트레이스는 건너뜀)
    ══════════════════════════════════════════════════ */
-async function runDiag() {
-  const btn = document.getElementById('btn-diag');
-  btn.disabled = true; btn.textContent = '진단중...';
-  try {
-    const j = await postJSON(API_DIAG, {});
-    const items = j.items || [];
+function highlightIn(divId, ids) {
+  const div = document.getElementById(divId);
+  if (!div || !div.data || !div.data.length) return;
+  const want = new Set(ids);
+  const sel = div.data.map(tr => {
+    if (!tr.customdata) return null;      // null = 선택 표시 안 함
+    const pts = [];
+    tr.customdata.forEach((id, i) => { if (want.has(id)) pts.push(i); });
+    return pts;
+  });
+  Plotly.restyle(div, {selectedpoints: sel});
+}
 
-    document.getElementById('diag-sum').textContent =
-      `공정 ${j.n_oper || 0}개 · 테이블 ${j.n_table || 0}개` +
-      ((j.orphans || []).length ? ` · 등록에 없는 잔여 테이블 ${j.orphans.length}개` : '');
-
-    document.getElementById('diag-body').innerHTML = items.map(d => {
-      const cls = !d.exists ? 'diag-bad'
-                : (!d.rows || !d.n_param) ? 'diag-warn' : 'diag-ok';
-      return `<tr>
-        <td>${esc(d.oper_desc || d.oper_id)}</td>
-        <td class="mono">${esc(d.table)}</td>
-        <td class="num">${d.rows ? d.rows.toLocaleString() : '-'}</td>
-        <td class="mono ${cls}">${esc(d.last_date || '없음')}</td>
-        <td class="mono">${esc((d.lot_cds || []).join(', ') || '-')}</td>
-        <td class="num">${d.n_param || 0}</td>
-        <td>${esc(d.source || '-')}</td>
-        <td class="${cls}">${esc(d.note || '정상')}</td>
-      </tr>`;
-    }).join('') ||
-      '<tr><td colspan="8" class="empty">등록된 공정이 없습니다.</td></tr>';
-
-    if ((j.orphans || []).length) {
-      console.info('[monitor] 등록에 없는 잔여 테이블:', j.orphans.join(', '));
+/* ══════════════════════════════════════════════════
+   추세선 재계산
+   범례를 클릭해 특정 항목을 숨기면 Plotly 는 해당 트레이스를
+   visible:'legendonly' 로 바꾼다. 서버 회귀값은 전체 기준이므로,
+   화면에 보이는 점만 모아 클라이언트에서 다시 계산한다.
+   ══════════════════════════════════════════════════ */
+function visiblePoints(div) {
+  const xs = [], ys = [];
+  (div.data || []).forEach(tr => {
+    if (!tr.customdata) return;                       // 추세선 트레이스 제외
+    if (tr.visible === 'legendonly' || tr.visible === false) return;
+    const n = Math.min(tr.x.length, tr.y.length);
+    for (let i = 0; i < n; i++) {
+      const x = Number(tr.x[i]), y = Number(tr.y[i]);
+      if (tr.x[i] == null || tr.y[i] == null || isNaN(x) || isNaN(y)) continue;
+      xs.push(x); ys.push(y);
     }
-    document.getElementById('diag').style.display = 'block';
-  } finally {
-    btn.disabled = false; btn.textContent = '상태 진단';
-  }
-}
-
-/* ══════════════════════════════════════════════════
-   판정에 쓴 데이터 날짜
-
-   '점검 완료 — 14:32' 만 보면 새 데이터로 돌았는지 알 수 없다.
-   판정 기준일(각 공정 테이블의 MAX(DATE))을 같이 보여준다.
-   공정마다 적재 상태가 다르면 뒤처진 공정 수도 함께 알린다.
-   ══════════════════════════════════════════════════ */
-function dayInfo(results) {
-  const days = (results || []).map(r => r.day).filter(Boolean);
-  if (!days.length) return '';
-  const max = days.reduce((a, b) => (a > b ? a : b));
-
-  // 공정별 최신일 — 하나라도 뒤처지면 그 공정 적재가 안 된 것이다
-  const byOper = {};
-  (results || []).forEach(r => {
-    if (!r.day) return;
-    const k = r.oper_label || r.oper_id;
-    if (!byOper[k] || r.day > byOper[k]) byOper[k] = r.day;
   });
-  const behind = Object.entries(byOper).filter(([, d]) => d < max);
-  if (behind.length) {
-    console.info('[monitor] 최신일이 뒤처진 공정:',
-      behind.map(([k, d]) => `${k}=${d}`).join(', '));
+  return {xs, ys};
+}
+
+/* 최소제곱 직선 + R² (점이 많아도 안전하도록 한 번만 순회) */
+function linReg(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+
+  let sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+  let xmin = Infinity, xmax = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = xs[i], y = ys[i];
+    sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
+    if (x < xmin) xmin = x;
+    if (x > xmax) xmax = x;
   }
-  return ` · 데이터 최신일 ${max}` +
-         (behind.length ? ` (뒤처진 공정 ${behind.length}개, 콘솔 참고)` : '');
+  const dx = n * sxx - sx * sx;
+  if (dx === 0) return null;                          // x 가 전부 같은 값
+
+  const slope     = (n * sxy - sx * sy) / dx;
+  const intercept = (sy - slope * sx) / n;
+  const dy        = n * syy - sy * sy;
+  const r         = dy === 0 ? 0 : (n * sxy - sx * sy) / Math.sqrt(dx * dy);
+
+  return {slope, intercept, r2: r * r, n, xmin, xmax};
 }
 
-/* 이전 결과 불러오기 */
-async function loadSaved() {
-  const j = await postJSON(API_RESULTS, {});
-  allResults = j.results || [];
-  const info = document.getElementById('run-info');
-  info.textContent = j.run_ts
-    ? `최근 점검 ${String(j.run_ts).slice(0, 19)}${dayInfo(allResults)}`
-    : '점검 이력이 없습니다. 점검 시작을 눌러주세요.';
-  buildFilters(); render();
-}
-
-function buildFilters() {
-  // 공정
-  const so = document.getElementById('f-oper');
-  const curO = so.value;
-  const opers = new Map();
-  allResults.forEach(r => opers.set(r.oper_id, r.oper_label || r.oper_id));
-  so.innerHTML = '<option value="">전체 공정</option>' +
-    [...opers.entries()].sort((a, b) => a[1].localeCompare(b[1]))
-      .map(([id, lb]) => `<option value="${esc(id)}">${esc(lb)}</option>`).join('');
-  so.value = opers.has(curO) ? curO : '';
-
-  buildLotFilter();
-}
-
-/* LOT_CD 는 선택된 공정에 있는 것만 보여준다.
-   공정마다 도는 device 가 다르므로 전체를 늘어놓으면 빈 결과만 나온다. */
-function buildLotFilter() {
-  const sl = document.getElementById('f-lot');
-  const curL = sl.value;
-  const oper = document.getElementById('f-oper').value;
-
-  const lots = [...new Set(
-    allResults.filter(r => !oper || r.oper_id === oper)
-              .map(r => r.lot_cd).filter(v => v !== null && v !== undefined)
-  )].map(String).sort();
-
-  sl.innerHTML = '<option value="">전체 LOT_CD</option>' +
-    lots.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
-  sl.value = lots.includes(curL) ? curL : '';
-}
-
-function onOperFilter() {
-  buildLotFilter();          // 공정이 바뀌면 LOT_CD 목록도 갱신
-  render();
-}
-
-/* ══════════════════════════════════════════════════
-   스파크라인 — 행마다 그리므로 SVG 직접 생성
-   회색 띠 = 30일 min~max, 점선 = 기준 평균, 빨간 점 = 최근일
-   ══════════════════════════════════════════════════ */
-function sparkline(r) {
-  const s = (r.series || []).filter(p => p.avg !== null);
-  if (s.length < 2) return '<span class="reason dim">-</span>';
-
-  const W = 140, H = 34, PAD = 3;
-  const vals = s.map(p => p.avg);
-  const b = r.base_stat || {};
-  const lo = Math.min(...vals, b.min ?? Infinity);
-  const hi = Math.max(...vals, b.max ?? -Infinity);
-  const span = (hi - lo) || 1;
-
-  const x = i => PAD + i * (W - PAD * 2) / (s.length - 1);
-  const y = v => H - PAD - (v - lo) / span * (H - PAD * 2);
-
-  let band = '';
-  if (b.min !== null && b.min !== undefined && b.max !== null) {
-    const y1 = y(b.max), y2 = y(b.min);
-    band = `<rect x="0" y="${y1.toFixed(1)}" width="${W}" ` +
-           `height="${Math.max(1, y2 - y1).toFixed(1)}" ` +
-           `fill="rgba(128,128,128,0.14)"/>`;
-  }
-  let mean = '';
-  if (b.avg !== null && b.avg !== undefined) {
-    const ym = y(b.avg).toFixed(1);
-    mean = `<line x1="0" y1="${ym}" x2="${W}" y2="${ym}" ` +
-           `stroke="rgba(128,128,128,0.55)" stroke-width="1" stroke-dasharray="3 2"/>`;
-  }
-
-  const d = s.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.avg).toFixed(1)}`).join('');
-  const color = r.status === '이상' ? '#dc2626'
-              : r.status === '주의' ? '#f59e0b' : '#16a34a';
-  const last = s[s.length - 1];
-
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-    ${band}${mean}
-    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6"
-          stroke-linejoin="round"/>
-    <circle cx="${x(s.length - 1).toFixed(1)}" cy="${y(last.avg).toFixed(1)}"
-            r="3" fill="${color}"/>
-  </svg>`;
-}
-
-/* ══════════════════════════════════════════════════
-   테이블
-   ══════════════════════════════════════════════════ */
-function statusBadge(st) {
-  const m = {'이상': 'b-bad', '주의': 'b-warn', '정상': 'b-good',
-             '기준없음': 'b-none', '데이터없음': 'b-none', '참고': 'b-none'};
-  return `<span class="badge ${m[st] || 'b-none'}">${esc(st)}</span>`;
-}
-
-function filtered() {
-  const fo = document.getElementById('f-oper').value;
-  const fl = document.getElementById('f-lot').value;
-  const ft = document.getElementById('f-type').value;
-  const fx = (document.getElementById('f-text').value || '').trim().toUpperCase();
-  // '데이터없음' 카드는 판정 불가 항목 전체(기준없음 포함)를 모아 보여준다
-  const stOk = r => !filterStatus
-    || (filterStatus === '데이터없음'
-        ? ['데이터없음', '기준없음', '참고'].includes(r.status)
-        : r.status === filterStatus);
-  return allResults.filter(r =>
-    stOk(r) &&
-    (!fo || r.oper_id === fo) &&
-    (!fl || String(r.lot_cd) === fl) &&
-    (!ft || (r.ptype || 'ETC') === ft) &&
-    (!fx || (r.param || '').toUpperCase().includes(fx)));
-}
-
-function render() {
-  // 요약 카드
-  //   '데이터없음' 은 점검은 했지만 값이 없어 판정 불가한 항목.
-  //   숨기면 '대상엔 있는데 결과에 없다' 가 되므로 카드로 드러낸다.
-  const cnt = {'이상': 0, '주의': 0, '정상': 0,
-               '데이터없음': 0, '기준없음': 0, '참고': 0};
-  allResults.forEach(r => { if (cnt[r.status] !== undefined) cnt[r.status]++; });
-  // 판정 제외 = 값이 없거나(데이터없음/기준없음) 규칙이 없는 것(참고: 소모품)
-  const noData = cnt['데이터없음'] + cnt['기준없음'] + cnt['참고'];
-  document.getElementById('cards').innerHTML = `
-    <div class="card all  ${filterStatus === '' ? 'on' : ''}" onclick="setStatus('')">
-      <div class="n">${allResults.length}</div><div class="l">전체</div></div>
-    <div class="card bad  ${filterStatus === '이상' ? 'on' : ''}" onclick="setStatus('이상')">
-      <div class="n">${cnt['이상']}</div><div class="l">이상</div></div>
-    <div class="card warn ${filterStatus === '주의' ? 'on' : ''}" onclick="setStatus('주의')">
-      <div class="n">${cnt['주의']}</div><div class="l">주의</div></div>
-    <div class="card good ${filterStatus === '정상' ? 'on' : ''}" onclick="setStatus('정상')">
-      <div class="n">${cnt['정상']}</div><div class="l">정상</div></div>
-    <div class="card none ${filterStatus === '데이터없음' ? 'on' : ''}" onclick="setStatus('데이터없음')">
-      <div class="n">${noData}</div><div class="l">판정제외</div></div>`;
-
-  const rows = filtered();
-  document.getElementById('cnt-info').textContent = `${rows.length}건 표시`;
-  document.getElementById('empty').style.display = rows.length ? 'none' : 'block';
-  if (!rows.length) {
-    document.getElementById('empty').textContent =
-      allResults.length ? '조건에 맞는 항목이 없습니다.' : '점검 시작을 눌러주세요.';
-  }
-
-  document.getElementById('tbody').innerHTML = rows.map(r => {
-    const key = `${r.oper_id}|${r.lot_cd}|${r.param}`;
-    const isDef = (r.ptype || '') === 'DEFECT';
-    const sig = r.sigma === null || r.sigma === undefined ? '-'
-              : (isDef ? `×${fmt(r.sigma, 1)}` : `${r.sigma > 0 ? '+' : ''}${fmt(r.sigma, 1)}σ`);
-    const streak = (r.streak || 0) >= 2
-      ? `<span class="streak">${r.streak}일</span>` : '';
-    const tags = (r.checks || []).map(c => `<span class="tag">${esc(c)}</span>`).join('');
-    const reasons = (r.reasons || []).map(x => esc(x)).join('<br>');
-
-    return `<tr onclick="toggleDetail('${esc(key)}')" data-key="${esc(key)}"
-                class="${openKey === key ? 'open' : ''}">
-      <td>${esc(r.oper_label || r.oper_id)}</td>
-      <td class="num">${esc(r.lot_cd)}</td>
-      <td><b>${esc(r.param)}</b></td>
-      <td><span class="tag">${esc(r.ptype || 'ETC')}</span></td>
-      <td>${statusBadge(r.status)}${streak}</td>
-      <td class="num">${sig}</td>
-      <td class="num">${r.out_cnt || 0}</td>
-      <td>${sparkline(r)}</td>
-      <td><div class="reason">${tags ? tags + '<br>' : ''}${reasons}</div></td>
-    </tr>` + (openKey === key ? detailRow(r) : '');
-  }).join('');
-
-  if (openKey) {
-    const r = rows.find(x => `${x.oper_id}|${x.lot_cd}|${x.param}` === openKey);
-    if (r) drawDetail(r);
-  }
-}
-
-function setStatus(s) { filterStatus = s; render(); }
-
-function detailRow(r) {
-  const b = r.base_stat || {}, d = r.day_stat || {};
-  const eqp = (r.eqp || []).map(e => {
-    const hot = e.sigma !== null && Math.abs(e.sigma) >= 2 ? ' hot' : '';
-    const sg = e.sigma === null ? '' : ` (${e.sigma > 0 ? '+' : ''}${fmt(e.sigma, 1)}σ)`;
-    return `<span class="eqp-chip${hot}">${esc(e.eqp)} · ${fmt(e.avg)}${sg} · ${e.n}장</span>`;
-  }).join('');
-
-  return `<tr class="detail"><td colspan="9"><div class="detail-in">
-    <div class="detail-head">
-      <span>${esc(r.span || '최근일')} <b>${esc(r.day_from && r.day_from !== r.day ? r.day_from + ' ~ ' + r.day : r.day)}</b></span>
-      <span>구간 평균 <b>${fmt(d.avg)}</b> (${d.n}장)</span>
-      <span>30일 평균 <b>${fmt(b.avg)}</b> · σ <b>${fmt(b.std)}</b></span>
-      <span>30일 범위 <b>${fmt(b.min)} ~ ${fmt(b.max)}</b></span>
-      ${r.spread ? `<span>산포비 <b>${fmt(r.spread, 1)}배</b></span>` : ''}
-      ${r.drift ? `<span>드리프트 <b>${r.drift.total_sigma > 0 ? '+' : ''}${fmt(r.drift.total_sigma, 1)}σ/${r.drift.days}일</b></span>` : ''}
-      <span class="mode-box">
-        <button class="mode-btn ${colorMode === 'eqp' ? 'on' : ''}"
-                onclick="setColorMode('eqp', event)">장비별 색</button>
-        <button class="mode-btn ${colorMode === 'span' ? 'on' : ''}"
-                onclick="setColorMode('span', event)">구간 강조</button>
-      </span>
-    </div>
-    <div class="detail-plot" id="dp"></div>
-    ${eqp ? `<div class="eqp-grid">${eqp}</div>` : ''}
-  </div></td></tr>`;
-}
-
-function toggleDetail(key) {
-  openKey = (openKey === key) ? null : key;
-  render();
-}
-
-/* ══════════════════════════════════════════════════
-   상세 차트 색 구분 모드
-     'eqp'  장비 호기별 색 (기본) — 어느 설비가 튀는지 바로 보인다
-     'span' 점검 구간만 강조   — 장비가 많아 색이 어지러울 때
-   ══════════════════════════════════════════════════ */
-let colorMode = 'eqp';
-
-/* 밝은 배경에서 서로 구분되는 색. 장비 수가 이보다 많으면 순환한다 */
-const EQP_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed',
-                    '#0891b2', '#db2777', '#65a30d', '#475569', '#c2410c',
-                    '#0d9488', '#9333ea'];
-
-function setColorMode(m, ev) {
-  if (ev) ev.stopPropagation();
-  colorMode = m;
-  render();
-}
-
-/* 상세 차트 — 웨이퍼 단위.
-   기본은 장비 호기별로 색을 나누고, 점검 구간 웨이퍼는 크게 + 진한 테두리로
-   표시한다. (장비 구분이 없으면 어느 설비가 원인인지 차트에서 알 수 없다) */
-async function drawDetail(r) {
-  const div = document.getElementById('dp');
-  if (!div) return;
-
-  const j = await postJSON(API_DETAIL, {
-    oper_id: r.oper_id, lot_cd: r.lot_cd, param: r.param,
-  });
-  const pts = j.points || [];
-  if (!pts.length) { div.innerHTML = ''; return; }
-
-  // 점검 구간 (단일 일자일 수도, day_from ~ day 범위일 수도 있다)
-  const dTo   = r.day;
-  const dFrom = r.day_from || r.day;
-  const inSpan = p => {
-    const d = (p.date || '').slice(0, 10);
-    return d >= dFrom && d <= dTo;
+function trendAnnotation(fit) {
+  const sign = fit.intercept >= 0 ? '+' : '−';
+  const eq   = `y = ${fmt2(fit.slope)}x ${sign} ${fmt2(Math.abs(fit.intercept))}`;
+  return {
+    x: fit.xmax, y: fit.slope * fit.xmax + fit.intercept, xref: 'x', yref: 'y',
+    text: `<b>${eq}</b>`, showarrow: false,
+    xanchor: 'right', yanchor: fit.slope >= 0 ? 'top' : 'bottom',
+    xshift: -4, yshift: fit.slope >= 0 ? -6 : 6,
+    font: {family: AN_FONT, size: 11, color: '#ef4444'},
+    bgcolor: 'rgba(255,255,255,0.85)', borderpad: 3,
   };
+}
 
-  // 장비 키 — 챔버까지 있으면 챔버 단위가 더 유용하다
-  const keyOf = p => p.EQP_CH_ID || p.EQP_ID || '(미확인)';
-  const hasEqp = pts.some(p => p.EQP_CH_ID || p.EQP_ID);
+function recalcCorrTrend() {
+  const div = document.getElementById('js-corr');
+  if (!div || !div.data || !div.data.length) return;
 
-  const mk = (arr, o) => ({
-    x: arr.map(p => p.date), y: arr.map(p => p.val),
-    text: arr.map(p => {
-      const eq = p.EQP_CH_ID || p.EQP_ID || '';
-      return `${p.LOT_ID || ''} / WF${p.WF_ID || ''}` +
-             (eq ? `<br>${eq}` : '') +
-             (p.IDLE ? `<br>IDLE: ${p.IDLE}` : '');
-    }),
-    name: o.name, mode: 'markers', type: 'scattergl',
-    legendgroup: o.group || o.name,
-    showlegend: o.showlegend !== false,
-    marker: {size: o.size, color: o.color, opacity: o.opacity ?? .8,
-             symbol: o.symbol || 'circle',
-             line: {width: o.lineW ?? .5,
-                    color: o.lineColor || 'rgba(0,0,0,.25)'}},
-    hovertemplate: '%{text}<br><b>%{y:.2f}</b><extra></extra>',
+  const ti = div.data.findIndex(t => t.name === '추세선');
+  if (ti < 0) return;
+
+  const badge = document.getElementById('js-corr-r2');
+  const {xs, ys} = visiblePoints(div);
+  const fit = linReg(xs, ys);
+
+  // 숨긴 항목이 있으면 표시에 표기
+  const total  = (div.data.filter(t => t.customdata) || []).length;
+  const shown  = (div.data.filter(t => t.customdata &&
+                   t.visible !== 'legendonly' && t.visible !== false) || []).length;
+  const partial = shown < total;
+
+  if (!fit) {                                          // 점이 부족하면 선을 숨김
+    Plotly.restyle(div, {x: [[]], y: [[]]}, [ti]);
+    Plotly.relayout(div, {annotations: []});
+    badge.textContent = '';
+    return;
+  }
+
+  Plotly.restyle(div, {
+    x: [[fit.xmin, fit.xmax]],
+    y: [[fit.slope * fit.xmin + fit.intercept,
+         fit.slope * fit.xmax + fit.intercept]],
+  }, [ti]);
+  Plotly.relayout(div, {annotations: [trendAnnotation(fit)]});
+
+  badge.textContent = `R² = ${fmt3(fit.r2)}` + (partial ? ` · ${fit.n}점` : '');
+}
+
+/* ══════════════════════════════════════════════════
+   스펙선
+   ★ 실제 Upper/Lower/Target 이 생기면 이 함수만 교체
+   ══════════════════════════════════════════════════ */
+function getSpecLines(vals) {
+  const v = vals.filter(x => x !== null && !isNaN(x));
+  if (!v.length) return null;
+  return {upper: Math.max(...v), lower: Math.min(...v),
+          target: v.reduce((a,b)=>a+b,0)/v.length};
+}
+
+const SPEC_STYLE = {
+  upper: {color:'#ef4444', dash:'dash', label:'Upper'},
+  lower: {color:'#ef4444', dash:'dash', label:'Lower'},
+  target:{color:'#22c55e', dash:'dot',  label:'Target'},
+};
+
+function addSpecShapes(layout, vals) {
+  const spec = getSpecLines(vals);
+  if (!spec) return;
+  layout.shapes = []; layout.annotations = layout.annotations || [];
+  ['upper','target','lower'].forEach(k => {
+    const val = spec[k]; if (val == null || isNaN(val)) return;
+    const st = SPEC_STYLE[k];
+    layout.shapes.push({
+      type:'line', xref:'paper', yref:'y', x0:0, x1:1, y0:val, y1:val,
+      line:{color:st.color, width:1.6, dash:st.dash}, layer:'above',
+    });
+    layout.annotations.push({
+      xref:'paper', yref:'y', x:1, xanchor:'right', y:val, yanchor:'bottom',
+      text:`<b>${st.label} ${fmt1(val)}</b>`, showarrow:false,
+      font:{family: AN_FONT, size:11, color:st.color},
+      bgcolor:'rgba(255,255,255,0.85)', borderpad:2,
+    });
   });
+}
 
-  const traces = [];
+/* ── 구간 선택 (STEP 2 → 3) ────────────────────── */
+async function onSelected(ids) {
+  selectedIds = ids;
+  setStep(2, 'done');
+  setStep(3, 'active');
 
-  if (colorMode === 'eqp' && hasEqp) {
-    const keys = [...new Set(pts.map(keyOf))].sort();
-    keys.forEach((k, i) => {
-      const color = EQP_COLORS[i % EQP_COLORS.length];
-      const base = pts.filter(p => keyOf(p) === k && !inSpan(p));
-      const hot  = pts.filter(p => keyOf(p) === k && inSpan(p));
+  document.getElementById('js-ai-out').innerHTML = '';
+  btnAi.disabled = false;
+  resetChat();
+  enableChat();
 
-      // 기준 기간 — 옅게
-      if (base.length) {
-        traces.push(mk(base, {name: k, group: k, color: color,
-                              size: 7, opacity: .45}));
-      }
-      // 점검 구간 — 크게 + 진한 테두리 (범례는 위와 하나로 묶는다)
-      if (hot.length) {
-        traces.push(mk(hot, {name: k, group: k, color: color,
-                             size: 11, opacity: .95, lineW: 1.6,
-                             lineColor: 'rgba(20,20,20,.75)',
-                             showlegend: base.length === 0}));
+  const distRes = await postJSON(API_STATS, {oper_id: ssOper.value, ids: ids});
+  if (!distRes.error) {
+    document.getElementById('js-stats-count').textContent = `${distRes.count} wf`;
+    // 요인 항목은 서버(views.py FACTOR_COLS)가 정한다
+    document.getElementById('js-dist').innerHTML =
+      (distRes.factors || []).map(f =>
+        factorCol(f.label, f.col === 'IDLE' ? sortIdleRows(f.rows) : f.rows)
+      ).join('');
+  }
+
+  document.getElementById('step-3').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+function sortIdleRows(rows) {
+  return [...(rows || [])].sort((a, b) => {
+    const ia = IDLE_ORDER.indexOf(a.key), ib = IDLE_ORDER.indexOf(b.key);
+    if (ia === -1 && ib === -1) return b.count - a.count;
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+function factorCol(title, rows) {
+  const list = rows || [];
+  let items = list.slice(0, FACTOR_MAX).map(r =>
+    `<div class="fitem"><span class="k" title="${esc(r.key)}">${esc(r.key)}</span>` +
+    `<span class="v">${r.count}</span></div>`
+  ).join('');
+  if (list.length > FACTOR_MAX) {
+    items += `<div class="fitem dim"><span class="k">외 ${list.length - FACTOR_MAX}종</span><span class="v"></span></div>`;
+  }
+  if (!items) items = `<div class="fitem dim"><span class="k">없음</span><span class="v"></span></div>`;
+  return `<div class="fcol"><div class="fcol-head">${esc(title)}</div>${items}</div>`;
+}
+
+/* ══════════════════════════════════════════════════
+   AI 원인 분석
+   서버가 편중도를 계산해 요약을 만들고, LLM 은 그 요약만 해석한다.
+   (원본 웨이퍼 데이터는 LLM 으로 넘어가지 않는다)
+   ══════════════════════════════════════════════════ */
+async function runInsight() {
+  if (!selectedIds) return;
+  const out = document.getElementById('js-ai-out');
+  btnAi.disabled = true; btnAi.textContent = '분석중...';
+  out.innerHTML = '';
+
+  try {
+    const res = await postJSON(API_INSIGHT, {
+      oper_id: ssOper.value, lot_cd: ssLot.value,
+      param: ssParam.value, ids: selectedIds,
+    });
+    if (res.error) { out.innerHTML = `<p>${esc(res.error)}</p>`; return; }
+
+    markHotFactors(res.summary);           // 편중 항목을 요인 분포에도 표시
+
+    let html = '';
+    if (res.answer) {
+      html += mdToHtml(res.answer);
+    } else {
+      // LLM 이 실패해도 편중도 요약 자체는 쓸모가 있다
+      html += `<p>${esc(res.llm_error || 'LLM 응답이 없습니다.')}</p>`;
+    }
+
+    // 실제로 LLM 에 넘긴 내용 — 답변이 데이터와 맞는지 대조용
+    if (res.prompt) {
+      html += `<details class="ai-toggle">
+        <summary>LLM 에 전달한 데이터 보기</summary>
+        <div class="ai-prompt">${esc(res.prompt)}</div>
+      </details>`;
+    }
+
+    html += `<div class="ai-note">
+      원본 웨이퍼 데이터는 전송되지 않습니다. 위 통계 요약만 분석에 사용됩니다.
+      답변에 위 데이터에 없는 내용이 있다면 신뢰하지 마세요.
+    </div>`;
+
+    out.innerHTML = html;
+  } finally {
+    btnAi.disabled = false; btnAi.textContent = '자동 진단';
+  }
+}
+
+/* 편중된 항목(전체 대비 몰려 있는 값)을 요인 분포에서 강조 */
+function markHotFactors(summary) {
+  if (!summary || !summary.factors) return;
+  const hot = new Map();
+  summary.factors.forEach(f => {
+    f.rows.forEach(r => { if (r.flag) hot.set(`${f.label}|${r.key}`, r.lift); });
+  });
+  if (!hot.size) {
+    document.getElementById('js-lift-note').textContent = '몰린 조건 없음';
+    return;
+  }
+  document.getElementById('js-lift-note').textContent = `편중 ${hot.size}건`;
+
+  document.querySelectorAll('#js-dist .fcol').forEach(col => {
+    const label = col.querySelector('.fcol-head').textContent;
+    col.querySelectorAll('.fitem').forEach(it => {
+      const k = it.querySelector('.k');
+      if (!k) return;
+      const lift = hot.get(`${label}|${k.textContent}`);
+      if (lift) {
+        it.classList.add('hot');
+        if (!it.querySelector('.lift-tag')) {
+          const tag = document.createElement('span');
+          tag.className = 'lift-tag';
+          tag.textContent = `×${lift}`;
+          k.appendChild(tag);
+        }
       }
     });
-  } else {
-    // 장비 정보가 없거나 '구간 강조' 모드
-    const prev  = pts.filter(p => !inSpan(p));
-    const today = pts.filter(inSpan);
-    if (prev.length) {
-      traces.push(mk(prev, {name: '기준 기간', color: 'rgba(120,130,145,.55)',
-                            size: 7}));
-    }
-    if (today.length) {
-      const c = r.status === '이상' ? '#dc2626'
-              : r.status === '주의' ? '#f59e0b' : '#16a34a';
-      const label = dFrom === dTo ? `점검 구간 (${dTo})`
-                                  : `점검 구간 (${dFrom} ~ ${dTo})`;
-      traces.push(mk(today, {name: label, color: c, size: 10,
-                             opacity: .9, lineW: 1.2}));
-    }
-  }
-
-  const b = r.base_stat || {};
-  const shapes = [], anns = [];
-  const line = (v, col, dash, label) => {
-    if (v === null || v === undefined) return;
-    shapes.push({type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1,
-                 y0: v, y1: v, line: {color: col, width: 1.4, dash: dash}});
-    anns.push({xref: 'paper', yref: 'y', x: 1, xanchor: 'right', y: v,
-               yanchor: 'bottom', text: `<b>${label} ${fmt(v)}</b>`,
-               showarrow: false, font: {family: MN_FONT, size: 10, color: col},
-               bgcolor: 'rgba(255,255,255,.85)', borderpad: 2});
-  };
-  line(b.max, '#ef4444', 'dash', '30일 max');
-  line(b.avg, '#22c55e', 'dot',  '30일 평균');
-  line(b.min, '#ef4444', 'dash', '30일 min');
-
-  // 점검 구간을 배경 띠로 한 번 더 표시 — 색이 장비별이라 구간이 묻히지 않게
-  if (colorMode === 'eqp' && hasEqp) {
-    const spanPts = pts.filter(inSpan).map(p => p.date).sort();
-    if (spanPts.length) {
-      shapes.push({type: 'rect', xref: 'x', yref: 'paper',
-                   x0: spanPts[0], x1: spanPts[spanPts.length - 1],
-                   y0: 0, y1: 1, fillcolor: 'rgba(220,38,38,.06)',
-                   line: {width: 0}, layer: 'below'});
-    }
-  }
-
-  Plotly.newPlot(div, traces, {
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-    font: {family: MN_FONT, color: '#555', size: 11},
-    margin: {l: 58, r: 18, t: 10, b: 42},
-    xaxis: {tickfont: {family: MN_FONT, size: 10},
-            gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
-    yaxis: {title: {text: r.param, font: {family: MN_FONT, size: 11}},
-            tickfont: {family: MN_FONT, size: 10},
-            gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
-    shapes: shapes, annotations: anns,
-    showlegend: true,
-    legend: {orientation: 'h', x: 0, y: 1.14, font: {family: MN_FONT, size: 10},
-             itemsizing: 'constant'},
-    hovermode: 'closest',
-    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
-                 font: {family: MN_FONT, size: 11}},
-  }, {responsive: true, displaylogo: false, displayModeBar: false});
+  });
 }
 
-loadSaved();
+/* 아주 단순한 마크다운 변환 (## 제목, **강조**, 줄바꿈) */
+function mdToHtml(md) {
+  return esc(md)
+    .split('\n')
+    .map(line => {
+      const t = line.trim();
+      if (!t) return '';
+      if (t.startsWith('## ')) return `<h3>${t.slice(3)}</h3>`;
+      if (t.startsWith('# '))  return `<h3>${t.slice(2)}</h3>`;
+      return `<p>${t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}</p>`;
+    })
+    .join('');
+}
+
+/* ══════════════════════════════════════════════════
+   대화형 분석
+   질문에 나온 파라미터의 통계는 서버가 계산해서 넘긴다.
+   LLM 은 그 수치를 읽고 설명만 하므로 값을 지어내지 않는다.
+   ══════════════════════════════════════════════════ */
+let chatHistory = [];
+
+const elChat  = document.getElementById('js-chat');
+const elQ     = document.getElementById('js-q');
+const btnSend = document.getElementById('btn-send');
+
+// 입력창 높이 자동 조절 + Enter 전송 (Shift+Enter 는 줄바꿈)
+elQ.addEventListener('input', () => {
+  elQ.style.height = 'auto';
+  elQ.style.height = Math.min(elQ.scrollHeight, 120) + 'px';
+});
+elQ.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+function enableChat() {
+  elQ.disabled = false;
+  btnSend.disabled = false;
+  renderHints();
+}
+
+function renderHints() {
+  const p = ssParam.value || '';
+  const hints = [
+    p ? `${p} 분포가 어때?` : '이 구간 특징이 뭐야?',
+    '장비별로 차이가 있어?',
+    '전체랑 뭐가 달라?',
+  ];
+  document.getElementById('js-hints').innerHTML = hints.map(h =>
+    `<button class="hint-btn" onclick="askHint(this)">${esc(h)}</button>`
+  ).join('');
+}
+
+function askHint(btn) {
+  elQ.value = btn.textContent;
+  sendChat();
+}
+
+function addMsg(cls, html) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.innerHTML = html;
+  elChat.appendChild(d);
+  elChat.scrollTop = elChat.scrollHeight;
+  return d;
+}
+
+async function sendChat() {
+  const q = elQ.value.trim();
+  if (!q || !selectedIds) return;
+
+  addMsg('me', esc(q));
+  elQ.value = ''; elQ.style.height = 'auto';
+  elQ.disabled = true; btnSend.disabled = true;
+
+  const wait = addMsg('ai', '<span class="typing"><i></i><i></i><i></i></span>');
+
+  try {
+    const res = await postJSON(API_CHAT, {
+      oper_id: ssOper.value, lot_cd: ssLot.value,
+      param: ssParam.value, ids: selectedIds,
+      question: q, history: chatHistory,
+    });
+
+    if (res.error || res.llm_error) {
+      wait.className = 'msg err';
+      wait.textContent = res.error || res.llm_error;
+      return;
+    }
+
+    // 어떤 파라미터를 계산했는지 함께 표시 (답변 검증용)
+    const chips = (res.params || []).length
+      ? `<div class="msg-params">${res.params.map(p =>
+          `<span class="msg-chip">${esc(p)}</span>`).join('')}</div>`
+      : '';
+    wait.innerHTML = chips + mdToHtml(res.answer || '');
+
+    chatHistory.push({role: 'user',      content: q});
+    chatHistory.push({role: 'assistant', content: res.answer || ''});
+  } finally {
+    elQ.disabled = false; btnSend.disabled = false; elQ.focus();
+  }
+}
+
+function resetChat() {
+  chatHistory = [];
+  elChat.innerHTML = '';
+  elQ.disabled = true;
+  btnSend.disabled = true;
+  document.getElementById('js-hints').innerHTML = '';
+}
+
+/* ══════════════════════════════════════════════════
+   선택 해제
+   해제 경로가 여러 개(빈 영역 클릭 / 더블클릭 / 버튼 / 재조회)이므로
+   Plotly.restyle 이 다시 해제 이벤트를 부르는 되먹임을 막는다.
+   ══════════════════════════════════════════════════ */
+let clearing = false;
+function clearSelection() {
+  if (clearing) return;
+  clearing = true;
+  try {
+    selectedIds = null;
+    ['js-trend', 'js-corr'].forEach(id => {
+      const div = document.getElementById(id);
+      if (div && div.data) Plotly.restyle(div, {selectedpoints: [null]});
+    });
+    document.getElementById('js-dist').innerHTML = '';
+    document.getElementById('js-ai-out').innerHTML = '';
+    document.getElementById('js-stats-count').textContent = '';
+    document.getElementById('js-lift-note').textContent = '';
+    btnAi.disabled = true;
+    resetChat();
+    setStep(3, 'locked');
+    if (trendData.length) setStep(2, 'active');
+  } finally {
+    clearing = false;
+  }
+}
 </script>
 {% endblock %}
