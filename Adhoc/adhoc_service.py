@@ -433,35 +433,65 @@ def run_job(job_id, lake=None, claimed=False):
         }
         d1, d2 = c['date_from'], c['date_to']
 
-        _set_status(job_id, '실행중', message='SRC(측정값) 조회 중')
-        df_src = svc.fetch_src(lake, cond, date_from=d1, date_to=d2)
+        # ── 진행 상황을 화면에 그대로 흘려보낸다 ──────────
+        #   "SRC 조회 중" 만 뜨면 얼마나 남았는지 알 수 없어
+        #   멈춘 것처럼 느껴진다. 청크 진행률과 누적 행수를 보여준다.
+        t0 = datetime.now()
+        stage = {'name': ''}
 
-        _set_status(job_id, '실행중',
-                    message=f'SRC {len(df_src):,}행 · APC 조회 중')
-        df_apc = svc.fetch_apc(lake, cond, date_from=d1, date_to=d2)
+        def prog(done, total, label):
+            el = (datetime.now() - t0).seconds
+            _set_status(job_id, '실행중',
+                        message=f'{stage["name"]} {done}/{total} · {label} '
+                                f'({el // 60}분 {el % 60}초 경과)')
 
-        _set_status(job_id, '실행중',
-                    message=f'APC {len(df_apc):,}행 · MES(LC) 조회 중')
-        df_mes = svc.fetch_mes(lake, cond, df_src, date_from=d1, date_to=d2)
+        def mark(name):
+            stage['name'] = name
+            _set_status(job_id, '실행중', message=f'{name} 시작')
+            return datetime.now()
 
-        _set_status(job_id, '실행중', message='정리·머지 중')
+        took = {}
+
+        t = mark('SRC(측정값) 조회')
+        df_src = svc.fetch_src(lake, cond, date_from=d1, date_to=d2,
+                               on_progress=prog)
+        took['SRC'] = (datetime.now() - t).seconds
+
+        t = mark('APC 조회')
+        df_apc = svc.fetch_apc(lake, cond, date_from=d1, date_to=d2,
+                               on_progress=prog)
+        took['APC'] = (datetime.now() - t).seconds
+
+        t = mark('MES(LC) 조회')
+        df_mes = svc.fetch_mes(lake, cond, df_src, date_from=d1, date_to=d2,
+                               on_progress=prog)
+        took['MES'] = (datetime.now() - t).seconds
+
+        t = mark('정리·머지')
         w = svc.pivot_src(df_src)
         a = svc.prepare_apc(df_apc)
         m = svc.merge_sources(w, a, df_mes)
         df = svc.finalize_df(m, cond, df_src)
+        took['머지'] = (datetime.now() - t).seconds
+
+        # 어느 단계가 오래 걸렸는지 남긴다 — 다음 조회 계획에 쓴다
+        detail = ' · '.join(f'{k} {v}초' for k, v in took.items())
+        print(f'[adhoc] 요청 {job_id} 단계별 소요 — {detail}')
 
         if df is None or df.empty:
             _set_status(job_id, '완료', rows=0, finished=True,
-                        message='조회 결과가 없습니다 — 기간·공정·LOT_CD·'
-                                '파라미터 이름을 확인하세요')
+                        message=f'조회 결과 없음 ({detail}) — 기간·공정·LOT_CD·'
+                                f'파라미터 이름을 확인하세요')
             return {'ok': True, 'rows': 0}
 
         # ★ 결과는 1회성 테이블에. 정기 적재 테이블은 건드리지 않는다.
         _set_status(job_id, '실행중', message=f'{len(df):,}행 저장 중')
         svc.save_analysis_df(df, adhoc_oper_id(job_id))
 
+        total_sec = (datetime.now() - t0).seconds
         _set_status(job_id, '완료', rows=len(df), finished=True,
-                    message=f'{len(df):,}행 조회 완료')
+                    message=f'{len(df):,}행 · {total_sec // 60}분 {total_sec % 60}초 '
+                            f'({detail})')
         return {'ok': True, 'rows': len(df)}
 
     except Exception as e:
