@@ -278,12 +278,15 @@ def get_oper_cond(df_info, oper_id):
 #    idle / layer_change 플래그 + APC 파라미터
 #    ※ c.eqp_id 필수 (a 에는 없음)
 # ══════════════════════════════════════════════════════════
-def fetch_apc(lake, cond, days=30, date_from=None, date_to=None):
+def fetch_apc(lake, cond, days=30, date_from=None, date_to=None,
+              on_progress=None):
     fab = cond['fab']
     dfs = []
 
-    for dt_s, dt_e, mt_s, mt_e in _date_chunks(days, date_from=date_from,
-                                                date_to=date_to):
+    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    total, done = max(1, len(chunks)), 0
+
+    for dt_s, dt_e, mt_s, mt_e in chunks:
         query = f"""
 select distinct *
 from (
@@ -316,6 +319,13 @@ where d.r2r_rank = 1
         if df is not None and not df.empty:
             dfs.append(df)
 
+        done += 1
+        n = sum(len(d) for d in dfs)
+        if on_progress:
+            on_progress(done, total, f'APC {dt_s[:8]} · {n:,}행')
+        if VERBOSE:
+            print(f'  [APC] {done}/{total} {dt_s}~{dt_e} 누적 {n:,}행')
+
     if not dfs:
         return pd.DataFrame()
     return pd.concat(dfs, ignore_index=True).drop_duplicates()
@@ -326,7 +336,8 @@ where d.r2r_rank = 1
 #    측정값(long) + 사전공정 장비/챔버
 #    ※ lot 조건은 right(lot_cd, 3) — 3자리 (5E2). 2자리로 하면 0행!
 # ══════════════════════════════════════════════════════════
-def fetch_src(lake, cond, days=30, date_from=None, date_to=None):
+def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
+              on_progress=None):
     fab      = cond['fab']
     oper_id  = cond['oper_id']
     pre_oper = str(cond.get('pre_oper_id') or '')
@@ -337,10 +348,21 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None):
     recipe_cond = _recipe_like_cond(recipe_list, 'c.eqp_recipe_id')
     pre_oper_r1 = pre_oper[:-1] if pre_oper else ''
 
+    # ★ 사전공정이 없으면 wafer-history 조인을 통째로 건너뛴다.
+    #   이 조인은 m10/m11/m14/m15 4개 테이블을 UNION 하는 가장 무거운 부분인데,
+    #   pre_oper 가 비면 operation_id like '%' 가 되어 전체를 훑는다.
+    #   붙일 정보(pre_eqp_id/pre_eqp_ch)도 없으므로 돌릴 이유가 없다.
+    use_pre = bool(pre_oper)
+    if not use_pre and VERBOSE:
+        print('  [SRC] 사전공정 미지정 — wafer-history 조인 생략 (조회가 빨라집니다)')
+
+    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    total  = max(1, len(cond['lot_cd_list']) * len(chunks))
+    done   = 0
+
     dfs = []
     for lot_code in cond['lot_cd_list']:
-        for dt_s, dt_e, mt_s, mt_e in _date_chunks(days, date_from=date_from,
-                                                    date_to=date_to):
+        for dt_s, dt_e, mt_s, mt_e in chunks:
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
 
@@ -349,46 +371,38 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None):
             #   절대 일치하지 않아 DCP 조인이 통째로 실패하고,
             #   recipe 필터가 걸린 공정만 조용히 0행이 된다.
             lot_len = len(str(lot_code))
+            # ── 사전공정 조인(b) — 필요할 때만 만든다 ──────
+            #   m10/m11/m14/m15 UNION 이 이 쿼리에서 가장 무겁다.
+            if use_pre:
+                pre_cols = """b.eqp_id as pre_eqp_id, b.module_id as pre_eqp_ch,
+           b.last_update_dtts as pre_oper_time,"""
+                units = ('m10', 'm11', 'm14', 'm15')
+                pre_join = "    left join (\n" + "\n        union\n".join(
+                    f"""        select lot_id, slot_id, wf_id, eqp_id, module_id,
+               MAX(last_update_dtts) as last_update_dtts
+        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_{u}
+        where dt between '{dt_s}' and '{dt_e}'
+          and operation_id like '{pre_oper_r1}%'
+          and resource_type = 'INDEPENDENT'
+        group by lot_id, slot_id, wf_id, eqp_id, module_id"""
+                    for u in units) + "\n    ) b on a.lot_id = b.lot_id and a.wf_id = b.wf_id\n"
+            else:
+                # 조인을 안 하므로 컬럼은 NULL 로 채운다 (뒤 단계 구조 유지)
+                pre_cols = """CAST(NULL as VARCHAR) as pre_eqp_id,
+           CAST(NULL as VARCHAR) as pre_eqp_ch,
+           CAST(NULL as TIMESTAMP) as pre_oper_time,"""
+                pre_join = ""
+
             query = f"""
 WITH src AS (
     select a.lot_id, a.wf_id,
            concat(CAST(a.alias_lot_id as VARCHAR), '.', CAST(a.wf_id as VARCHAR)) as substrate_id,
            a.main_eqp_id, a.param_nm, a.oper_id, a.oper_det_desc,
            a.meas_val as thk_value, a.end_tm,
-           b.eqp_id as pre_eqp_id, b.module_id as pre_eqp_ch,
-           b.last_update_dtts as pre_oper_time,
+           {pre_cols}
            RANK() over(partition by a.lot_id, a.wf_id, a.param_nm order by a.end_tm DESC) r2r_rank
     from lake_catalog.tas.tas_src_wf_metr_inf a
-    left join (
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m10
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-        union
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m11
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-        union
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m14
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-        union
-        select lot_id, slot_id, wf_id, eqp_id, module_id, MAX(last_update_dtts) as last_update_dtts
-        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_m15
-        where dt between '{dt_s}' and '{dt_e}'
-          and operation_id like '{pre_oper_r1}%'
-          and resource_type = 'INDEPENDENT'
-        group by lot_id, slot_id, wf_id, eqp_id, module_id
-    ) b on a.lot_id = b.lot_id and a.wf_id = b.wf_id
-    left join (
+{pre_join}    left join (
         select distinct d.lot_id, d.eqp_recipe_id, d.recipe_rank
         from (
             select lot_id, crt_tm, eqp_recipe_id,
@@ -411,7 +425,10 @@ WITH src AS (
       and a.param_nm in {param_in}
 """
             # 일부 사전공정만 module_id 제한 (하드코딩 · 필요시 추가)
-            if pre_oper in ('V5071000B', 'X106100B', 'T5515000C'):
+            #   조인을 생략했으면 b 가 없으므로 조건도 붙이지 않는다
+            if not use_pre:
+                query += "\n)"
+            elif pre_oper in ('V5071000B', 'X106100B', 'T5515000C'):
                 query += "      and ( b.module_id = '2' or b.module_id = '3' )\n)"
             elif pre_oper in ('T5515000M', 'T5515000A'):
                 query += "      and ( b.module_id = '2' or b.module_id = '3' or b.module_id = '5' )\n)"
@@ -432,6 +449,14 @@ where rn = 1
             df = run_query(lake, query)
             if df is not None and not df.empty:
                 dfs.append(df)
+
+            done += 1
+            n = sum(len(d) for d in dfs)
+            if on_progress:
+                on_progress(done, total, f'SRC {lot_code} {dt_s[:8]} · {n:,}행')
+            if VERBOSE:
+                print(f'  [SRC] {done}/{total} {lot_code} {dt_s}~{dt_e} '
+                      f'누적 {n:,}행')
 
     if not dfs:
         return pd.DataFrame()
@@ -503,7 +528,8 @@ def _lc_by_chamber(lc_df, eqp_id, ch, rule, recipe_infos):
     return d
 
 
-def fetch_mes(lake, cond, df_src, days=30, date_from=None, date_to=None):
+def fetch_mes(lake, cond, df_src, days=30, date_from=None, date_to=None,
+              on_progress=None):
     """
     MES(LC) 조회.
       df_src : SRC 결과 — 여기서 main_eqp_id 로 장비 목록을 뽑는다
@@ -532,8 +558,10 @@ def fetch_mes(lake, cond, df_src, days=30, date_from=None, date_to=None):
     eqp_in = "'" + "','".join(map(str, eqp_ids)) + "'"
 
     dfs = []
-    for dt_s, dt_e, _, _ in _date_chunks(days, date_from=date_from,
-                                         date_to=date_to):
+    _mes_chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    _mes_total, _mes_done = max(1, len(_mes_chunks)), 0
+
+    for dt_s, dt_e, _, _ in _mes_chunks:
         query = f"""
 select eqp_id, event_tm, last_recipe_id as recipe_id,
        resv_field_val_3 as lot_id
@@ -545,6 +573,10 @@ where dt between '{dt_s}' and '{dt_e}'
         d = run_query(lake, query)
         if d is not None and not d.empty:
             dfs.append(d)
+
+        _mes_done += 1
+        if on_progress:
+            on_progress(_mes_done, _mes_total, f'MES {dt_s[:8]}')
 
     if not dfs:
         return pd.DataFrame()
