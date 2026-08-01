@@ -9,13 +9,18 @@ equipment/views_adhoc.py
   api/adhoc/delete/         요청·결과 삭제
   api/adhoc/prefill/        기준정보에서 조회 조건 초안 채우기
   api/adhoc/opers/          기준정보에 등록된 공정 목록
+  api/adhoc/run/            요청 실행 (웹에서 백그라운드로)
+  api/adhoc/reset/          멈춘 '실행중' 요청을 대기로 되돌리기
   api/issue/context/        구간 지정 후보 (파라미터·LOT_ID·기간)
-  api/issue/analyze/        이슈 구간 분석 (판정·변곡점·랏별)
+  api/issue/analyze/        이슈 구간 분석 — 파라미터 1건 상세
+  api/issue/scan/           이슈 구간 전 파라미터 스캔 (어디에 변곡이 있었나)
 
   ※ 이슈 분석은 적재된 테이블이면 무엇이든 대상이 된다 —
     1회성 결과(ADHOC_*)도, 정기 적재분도 같은 API 를 쓴다.
 
-  ※ 실행은 배치 서버의 run_adhoc.py 가 한다 — 웹은 Lake 를 못 읽는다.
+  ※ 실행은 웹에서 백그라운드 스레드로 돈다 (Lake 가 웹에도 설치됨).
+    대량 조회나 실패 건 일괄 재실행은 배치 러너(run_adhoc.py)도 쓸 수 있다.
+    양쪽 다 claim_job 으로 선점하므로 중복 실행되지 않는다.
 ════════════════════════════════════════════════════════════
 """
 
@@ -106,6 +111,42 @@ def adhoc_submit(request):
 
 
 @csrf_exempt
+def adhoc_run(request):
+    """
+    요청을 웹에서 바로 실행한다.
+
+    ★ 요청 안에서 조회를 끝내지 않는다 — 1년치는 몇 분 걸려
+      게이트웨이 타임아웃에 걸린다. 백그라운드 스레드로 띄우고
+      즉시 응답한 뒤, 화면이 목록을 폴링해 진행 상황을 보여준다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    job_id = _body(request).get('job_id')
+    try:
+        res = ah.run_job_async(int(job_id))
+        if not res.get('ok'):
+            return _fail(res.get('error', '실행 실패'))
+        return JsonResponse({'ok': True, 'job_id': res['job_id']})
+    except Exception as e:
+        return _fail(f'실행 실패: {e}', exc=e)
+
+
+@csrf_exempt
+def adhoc_reset(request):
+    """
+    멈춘 '실행중' 요청을 대기로 되돌린다.
+    워커가 재시작되면 스레드가 사라지는데 상태만 '실행중' 으로 남는다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        ids = ah.reset_stale()
+        return JsonResponse({'ok': True, 'reset': ids})
+    except Exception as e:
+        return _fail(f'되돌리기 실패: {e}', {'reset': []}, exc=e)
+
+
+@csrf_exempt
 def adhoc_list(request):
     try:
         return JsonResponse({'ok': True, 'jobs': ah.list_jobs()})
@@ -143,6 +184,30 @@ def issue_context(request):
         return JsonResponse(res)
     except Exception as e:
         return _fail(f'조회 실패: {e}', {'params': [], 'lot_ids': []}, exc=e)
+
+
+@csrf_exempt
+def issue_scan(request):
+    """
+    지정한 이슈 구간에 대해 등록된 전 파라미터를 스캔한다.
+
+    "이 구간에서 무엇이 변했나" 에 답하는 것이 목적 —
+    파라미터를 하나씩 고를 필요 없이 변곡이 있었던 항목을 찾아 준다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    b = _body(request)
+    oper_id = b.get('oper_id')
+    if not _safe(oper_id):
+        return _fail('oper_id 형식 오류', {'items': []})
+    try:
+        res = iss.scan_all(oper_id, b.get('lot_cd') or None,
+                           b.get('sel') or {}, unit=b.get('unit') or 'lot')
+        return JsonResponse({'ok': True, **res})
+    except ValueError as e:
+        return _fail(str(e), {'items': []})
+    except Exception as e:
+        return _fail(f'스캔 실패: {e}', {'items': []}, exc=e)
 
 
 @csrf_exempt
