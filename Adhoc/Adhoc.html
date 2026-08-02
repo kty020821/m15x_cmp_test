@@ -232,9 +232,12 @@ table.sc tbody tr.on { background: var(--bg-2); }
       <span class="msg" id="form-msg"></span>
     </div>
     <div class="note">
-      조회는 백그라운드로 실행됩니다 — 기간이 길면 몇 분 걸리며,
-      진행 상황은 아래 목록에 표시됩니다. 창을 닫아도 계속 진행됩니다.
-      결과는 {{ keep_days }}일 보관 후 자동 삭제됩니다.
+      조회는 백그라운드로 실행됩니다 — 진행 상황은 아래 목록에 표시되며,
+      창을 닫아도 계속 진행됩니다. 결과는 {{ keep_days }}일 보관 후 삭제됩니다.
+      <br><b>조회가 오래 걸린다면</b> —
+      사전공정을 비우면 가장 무거운 조인을 건너뛰어 크게 빨라집니다(입고 장비·챔버
+      정보는 안 붙습니다). 기간은 30일 단위로 쪼개 조회되므로 1년치는 그만큼 걸립니다.
+      파라미터 수는 속도에 큰 영향이 없습니다.
     </div>
   </div>
 
@@ -444,6 +447,7 @@ async function loadJobs() {
   const j = await postJSON(API_LIST, {});
   const jobs = j.jobs || [];
   document.getElementById('job-cnt').textContent = `${jobs.length}건`;
+  lastRunning = jobs.some(x => x.status === '실행중');
   document.getElementById('jempty').style.display = jobs.length ? 'none' : 'block';
 
   document.getElementById('jbody').innerHTML = jobs.map(job => {
@@ -873,10 +877,15 @@ function drawIssuePlot(r) {
   }, {responsive:true, displaylogo:false, displayModeBar:false});
 }
 
-/* 실행 중인 요청이 있으면 주기적으로 상태를 갱신한다 */
-setInterval(() => {
-  if (document.getElementById('auto-refresh').checked) loadJobs();
-}, 10000);
+/* 실행 중인 요청이 있으면 자주, 없으면 뜸하게 갱신한다.
+   진행 메시지가 청크 단위로 바뀌므로 실행 중에는 짧은 주기가 낫다. */
+let lastRunning = false;
+function tick() {
+  const on = document.getElementById('auto-refresh').checked;
+  if (on) loadJobs();
+  setTimeout(tick, lastRunning ? 3000 : 15000);
+}
+setTimeout(tick, 3000);
 
 loadOpers();
 loadJobs();
