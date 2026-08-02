@@ -170,6 +170,16 @@ table.sc tbody tr.on { background: var(--bg-2); }
   border-radius: var(--r-md); margin-top: 4px; }
 .cp-mark { color: #7c3aed; font-weight: 800; }
 .spark { vertical-align: middle; }
+
+/* 스캔 진행 바 — 파라미터를 나눠 요청하므로 실제 진행률이 나온다 */
+.iz-prog { display: none; align-items: center; gap: 10px; margin-top: 12px; }
+.iz-prog.on { display: flex; }
+.iz-prog .bar { flex: 1; height: 6px; background: var(--bg-2);
+  border-radius: 20px; overflow: hidden; min-width: 160px; }
+.iz-prog .bar i { display: block; height: 100%; width: 0;
+  background: var(--accent); transition: width .2s; }
+.iz-prog .txt { font-size: 11px; font-weight: 700; color: var(--tx-2);
+  font-family: var(--ah-mono); white-space: nowrap; }
 </style>
 {% endblock %}
 
@@ -320,8 +330,14 @@ table.sc tbody tr.on { background: var(--bg-2); }
     </div>
 
     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button class="btn pri" onclick="runScan()">전체 파라미터 스캔</button>
+      <button class="btn pri" id="btn-scan" onclick="runScan()">전체 파라미터 스캔</button>
+      <button class="btn" id="btn-scan-stop" style="display:none;"
+              onclick="stopScan()">중단</button>
       <span class="msg" id="iz-msg"></span>
+    </div>
+    <div class="iz-prog" id="iz-prog">
+      <div class="bar"><i id="iz-prog-bar"></i></div>
+      <span class="txt" id="iz-prog-txt"></span>
     </div>
 
     <div class="iz-res" id="iz-scan"></div>
@@ -607,26 +623,79 @@ function currentSel() {
 }
 
 /* ── 전 파라미터 스캔 ─────────────────────────
-   지정한 구간에서 무엇이 변했는지 한 번에 찾는다.
-   파라미터를 하나씩 고를 필요가 없다. */
-async function runScan() {
-  if (!izOper) return;
-  izSel = currentSel();
-  izMsg('스캔 중... (파라미터가 많으면 잠시 걸립니다)');
-  document.getElementById('iz-res').innerHTML = '';
+   파라미터를 묶음으로 나눠 여러 번 요청한다.
+   ★ 한 번에 100개를 처리하면 몇십 초 동안 아무 표시도 못 해
+     멈춘 것처럼 보인다. 나눠 부르면 진행률이 나오고
+     결과도 나오는 대로 쌓여 먼저 훑어볼 수 있다.
+   ★ 큰 요청 하나보다 게이트웨이 타임아웃에도 안전하다. */
+const SCAN_BATCH = 15;
+let scanStop = false;
 
-  const j = await postJSON(API_IZSCAN, {
-    oper_id: izOper, lot_cd: document.getElementById('iz-lotcd').value || null,
-    sel: izSel, unit: document.getElementById('iz-unit').value,
-  });
-  if (!j.ok) { izMsg(j.error || '스캔 실패', true); return; }
-  izMsg('');
-  izScan = j;
-  renderScan(j);
+function stopScan() { scanStop = true; izMsg('중단하는 중...'); }
+
+function setScanProg(done, total) {
+  const box = document.getElementById('iz-prog');
+  if (done >= total) { box.classList.remove('on'); return; }
+  box.classList.add('on');
+  document.getElementById('iz-prog-bar').style.width =
+    (done / total * 100).toFixed(1) + '%';
+  document.getElementById('iz-prog-txt').textContent =
+    `${done} / ${total} 파라미터`;
 }
 
-function renderScan(j) {
+async function runScan() {
+  if (!izOper) return;
+  if (!izParams.length) { izMsg('스캔할 파라미터가 없습니다', true); return; }
+
+  izSel = currentSel();
+  scanStop = false;
+  document.getElementById('btn-scan').disabled = true;
+  document.getElementById('btn-scan-stop').style.display = '';
+  document.getElementById('iz-res').innerHTML = '';
+
+  const lotCd = document.getElementById('iz-lotcd').value || null;
+  const unit  = document.getElementById('iz-unit').value;
+  const total = izParams.length;
+
+  izScan = {items: [], sel_desc: '', n_param: 0,
+            n_bad: 0, n_warn: 0, n_cp: 0};
+  setScanProg(0, total);
+
+  try {
+    for (let i = 0; i < total; i += SCAN_BATCH) {
+      if (scanStop) { izMsg(`중단했습니다 (${izScan.items.length}개까지 완료)`); break; }
+      const batch = izParams.slice(i, i + SCAN_BATCH);
+      izMsg(`스캔 중... ${i} / ${total}`);
+
+      const j = await postJSON(API_IZSCAN, {
+        oper_id: izOper, lot_cd: lotCd, sel: izSel, unit: unit,
+        params: batch,
+      });
+      if (!j.ok) { izMsg(j.error || '스캔 실패', true); break; }
+
+      izScan.sel_desc = j.sel_desc || izScan.sel_desc;
+      izScan.items = izScan.items.concat(j.items || []);
+      // 심각한 것부터 위로 — 중간 결과도 바로 훑어볼 수 있게
+      izScan.items.sort((a, b) => b.severity - a.severity);
+      izScan.n_param = izScan.items.length;
+      izScan.n_bad  = izScan.items.filter(x => x.status === '이상').length;
+      izScan.n_warn = izScan.items.filter(x => x.status === '주의').length;
+      izScan.n_cp   = izScan.items.filter(x => x.cp_in_sel).length;
+
+      setScanProg(Math.min(i + SCAN_BATCH, total), total);
+      renderScan(izScan, total);
+    }
+    if (!scanStop) izMsg(`스캔 완료 — ${izScan.items.length}개 파라미터`);
+  } finally {
+    document.getElementById('btn-scan').disabled = false;
+    document.getElementById('btn-scan-stop').style.display = 'none';
+    setScanProg(total, total);
+  }
+}
+
+function renderScan(j, total) {
   const items = j.items || [];
+  const partial = total && j.n_param < total;
   const rows = items.map((it, i) => {
     const cls = it.status === '이상' ? 'b-fail'
               : it.status === '주의' ? 'b-run'
@@ -653,10 +722,11 @@ function renderScan(j) {
   document.getElementById('iz-scan').innerHTML = `
     <div class="verdict ${j.n_bad ? 'bad' : (j.n_warn ? 'warn' : 'good')}">
       <span class="t">${j.n_cp ? `변곡 ${j.n_cp}건` : '변곡 없음'}</span>
-      <span class="d">${esc(j.sel_desc)} · 파라미터 ${j.n_param}개 스캔</span>
+      <span class="d">${esc(j.sel_desc)} · 파라미터 ${j.n_param}개
+        ${partial ? `/ ${total} 스캔 중...` : '스캔 완료'}</span>
     </div>
     <div class="scan-sum">
-      <div class="scan-card all"><div class="n">${j.n_param}</div><div class="l">전체</div></div>
+      <div class="scan-card all"><div class="n">${j.n_param}${partial ? `<span style="font-size:12px;color:var(--tx-muted);">/${total}</span>` : ''}</div><div class="l">스캔</div></div>
       <div class="scan-card bad"><div class="n">${j.n_bad}</div><div class="l">이상</div></div>
       <div class="scan-card warn"><div class="n">${j.n_warn}</div><div class="l">주의</div></div>
       <div class="scan-card cp"><div class="n">${j.n_cp}</div><div class="l">구간 내 변곡</div></div>
