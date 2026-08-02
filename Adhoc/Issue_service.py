@@ -177,8 +177,15 @@ def _sel_clause(sel, have):
             raise ValueError('이슈 구간의 시작·종료 일시를 지정하세요')
         if d1 > d2:
             d1, d2 = d2, d1
-        return ('("DATE" >= %s AND "DATE" <= %s)', [d1, d2],
-                f'기간 {d1} ~ {d2}')
+        # ★ 날짜만 들어오면(YYYY-MM-DD) 그날 하루 전체로 넓힌다.
+        #   종료일에 시각을 안 붙이면 00:00:00 으로 해석되어
+        #   그날 데이터가 통째로 빠진다.
+        label = f'기간 {d1} ~ {d2}'
+        if len(d1) == 10:
+            d1 = d1 + ' 00:00:00'
+        if len(d2) == 10:
+            d2 = d2 + ' 23:59:59'
+        return ('("DATE" >= %s AND "DATE" <= %s)', [d1, d2], label)
 
     def _lots():
         lots = [str(v).strip() for v in (sel.get('lot_ids') or []) if str(v).strip()]
