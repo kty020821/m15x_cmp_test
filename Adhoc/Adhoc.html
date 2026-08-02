@@ -1240,6 +1240,137 @@ function detailRow(it) {
   </div></td></tr>`;
 }
 
+/* ══════════════════════════════════════════════════
+   차트 그리기
+
+   ★ Plotly 는 {% static %} 으로 불러온다. 로컬 runserver 는 static 을
+     자동 서빙하지만 배포 환경(DEBUG=False)에서는 collectstatic 과
+     웹서버 설정이 있어야 한다. 그게 빠지면 Plotly 가 로드되지 않아
+     차트만 안 그려지고 나머지는 멀쩡해 보여 원인을 찾기 어렵다.
+     그래서 없으면 SVG 로 직접 그리고, 이유도 화면에 알린다.
+   ══════════════════════════════════════════════════ */
+/* 점 색 — 이슈 구간과 그중 지정한 랏을 구분한다
+   구간 ∩ 랏 → 노랑 (가장 좁혀 지목한 대상)
+   구간만    → 빨강
+   랏만      → 노랑 옅게 (기간 밖의 지정 랏 — OR 로 합쳤을 때)
+   나머지    → 회색 */
+const C_RANGE = '#dc2626', C_LOTS = '#f59e0b', C_REST = 'rgba(120,130,145,.55)';
+
+function ptStyle(p) {
+  const r = p.in_range, l = p.in_lots;
+  if (l && r) return {c: C_LOTS,  size: 11, op: .95, name: '지정 랏'};
+  if (r)      return {c: C_RANGE, size: 9,  op: .85, name: '이슈 구간'};
+  if (l)      return {c: C_LOTS,  size: 9,  op: .6,  name: '지정 랏 (기간 밖)'};
+  if (p.in_sel) return {c: C_RANGE, size: 9, op: .85, name: '이슈 구간'};
+  return {c: C_REST, size: 7, op: .8, name: '나머지'};
+}
+
+/* 색이 같은 점끼리 묶는다 (Plotly 는 트레이스 단위로 색을 준다) */
+function groupByStyle(pts) {
+  const g = new Map();
+  pts.forEach(p => {
+    const st = ptStyle(p);
+    if (!g.has(st.name)) g.set(st.name, {st, pts: []});
+    g.get(st.name).pts.push(p);
+  });
+  // 나머지 → 구간 → 랏 순으로 그려 중요한 점이 위에 오게 한다
+  const order = ['나머지', '이슈 구간', '지정 랏 (기간 밖)', '지정 랏'];
+  return order.filter(k => g.has(k)).map(k => g.get(k));
+}
+
+function hasPlotly() {
+  return typeof Plotly !== 'undefined' && Plotly && Plotly.newPlot;
+}
+
+/* Plotly 없이 그리는 대체 차트 — 리포트와 같은 방식(SVG) */
+function drawSvgChart(div, r) {
+  const pts = (r.series || []).filter(p => p.v !== null && p.v !== undefined);
+  if (!pts.length) { div.innerHTML = ''; return; }
+
+  const W = 900, H = 300, L = 58, R = 18, T = 26, B = 38;
+  const b = r.base || {};
+  const vals = pts.map(p => p.v);
+  let lo = Math.min(...vals, b.min == null ? Infinity : b.min);
+  let hi = Math.max(...vals, b.max == null ? -Infinity : b.max);
+  if (!(hi > lo)) hi = lo + 1;
+  const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+
+  const iw = W - L - R, ih = H - T - B, n = pts.length;
+  const px = i => L + (n > 1 ? i * iw / (n - 1) : 0);
+  const py = v => T + ih - (v - lo) / (hi - lo) * ih;
+
+  const color = r.status === '이상' ? '#dc2626'
+              : r.status === '주의' ? '#f59e0b' : '#16a34a';
+  const out = [];
+
+  // 이슈 구간 배경 띠 (기간을 지정했으면 그 기간 기준)
+  const hasRange = pts.some(p => p.in_range);
+  const key = hasRange ? 'in_range' : 'in_sel';
+  let start = null;
+  pts.forEach((p, i) => {
+    if (p[key] && start === null) start = i;
+    else if (!p[key] && start !== null) {
+      out.push(`<rect x="${px(start)}" y="${T}" width="${Math.max(px(i-1)-px(start),2)}"
+        height="${ih}" fill="${C_RANGE}" opacity="0.06"/>`);
+      start = null;
+    }
+  });
+  if (start !== null) out.push(`<rect x="${px(start)}" y="${T}"
+    width="${Math.max(px(n-1)-px(start),2)}" height="${ih}" fill="${C_RANGE}" opacity="0.06"/>`);
+
+  // 기준선
+  [['max','나머지 max','#ef4444','4 3'],['avg','나머지 평균','#22c55e','2 3'],
+   ['min','나머지 min','#ef4444','4 3']].forEach(([k,lab,col,dash]) => {
+    const v = b[k]; if (v == null) return;
+    const y = py(v); if (y < T || y > T + ih) return;
+    out.push(`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="${col}"
+      stroke-width="1" stroke-dasharray="${dash}" opacity="0.8"/>`);
+    out.push(`<text x="${W-R-2}" y="${y-3}" text-anchor="end"
+      style="font-size:10px;fill:${col};">${esc(lab)} ${fmtn(v)}</text>`);
+  });
+
+  // 점 (연결선 없음 — 개별 관측이라 이으면 없는 추세가 보인다)
+  //   나머지 → 구간 → 랏 순으로 그려 중요한 점이 위에 오게 한다
+  const ord = pts.map((p, i) => i).sort((a, bI) => {
+    const rank = j => (pts[j].in_lots ? 2 : (pts[j].in_range || pts[j].in_sel ? 1 : 0));
+    return rank(a) - rank(bI);
+  });
+  ord.forEach(i => {
+    const p = pts[i], st = ptStyle(p);
+    const rr = st.name === '나머지' ? 2 : (st.name === '지정 랏' ? 3.4 : 3);
+    out.push(`<circle cx="${px(i)}" cy="${py(p.v)}" r="${rr}"
+      fill="${st.c === C_REST ? '#94a3b8' : st.c}" opacity="${st.op}"/>`);
+  });
+
+  // 변곡점
+  (r.change_points || []).forEach(c => {
+    const i = c.index; if (i == null || i < 0 || i >= n) return;
+    out.push(`<line x1="${px(i)}" y1="${T}" x2="${px(i)}" y2="${T+ih}"
+      stroke="#7c3aed" stroke-width="1.4" stroke-dasharray="3 2"/>`);
+    out.push(`<text x="${px(i)}" y="${T-4}" text-anchor="middle"
+      style="font-size:10px;fill:#7c3aed;font-weight:700;">
+      ${esc(c.direction)} ${c.shift_sigma > 0 ? '+' : ''}${c.shift_sigma}σ</text>`);
+  });
+
+  out.push(`<text x="${L}" y="${H-6}" style="font-size:10px;fill:#9ca3af;">
+    ${esc(pts[0].x)}</text>`);
+  out.push(`<text x="${W-R}" y="${H-6}" text-anchor="end"
+    style="font-size:10px;fill:#9ca3af;">${esc(pts[n-1].x)}</text>`);
+
+  div.innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;"
+       xmlns="http://www.w3.org/2000/svg">${out.join('')}</svg>` +
+    `<div class="note" style="color:var(--warn);">
+       Plotly 를 불러오지 못해 간단 차트로 표시합니다 —
+       배포 서버에서 static 파일(js/plotly-2.27.0.min.js)이 서빙되는지
+       확인하세요 (collectstatic · 웹서버 static 설정).</div>`;
+}
+
+function fmtn(v) {
+  if (v == null || isNaN(v)) return '-';
+  return Number(v).toFixed(2).replace(/\.?0+$/, '');
+}
+
 /* 지정 구간을 색으로 구분하고 변곡점을 세로선으로 표시한다 */
 function drawIssuePlot(r) {
   const div = document.getElementById('iz-plot');
@@ -1247,23 +1378,19 @@ function drawIssuePlot(r) {
   const pts = r.series || [];
   if (!pts.length) { div.innerHTML = ''; return; }
 
-  const mk = (arr, name, color, size) => ({
+  if (!hasPlotly()) { drawSvgChart(div, r); return; }
+
+  const mk = (arr, name, color, size, op) => ({
     x: arr.map(p => p.x), y: arr.map(p => p.v),
     text: arr.map(p => p.label ? `${p.label} (${p.n}장)` : ''),
     name, mode: 'markers', type: 'scattergl',
-    marker: {size, color, opacity: .8,
+    marker: {size, color, opacity: op,
              line: {width: .5, color: 'rgba(0,0,0,.25)'}},
     hovertemplate: '%{text}<br>%{x}<br><b>%{y:.2f}</b><extra></extra>',
   });
 
-  const outSel = pts.filter(p => !p.in_sel);
-  const inSel  = pts.filter(p => p.in_sel);
-  const c = r.status === '이상' ? '#dc2626'
-          : r.status === '주의' ? '#f59e0b' : '#16a34a';
-
-  const traces = [];
-  if (outSel.length) traces.push(mk(outSel, '나머지', 'rgba(120,130,145,.55)', 7));
-  if (inSel.length)  traces.push(mk(inSel, '지정 구간', c, 10));
+  const traces = groupByStyle(pts).map(g =>
+    mk(g.pts, g.st.name, g.st.c, g.st.size, g.st.op));
 
   const shapes = [], anns = [];
   const b = r.base || {};
