@@ -244,6 +244,9 @@ def build_report(oper_id, lot_cd, sel, unit='lot', params=None,
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
     head = title or f'{oper_id} 이슈 구간 분석'
+    lot_html = f'<span>LOT_CD <b>{_e(lot_cd)}</b></span>' if lot_cd else ''
+    unit_txt = '랏 평균' if unit == 'lot' else '웨이퍼'
+    scope_txt = '(이상·주의·변곡만)' if only_issue else '(전체)'
 
     # ── 요약 ─────────────────────────────────────────────
     cards = (
@@ -262,16 +265,30 @@ def build_report(oper_id, lot_cd, sel, unit='lot', params=None,
         m = {'이상': 'b-bad', '주의': 'b-warn', '정상': 'b-good'}
         return f'<span class="badge {m.get(st, "b-none")}">{_e(st)}</span>'
 
-    idx = ''.join(
-        f'<tr><td><a href="#p{n}">{_e(it["param"])}</a></td>'
-        f'<td><span class="tag">{_e(it.get("ptype"))}</span></td>'
-        f'<td>{badge(it["status"])}</td>'
-        f'<td class="mono">{"-" if it.get("sigma") is None else f"{it['sigma']:+g}σ"}</td>'
-        f'<td class="mono">{it.get("out_cnt", 0)}</td>'
-        f'<td class="mono">{(str(it["spread"]) + "배") if it.get("spread") else "-"}</td>'
-        f'<td class="mono">{len(it.get("cps") or [])}곳'
-        f'{" ●" if it.get("cp_in_sel") else ""}</td></tr>'
-        for n, it in enumerate(items))
+    # ★ f-string 표현식 안에서 바깥과 같은 따옴표를 다시 쓰거나 백슬래시를
+    #   넣는 건 Python 3.12 부터만 허용된다. 서버가 그 이전 버전이면
+    #   SyntaxError 가 나므로, 값은 미리 만들어 두고 f-string 은 단순하게 쓴다.
+    def _sig(v):
+        return '-' if v is None else f'{v:+g}σ'
+
+    idx_rows = []
+    for n, it in enumerate(items):
+        sig = _sig(it.get('sigma'))
+        spread = f"{it['spread']}배" if it.get('spread') else '-'
+        ncp = len(it.get('cps') or [])
+        cp_mark = ' ●' if it.get('cp_in_sel') else ''
+        idx_rows.append(
+            '<tr>'
+            f'<td><a href="#p{n}">{_e(it["param"])}</a></td>'
+            f'<td><span class="tag">{_e(it.get("ptype"))}</span></td>'
+            f'<td>{badge(it["status"])}</td>'
+            f'<td class="mono">{sig}</td>'
+            f'<td class="mono">{it.get("out_cnt", 0)}</td>'
+            f'<td class="mono">{spread}</td>'
+            f'<td class="mono">{ncp}곳{cp_mark}</td>'
+            '</tr>')
+    idx = ''.join(idx_rows)
+    idx_body = idx or '<tr><td colspan="7">항목 없음</td></tr>'
 
     # ── 파라미터별 상세 ──────────────────────────────────
     secs = []
@@ -281,12 +298,29 @@ def build_report(oper_id, lot_cd, sel, unit='lot', params=None,
         tags = ''.join(f'<span class="tag">{_e(c)}</span>'
                        for c in (it.get('checks') or []))
         cps = it.get('cps') or []
-        cp_html = ''.join(
-            f'<div>· {_e(c["at"])} <b>{_e(c["direction"])}</b> '
-            f'{_num(c["before_avg"], 2)} → {_num(c["after_avg"], 2)} '
-            f'({c["shift_sigma"]:+g}σ)'
-            f'{" <b style=\'color:#dc2626\'>구간 내</b>" if c.get("in_sel") else ""}</div>'
-            for c in cps)
+        cp_lines = []
+        for c in cps:
+            # 따옴표가 섞인 조각은 미리 만들어 둔다 (f-string 안에서 조립하지 않는다)
+            mark = ' <b style="color:#dc2626">구간 내</b>' if c.get('in_sel') else ''
+            sg = c.get('shift_sigma')
+            sg_txt = f'({sg:+g}σ)' if sg is not None else ''
+            cp_lines.append(
+                f'<div>· {_e(c["at"])} <b>{_e(c["direction"])}</b> '
+                f'{_num(c["before_avg"], 2)} → {_num(c["after_avg"], 2)} '
+                f'{sg_txt}{mark}</div>')
+        cp_html = ''.join(cp_lines)
+
+        # 조건부 조각은 미리 만들어 둔다 (f-string 안에서 조립하지 않는다)
+        sig_html = ''
+        if it.get('sigma') is not None:
+            sig_html = f"<span>차이 <b>{it['sigma']:+g}σ</b></span>"
+        spread_html = ''
+        if it.get('spread'):
+            spread_html = f"<span>산포비 <b>{it['spread']}배</b></span>"
+        cps_html = ''
+        if cp_html:
+            cps_html = f'<div class="cps">{cp_html}</div>'
+        reason_html = '<br>'.join('· ' + _e(x) for x in (it.get('reasons') or []))
 
         secs.append(f'''
 <div class="sec {cls}" id="p{n}">
@@ -297,18 +331,18 @@ def build_report(oper_id, lot_cd, sel, unit='lot', params=None,
     {tags}
     <a class="top" href="#idx">↑ 목록</a>
   </div>
-  <div class="rsn">{'<br>'.join('· ' + _e(x) for x in (it.get('reasons') or []))}</div>
+  <div class="rsn">{reason_html}</div>
   <div class="kv">
     <span>지정 구간 <b>{s.get('n', 0)}장</b> 평균 <b>{_num(s.get('avg'))}</b>
       σ <b>{_num(s.get('std'))}</b></span>
     <span>나머지 <b>{b.get('n', 0)}장</b> 평균 <b>{_num(b.get('avg'))}</b>
       σ <b>{_num(b.get('std'))}</b></span>
-    {'' if it.get('sigma') is None else f"<span>차이 <b>{it['sigma']:+g}σ</b></span>"}
-    {f"<span>산포비 <b>{it['spread']}배</b></span>" if it.get('spread') else ''}
+    {sig_html}
+    {spread_html}
     <span>범위밖 <b>{it.get('out_cnt', 0)}장</b></span>
   </div>
   {_chart(it)}
-  {f'<div class="cps">{cp_html}</div>' if cp_html else ''}
+  {cps_html}
 </div>''')
 
     body_secs = ''.join(secs) or \
@@ -324,11 +358,11 @@ def build_report(oper_id, lot_cd, sel, unit='lot', params=None,
 
 <div class="meta">
   <span>공정 <b>{_e(oper_id)}</b></span>
-  {f'<span>LOT_CD <b>{_e(lot_cd)}</b></span>' if lot_cd else ''}
+  {lot_html}
   <span>지정 구간 <b>{_e(res.get('sel_desc'))}</b></span>
-  <span>변곡 단위 <b>{'랏 평균' if unit == 'lot' else '웨이퍼'}</b></span>
+  <span>변곡 단위 <b>{unit_txt}</b></span>
   <span>수록 <b>{len(items)}개</b>
-    {'(이상·주의·변곡만)' if only_issue else '(전체)'}</span>
+    {scope_txt}</span>
 </div>
 
 <div class="cards">{cards}</div>
@@ -337,7 +371,7 @@ def build_report(oper_id, lot_cd, sel, unit='lot', params=None,
   <table class="idx">
     <thead><tr><th>파라미터</th><th>타입</th><th>판정</th><th>σ</th>
       <th>범위밖</th><th>산포</th><th>변곡점</th></tr></thead>
-    <tbody>{idx or '<tr><td colspan="7">항목 없음</td></tr>'}</tbody>
+    <tbody>{idx_body}</tbody>
   </table>
 </div>
 
