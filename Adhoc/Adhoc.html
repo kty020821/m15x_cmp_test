@@ -401,6 +401,14 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
       <button class="btn pri" id="btn-scan" onclick="runScan()">전체 파라미터 스캔</button>
       <button class="btn" id="btn-scan-stop" style="display:none;"
               onclick="stopScan()">중단</button>
+      <span style="width:1px;height:20px;background:var(--bd);"></span>
+      <button class="btn" id="btn-report" disabled
+              onclick="openReport(false)">리포트 보기</button>
+      <button class="btn" id="btn-report-dl" disabled
+              onclick="openReport(true)">리포트 저장</button>
+      <label class="msg" style="color:var(--tx-2);font-weight:700;">
+        <input type="checkbox" id="rep-all" style="vertical-align:middle;">
+        정상 항목까지 포함</label>
       <span class="msg" id="iz-msg"></span>
     </div>
     <div class="iz-prog" id="iz-prog">
@@ -426,6 +434,7 @@ const URL_ANALYSIS = "{% url 'analysis' %}";
 const API_IZCTX   = "{% url 'issue-context' %}";
 const API_IZRUN   = "{% url 'issue-analyze' %}";
 const API_IZSCAN  = "{% url 'issue-scan' %}";
+const URL_IZREPORT = "{% url 'issue-report' %}";
 const AH_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
 
 function esc(s) {
@@ -622,6 +631,9 @@ async function openIssue(operId, label) {
     `${label || operId} — 조회 결과 안에서 이슈 구간을 지정하세요`;
   document.getElementById('iz').classList.add('on');
   document.getElementById('iz-res').innerHTML = '';
+  document.getElementById('iz-scan').innerHTML = '';
+  izScan = null; izSel = null; izPick = null;
+  setReportEnabled(false);
   izMsg('');
   await loadIssueContext(true);
   document.getElementById('use-range').checked = true;
@@ -805,6 +817,7 @@ async function runScan() {
 
   izScan = {items: [], sel_desc: '', n_param: 0,
             n_bad: 0, n_warn: 0, n_cp: 0};
+  setReportEnabled(false);
   setScanProg(0, total);
 
   try {
@@ -838,6 +851,7 @@ async function runScan() {
 
       setScanProg(Math.min(i + SCAN_BATCH, total), total);
       renderScan(izScan, total);
+      setReportEnabled(izScan.items.length > 0);   // 중간에도 받아볼 수 있게
     }
     if (!scanStop) izMsg(`스캔 완료 — ${izScan.items.length}개 파라미터`);
   } finally {
@@ -870,6 +884,49 @@ function showScanError(err, batch) {
     </div>`}
     <div class="note">요청한 파라미터: ${esc((batch || []).slice(0, 5).join(', '))}
       ${(batch || []).length > 5 ? ` 외 ${batch.length - 5}개` : ''}</div>`;
+}
+
+/* ── 리포트 ───────────────────────────────────
+   파라미터별 차트를 한 파일 HTML 로 만든다.
+   ★ 새 탭으로 여는 이유 — 그 상태로 Ctrl+P 하면 PDF 로 저장된다.
+     서버에 PDF 라이브러리를 깔지 않아도 되고, 사내망에서도
+     외부 스크립트 없이 열린다(차트는 SVG 로 직접 그린다).
+   ★ 기본은 이상·주의·변곡 항목만 — 전체를 넣으면 차트가 파라미터 수만큼
+     생겨 파일이 커지고 인쇄도 길어진다. */
+function openReport(download) {
+  if (!izOper || !izSel) { izMsg('먼저 스캔을 실행하세요', true); return; }
+
+  const q = new URLSearchParams({
+    oper_id: izOper,
+    lot_cd: document.getElementById('iz-lotcd').value || '',
+    unit: document.getElementById('iz-unit').value,
+    sel: JSON.stringify(izSel),
+    only_issue: document.getElementById('rep-all').checked ? '0' : '1',
+    title: `${izOper} 이슈 구간 분석`,
+  });
+
+  // 필터가 걸려 있으면 화면에 보이는 것만 담는다 — 보던 것과 리포트가 어긋나지 않게
+  if (scanFilter && izScan) {
+    const ps = (izScan.items || []).filter(passFilter).map(x => x.param);
+    if (ps.length) q.set('params', ps.join(','));
+  }
+  if (download) q.set('download', '1');
+
+  const url = URL_IZREPORT + '?' + q.toString();
+  if (download) {
+    location.href = url;                 // 다운로드는 이동으로 (탭이 안 남게)
+    izMsg('리포트를 저장합니다');
+  } else {
+    window.open(url, '_blank');
+    izMsg('새 탭에서 리포트를 엽니다 — Ctrl+P 로 PDF 저장');
+  }
+}
+
+function setReportEnabled(on) {
+  ['btn-report', 'btn-report-dl'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !on;
+  });
 }
 
 /* ── 스캔 결과 표 ─────────────────────────────
