@@ -275,7 +275,8 @@ def _find_change_points(series, base_std, depth=0, offset=0, found=None):
 # ══════════════════════════════════════════════════════════
 # 본체
 # ══════════════════════════════════════════════════════════
-def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=200):
+def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
+             params=None):
     """
     등록된 전 파라미터를 한 번에 스캔한다.
 
@@ -291,6 +292,10 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=200):
 
     ★ PART(소모품)는 판정에서 뺀다 — 누적·리셋되는 값이라
       구간 비교가 의미 없다. 목록에는 참고로 남긴다.
+
+    ★ params 를 주면 그 파라미터만 처리한다.
+      화면이 전체를 몇 덩어리로 나눠 호출해 진행률을 보여주기 위한 것 —
+      한 번에 100개를 처리하면 몇십 초 동안 아무 표시도 못 한다.
     """
     from . import param_types as pt
 
@@ -302,7 +307,12 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=200):
             raise ValueError(f'{table} 이 없습니다')
         have = _cols(cur, table)
 
-        params = _numeric_params(cur, table)[:max_params]
+        all_params = _numeric_params(cur, table)[:max_params]
+        if params:
+            want = {str(p).upper().strip() for p in params}
+            params = [p for p in all_params if p in want]
+        else:
+            params = all_params
         if not params:
             raise ValueError('스캔할 파라미터가 없습니다')
 
@@ -346,7 +356,7 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=200):
 
     return {
         'oper_id': oper_id, 'lot_cd': lot_cd, 'sel_desc': sel_desc,
-        'unit': unit, 'n_param': len(items),
+        'unit': unit, 'n_param': len(items), 'n_total': len(all_params),
         'n_bad': n_bad, 'n_warn': n_warn, 'n_cp': n_cp,
         'items': items,
     }
