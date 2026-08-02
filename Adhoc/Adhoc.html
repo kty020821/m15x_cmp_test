@@ -666,6 +666,63 @@ async function loadIssueContext(initLotCd) {
   renderLotPick();
 }
 
+/* ── 랏 목록 ─────────────────────────────── */
+function renderLotPick() {
+  const q = (document.getElementById('iz-lotfilter').value || '').toUpperCase();
+  const list = izLots.filter(l => !q || String(l.lot_id).toUpperCase().includes(q));
+
+  const cntEl = document.getElementById('iz-lotcnt');
+  if (cntEl) cntEl.textContent =
+    izLotSel.size ? `${izLotSel.size}개 선택 / ${izLots.length}랏`
+                  : `전체 ${izLots.length}랏`;
+
+  document.getElementById('iz-lotpick').innerHTML = list.map(l => `
+    <div class="lot-row ${izLotSel.has(l.lot_id) ? 'sel' : ''}"
+         onclick="toggleLot('${esc(l.lot_id)}')">
+      <input type="checkbox" ${izLotSel.has(l.lot_id) ? 'checked' : ''}
+             onclick="event.stopPropagation();toggleLot('${esc(l.lot_id)}')">
+      ${esc(l.lot_id)} <span style="color:var(--tx-muted);">${l.n}장</span>
+      <span class="dt">${esc(l.date)}</span>
+    </div>`).join('') ||
+    '<div class="empty" style="padding:16px;">랏이 없습니다.</div>';
+}
+
+function toggleLot(id) {
+  if (izLotSel.has(id)) izLotSel.delete(id); else izLotSel.add(id);
+  renderLotPick();
+  if (izLotSel.size) {          // 랏을 고르면 '랏으로' 를 자동으로 켠다
+    document.getElementById('use-lots').checked = true;
+    syncSelUI();
+  }
+}
+
+function clearLotSel() { izLotSel = new Set(); renderLotPick(); }
+
+/* ── 스캔 진행 표시 · 중단 ────────────────
+   파라미터를 SCAN_BATCH 개씩 나눠 요청하므로 실제 진행률이 나온다. */
+const SCAN_BATCH = 15;
+let scanStop = false, scanAbort = null;
+
+/* ★ 플래그만 세우면 진행 중인 요청이 끝날 때까지 멈추지 않는다.
+   응답이 늦으면 '중단하는 중...' 에서 굳은 것처럼 보이므로
+   AbortController 로 요청 자체를 끊는다. */
+function stopScan() {
+  scanStop = true;
+  if (scanAbort) scanAbort.abort();
+  izMsg('중단했습니다');
+}
+
+function setScanProg(done, total) {
+  const box = document.getElementById('iz-prog');
+  if (!box) return;
+  if (done >= total) { box.classList.remove('on'); return; }
+  box.classList.add('on');
+  document.getElementById('iz-prog-bar').style.width =
+    (done / total * 100).toFixed(1) + '%';
+  document.getElementById('iz-prog-txt').textContent =
+    `${done} / ${total} 파라미터`;
+}
+
 /* 기간·랏 블록을 각각 켜고 끈다. 둘 다 켜면 결합 방식을 묻는다. */
 function syncSelUI() {
   const r = document.getElementById('use-range').checked;
