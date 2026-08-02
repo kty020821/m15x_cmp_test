@@ -117,15 +117,16 @@ def _chart(it):
                      f'text-anchor="end" class="ax" fill="{col}">'
                      f'{_e(lab)} {_num(v, 2)}</text>')
 
-    # 선 + 점 (지정 구간만 진하게)
-    d = ' '.join(f'{"M" if i == 0 else "L"}{px(i):.1f},{py(p["v"]):.1f}'
-                 for i, p in enumerate(ser))
-    parts.append(f'<path d="{d}" fill="none" stroke="#94a3b8" '
-                 f'stroke-width="1" opacity="0.55"/>')
+    # 점만 찍는다 (연결선 없음).
+    #   측정값은 연속 신호가 아니라 웨이퍼·랏 단위의 개별 관측이라
+    #   선으로 이으면 없는 추세가 있는 것처럼 보인다.
     for i, p in enumerate(ser):
         if p.get('in_sel'):
             parts.append(f'<circle cx="{px(i):.1f}" cy="{py(p["v"]):.1f}" '
-                         f'r="2.6" fill="{color}"/>')
+                         f'r="2.6" fill="{color}" opacity="0.9"/>')
+        else:
+            parts.append(f'<circle cx="{px(i):.1f}" cy="{py(p["v"]):.1f}" '
+                         f'r="1.9" fill="#94a3b8" opacity="0.55"/>')
 
     # 변곡점
     for c in (it.get('cps') or []):
