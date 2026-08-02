@@ -48,6 +48,7 @@ urlpatterns = [
     path('api/issue/context/', vh.issue_context, name='issue-context'),
     path('api/issue/analyze/', vh.issue_analyze, name='issue-analyze'),
     path('api/issue/scan/',    vh.issue_scan,    name='issue-scan'),
+    path('issue/report/',      vh.issue_report,  name='issue-report'),
 
     # Inline Monitoring (신규)
     path('monitor/',             vm.monitor_page,    name='monitor'),
