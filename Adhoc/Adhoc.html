@@ -107,6 +107,21 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
   background: var(--bg-3); }
 .mode-body { display: none; margin-top: 12px; }
 .mode-body.on { display: block; }
+
+/* 구간 지정 블록 — 기간·랏을 각각 켜고 끈다 */
+.sel-block { border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 11px 14px; margin-bottom: 10px; background: var(--bg-2); }
+.sel-head { display: flex; align-items: center; gap: 8px; font-size: 12px;
+  font-weight: 700; color: var(--tx-1); cursor: pointer; }
+.sel-head input[type=checkbox] { width: 14px; height: 14px; margin: 0;
+  accent-color: var(--accent); cursor: pointer; }
+.sel-body { margin-top: 10px; }
+.sel-block.off .sel-body { display: none; }
+.sel-block.off .sel-head { color: var(--tx-muted); }
+.rad { display: flex; align-items: center; gap: 7px; font-size: 12px;
+  font-weight: 700; color: var(--tx-1); cursor: pointer; padding: 3px 0; }
+.rad input { accent-color: var(--accent); cursor: pointer; }
+.rad .sub { font-weight: 600; color: var(--tx-muted); }
 .lot-pick { max-height: 240px; overflow-y: auto; border: 1px solid var(--bd);
   border-radius: var(--r-md); padding: 8px; background: var(--bg-2); }
 .lot-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px;
@@ -170,6 +185,14 @@ table.sc tbody tr.on { background: var(--bg-2); }
   border-radius: var(--r-md); margin-top: 4px; }
 .cp-mark { color: #7c3aed; font-weight: 800; }
 .spark { vertical-align: middle; }
+.caret { display: inline-block; width: 12px; color: var(--tx-muted);
+  font-size: 10px; }
+table.sc tbody tr.on .caret { color: var(--accent); }
+tr.sc-detail > td { background: var(--bg-2); padding: 0; }
+.sc-detail-in { padding: 14px 16px; }
+.scan-card { cursor: pointer; transition: border-color .15s, background .15s; }
+.scan-card:hover { border-color: var(--tx-muted); }
+.scan-card.on { border-color: var(--accent); background: var(--bg-2); }
 
 /* 스캔 진행 바 — 파라미터를 나눠 요청하므로 실제 진행률이 나온다 */
 .iz-prog { display: none; align-items: center; gap: 10px; margin-top: 12px; }
@@ -298,35 +321,79 @@ table.sc tbody tr.on { background: var(--bg-2); }
     <div style="margin-top:14px;">
       <div class="sec-h" style="margin-bottom:8px;">
         <span class="sub" style="font-weight:800;color:var(--tx-1);">이슈 구간 지정</span>
-        <span class="mode-tabs">
-          <span class="mode-tab on" data-m="range" onclick="setMode('range')">기간으로</span>
-          <span class="mode-tab" data-m="lots" onclick="setMode('lots')">랏으로</span>
-        </span>
+        <span class="sub">기간과 랏을 함께 쓸 수 있습니다</span>
       </div>
 
-      <div class="mode-body on" id="mb-range">
-        <div class="grid">
-          <div class="fld"><label>시작 일시</label>
-            <input id="iz-from" placeholder="2025-08-05 00:00:00">
-            <span class="hint" id="iz-range-hint"></span></div>
-          <div class="fld"><label>종료 일시</label>
-            <input id="iz-to" placeholder="2025-08-07 23:59:59"></div>
+      <!-- 기간 -->
+      <div class="sel-block">
+        <label class="sel-head">
+          <input type="checkbox" id="use-range" checked onchange="syncSelUI()">
+          <b>기간으로</b>
+        </label>
+        <div class="sel-body" id="body-range">
+          <div class="grid">
+            <div class="fld"><label>시작 일시</label>
+              <input id="iz-from" placeholder="2025-08-05 00:00:00">
+              <span class="hint" id="iz-range-hint"></span></div>
+            <div class="fld"><label>종료 일시</label>
+              <input id="iz-to" placeholder="2025-08-07 23:59:59"></div>
+          </div>
         </div>
       </div>
 
-      <div class="mode-body" id="mb-lots">
-        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
-          <input id="iz-lotfilter" placeholder="랏 검색" style="flex:1;
-            font-size:12px;font-weight:600;color:var(--tx-1);
-            background:var(--bg-2);border:1px solid var(--bd);
-            border-radius:var(--r-md);padding:7px 11px;outline:none;"
-            oninput="renderLotPick()">
-          <button class="btn sm" onclick="clearLotSel()">선택 해제</button>
-          <span class="msg" id="iz-lotcnt" style="color:var(--tx-muted);"></span>
+      <!-- 랏 -->
+      <div class="sel-block">
+        <label class="sel-head">
+          <input type="checkbox" id="use-lots" onchange="syncSelUI()">
+          <b>랏으로</b>
+          <span class="sub" id="iz-lotcnt"></span>
+        </label>
+        <div class="sel-body" id="body-lots">
+          <div class="mode-tabs" style="margin-bottom:8px;">
+            <span class="mode-tab on" data-l="pick" onclick="setLotInput('pick')">목록에서 고르기</span>
+            <span class="mode-tab" data-l="paste" onclick="setLotInput('paste')">직접 입력 · 붙여넣기</span>
+          </div>
+
+          <div id="lotin-pick">
+            <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
+              <input id="iz-lotfilter" placeholder="랏 검색" style="flex:1;
+                font-size:12px;font-weight:600;color:var(--tx-1);
+                background:var(--bg-2);border:1px solid var(--bd);
+                border-radius:var(--r-md);padding:7px 11px;outline:none;"
+                oninput="renderLotPick()">
+              <button class="btn sm" onclick="selectVisibleLots()">보이는 랏 모두</button>
+              <button class="btn sm" onclick="clearLotSel()">선택 해제</button>
+            </div>
+            <div class="lot-pick" id="iz-lotpick"></div>
+          </div>
+
+          <div id="lotin-paste" style="display:none;">
+            <textarea id="iz-lotpaste" placeholder="랏 ID 를 붙여넣으세요&#10;쉼표·공백·줄바꿈으로 구분됩니다&#10;예) TA1234.1, TA1235.1"
+              style="width:100%;box-sizing:border-box;height:110px;resize:vertical;
+                font-family:var(--ah-mono);font-size:11px;line-height:1.6;
+                color:var(--tx-1);background:var(--bg-2);border:1px solid var(--bd);
+                border-radius:var(--r-md);padding:9px 11px;outline:none;"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+              <button class="btn sm" onclick="applyLotPaste()">적용</button>
+              <span class="msg" id="iz-paste-msg" style="color:var(--tx-muted);"></span>
+            </div>
+            <div class="note">엑셀에서 랏 목록을 복사해 그대로 붙여넣으면 됩니다.
+              조회 결과에 없는 랏은 알려 드립니다.</div>
+          </div>
         </div>
-        <div class="lot-pick" id="iz-lotpick"></div>
-        <div class="note">이상했던 랏만 골라 지정하면, 그 랏들이 나머지와
-          실제로 달랐는지 판정합니다.</div>
+      </div>
+
+      <!-- 결합 방식 -->
+      <div class="sel-block" id="combine-box" style="display:none;">
+        <div class="sel-head"><b>기간과 랏을 어떻게 합칠까요</b></div>
+        <div class="sel-body">
+          <label class="rad"><input type="radio" name="cmb" value="and" checked>
+            <b>그 기간 안의 그 랏만</b>
+            <span class="sub">— 둘 다 만족하는 것만 (좁힘)</span></label>
+          <label class="rad"><input type="radio" name="cmb" value="or">
+            <b>그 기간 또는 그 랏</b>
+            <span class="sub">— 둘 중 하나라도 해당하면 (넓힘)</span></label>
+        </div>
       </div>
     </div>
 
@@ -459,9 +526,14 @@ async function submitJob() {
 }
 
 /* ── 요청 목록 ─────────────────────────────── */
+/* 요청 상태와 판정 상태를 함께 다룬다 (같은 배지 스타일을 쓴다) */
 function statusBadge(s) {
-  const m = {'대기':'b-wait','실행중':'b-run','완료':'b-done',
-             '실패':'b-fail','취소':'b-wait'};
+  const m = {
+    '대기':'b-wait', '실행중':'b-run', '완료':'b-done',
+    '실패':'b-fail', '취소':'b-wait',
+    '이상':'b-fail', '주의':'b-run', '정상':'b-done',
+    '참고':'b-wait', '데이터없음':'b-wait', '기준없음':'b-wait',
+  };
   return `<span class="badge ${m[s] || 'b-wait'}">${esc(s)}</span>`;
 }
 
@@ -534,7 +606,7 @@ async function delJob(id) {
      선택 구간이 전체에 섞이면 이상값이 기준을 끌어올려
      차이가 실제보다 작게 보인다.
    ══════════════════════════════════════════════════ */
-let izOper = null, izMode = 'range', izLots = [], izLotSel = new Set();
+let izOper = null, izLots = [], izLotSel = new Set();
 let izParams = [], izScan = null, izSel = null, izPick = null;
 
 function izMsg(t, err) {
@@ -552,6 +624,10 @@ async function openIssue(operId, label) {
   document.getElementById('iz-res').innerHTML = '';
   izMsg('');
   await loadIssueContext(true);
+  document.getElementById('use-range').checked = true;
+  document.getElementById('use-lots').checked = false;
+  setLotInput('pick');
+  syncSelUI();
   document.getElementById('iz').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
@@ -590,70 +666,70 @@ async function loadIssueContext(initLotCd) {
   renderLotPick();
 }
 
-function setMode(m) {
-  izMode = m;
-  document.querySelectorAll('.mode-tab').forEach(el =>
-    el.classList.toggle('on', el.dataset.m === m));
-  document.getElementById('mb-range').classList.toggle('on', m === 'range');
-  document.getElementById('mb-lots').classList.toggle('on', m === 'lots');
+/* 기간·랏 블록을 각각 켜고 끈다. 둘 다 켜면 결합 방식을 묻는다. */
+function syncSelUI() {
+  const r = document.getElementById('use-range').checked;
+  const l = document.getElementById('use-lots').checked;
+  document.getElementById('body-range').parentElement.classList.toggle('off', !r);
+  document.getElementById('body-lots').parentElement.classList.toggle('off', !l);
+  document.getElementById('combine-box').style.display = (r && l) ? '' : 'none';
 }
 
-function renderLotPick() {
-  const q = (document.getElementById('iz-lotfilter').value || '').toUpperCase();
-  const list = izLots.filter(l => !q || String(l.lot_id).toUpperCase().includes(q));
-  document.getElementById('iz-lotcnt').textContent =
-    `${izLotSel.size}개 선택 / ${izLots.length}랏`;
-  document.getElementById('iz-lotpick').innerHTML = list.map(l => `
-    <div class="lot-row ${izLotSel.has(l.lot_id) ? 'sel' : ''}"
-         onclick="toggleLot('${esc(l.lot_id)}')">
-      <input type="checkbox" ${izLotSel.has(l.lot_id) ? 'checked' : ''}
-             onclick="event.stopPropagation();toggleLot('${esc(l.lot_id)}')">
-      ${esc(l.lot_id)} <span style="color:var(--tx-muted);">${l.n}장</span>
-      <span class="dt">${esc(l.date)}</span>
-    </div>`).join('') ||
-    '<div class="empty" style="padding:16px;">랏이 없습니다.</div>';
+function setLotInput(m) {
+  document.querySelectorAll('.mode-tab[data-l]').forEach(el =>
+    el.classList.toggle('on', el.dataset.l === m));
+  document.getElementById('lotin-pick').style.display  = m === 'pick' ? '' : 'none';
+  document.getElementById('lotin-paste').style.display = m === 'paste' ? '' : 'none';
 }
 
-function toggleLot(id) {
-  if (izLotSel.has(id)) izLotSel.delete(id); else izLotSel.add(id);
+/* 붙여넣은 랏 목록을 반영한다.
+   조회 결과에 없는 랏은 알려 준다 — 오타나 다른 공정 랏일 수 있다. */
+function applyLotPaste() {
+  const raw = document.getElementById('iz-lotpaste').value || '';
+  const want = raw.split(/[\s,;\t\n]+/).map(x => x.trim()).filter(Boolean);
+  if (!want.length) {
+    document.getElementById('iz-paste-msg').textContent = '입력된 랏이 없습니다';
+    return;
+  }
+  const known = new Map(izLots.map(l => [String(l.lot_id).toUpperCase(), l.lot_id]));
+  const hit = [], miss = [];
+  want.forEach(w => {
+    const k = known.get(w.toUpperCase());
+    if (k) hit.push(k); else miss.push(w);
+  });
+
+  izLotSel = new Set(hit);
   renderLotPick();
+  document.getElementById('use-lots').checked = true;
+  syncSelUI();
+  document.getElementById('iz-paste-msg').textContent =
+    `${hit.length}개 적용` +
+    (miss.length ? ` · 조회 결과에 없는 랏 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? ' 외' : ''}` : '');
 }
-function clearLotSel() { izLotSel = new Set(); renderLotPick(); }
+
+function selectVisibleLots() {
+  const q = (document.getElementById('iz-lotfilter').value || '').toUpperCase();
+  izLots.filter(l => !q || String(l.lot_id).toUpperCase().includes(q))
+        .forEach(l => izLotSel.add(l.lot_id));
+  renderLotPick();
+  document.getElementById('use-lots').checked = true;
+  syncSelUI();
+}
 
 function currentSel() {
-  return izMode === 'range'
-    ? {mode: 'range',
-       date_from: document.getElementById('iz-from').value.trim(),
-       date_to:   document.getElementById('iz-to').value.trim()}
-    : {mode: 'lots', lot_ids: [...izLotSel]};
-}
+  const useR = document.getElementById('use-range').checked;
+  const useL = document.getElementById('use-lots').checked;
+  const d1 = document.getElementById('iz-from').value.trim();
+  const d2 = document.getElementById('iz-to').value.trim();
+  const lots = [...izLotSel];
 
-/* ── 전 파라미터 스캔 ─────────────────────────
-   파라미터를 묶음으로 나눠 여러 번 요청한다.
-   ★ 한 번에 100개를 처리하면 몇십 초 동안 아무 표시도 못 해
-     멈춘 것처럼 보인다. 나눠 부르면 진행률이 나오고
-     결과도 나오는 대로 쌓여 먼저 훑어볼 수 있다.
-   ★ 큰 요청 하나보다 게이트웨이 타임아웃에도 안전하다. */
-const SCAN_BATCH = 15;
-let scanStop = false, scanAbort = null;
-
-/* ★ 플래그만 세우면 진행 중인 요청이 끝날 때까지 멈추지 않는다.
-   응답이 늦으면 '중단하는 중...' 에서 굳은 것처럼 보이므로
-   AbortController 로 요청 자체를 끊는다. */
-function stopScan() {
-  scanStop = true;
-  if (scanAbort) scanAbort.abort();
-  izMsg('중단했습니다');
-}
-
-function setScanProg(done, total) {
-  const box = document.getElementById('iz-prog');
-  if (done >= total) { box.classList.remove('on'); return; }
-  box.classList.add('on');
-  document.getElementById('iz-prog-bar').style.width =
-    (done / total * 100).toFixed(1) + '%';
-  document.getElementById('iz-prog-txt').textContent =
-    `${done} / ${total} 파라미터`;
+  if (useR && useL) {
+    const cmb = document.querySelector('input[name=cmb]:checked');
+    return {mode: 'both', date_from: d1, date_to: d2, lot_ids: lots,
+            combine: cmb ? cmb.value : 'and'};
+  }
+  if (useL) return {mode: 'lots', lot_ids: lots};
+  return {mode: 'range', date_from: d1, date_to: d2};
 }
 
 async function runScan() {
@@ -739,17 +815,46 @@ function showScanError(err, batch) {
       ${(batch || []).length > 5 ? ` 외 ${batch.length - 5}개` : ''}</div>`;
 }
 
+/* ── 스캔 결과 표 ─────────────────────────────
+   ★ 요약 카드로 필터링하고, 행을 누르면 그 자리에서 상세가 펼쳐진다.
+     상세를 표 아래 멀리 그리면 확인할 때마다 위아래로 오가야 한다. */
+let scanFilter = '';        // '' | '이상' | '주의' | 'cp'
+
+function setScanFilter(f) {
+  scanFilter = (scanFilter === f) ? '' : f;   // 같은 카드를 다시 누르면 해제
+  izPick = null;                              // 필터가 바뀌면 열린 상세는 닫는다
+  renderScan(izScan, izScanTotal);
+}
+
+function passFilter(it) {
+  if (!scanFilter) return true;
+  if (scanFilter === 'cp') return !!it.cp_in_sel;
+  return it.status === scanFilter;
+}
+
+let izScanTotal = 0, izDetail = null, izDetailFor = null;
+
 function renderScan(j, total) {
+  izScanTotal = total || izScanTotal;
   const items = j.items || [];
   const partial = total && j.n_param < total;
-  const rows = items.map((it, i) => {
+  const shown = items.filter(passFilter);
+
+  const card = (key, cls, n, label) => `
+    <div class="scan-card ${cls} ${scanFilter === key ? 'on' : ''}"
+         onclick="setScanFilter('${key}')" title="클릭하면 해당 항목만 봅니다">
+      <div class="n">${n}</div><div class="l">${label}</div></div>`;
+
+  const rows = shown.map(it => {
+    const i = items.indexOf(it);
     const cls = it.status === '이상' ? 'b-fail'
               : it.status === '주의' ? 'b-run'
               : it.status === '정상' ? 'b-done' : 'b-wait';
     const cp = it.cps && it.cps.length;
-    return `<tr onclick="pickParam(${i})" data-i="${i}"
-                class="${izPick === i ? 'on' : ''}">
-      <td><b>${esc(it.param)}</b></td>
+    const open = izPick === i;
+    return `<tr onclick="pickParam(${i})" data-i="${i}" class="${open ? 'on' : ''}">
+      <td><span class="caret">${open ? '▾' : '▸'}</span>
+        <b>${esc(it.param)}</b></td>
       <td><span class="tag">${esc(it.ptype)}</span></td>
       <td><span class="badge ${cls}">${esc(it.status)}</span></td>
       <td class="mono">${it.sigma == null ? '-'
@@ -762,7 +867,7 @@ function renderScan(j, total) {
       <td>${sparkline(it)}</td>
       <td style="font-size:11px;color:var(--tx-2);">
         ${(it.reasons || []).map(x => esc(x)).join('<br>')}</td>
-    </tr>`;
+    </tr>` + (open ? detailRow(it) : '');
   }).join('');
 
   document.getElementById('iz-scan').innerHTML = `
@@ -772,34 +877,37 @@ function renderScan(j, total) {
         ${partial ? `/ ${total} 스캔 중...` : '스캔 완료'}</span>
     </div>
     <div class="scan-sum">
-      <div class="scan-card all"><div class="n">${j.n_param}${partial ? `<span style="font-size:12px;color:var(--tx-muted);">/${total}</span>` : ''}</div><div class="l">스캔</div></div>
-      <div class="scan-card bad"><div class="n">${j.n_bad}</div><div class="l">이상</div></div>
-      <div class="scan-card warn"><div class="n">${j.n_warn}</div><div class="l">주의</div></div>
-      <div class="scan-card cp"><div class="n">${j.n_cp}</div><div class="l">구간 내 변곡</div></div>
+      ${card('', 'all', j.n_param + (partial ? `<span style="font-size:12px;color:var(--tx-muted);">/${total}</span>` : ''), '전체')}
+      ${card('이상', 'bad', j.n_bad, '이상')}
+      ${card('주의', 'warn', j.n_warn, '주의')}
+      ${card('cp', 'cp', j.n_cp, '구간 내 변곡')}
     </div>
-    <div class="note">행을 클릭하면 그 파라미터의 상세 차트가 열립니다 —
-      지정한 구간은 다른 색으로, 변곡점은 세로 점선으로 표시됩니다.</div>
+    <div class="note">
+      요약 카드를 누르면 해당 항목만 걸러집니다 (다시 누르면 해제).
+      행을 누르면 그 자리에서 상세가 펼쳐지고, 다시 누르면 닫힙니다.
+      ${scanFilter ? `<b style="color:var(--tx-1);"> · 지금 «${esc(scanFilter === 'cp' ? '구간 내 변곡' : scanFilter)}» 만 보는 중 (${shown.length}개)</b>` : ''}
+    </div>
     <div class="sc-wrap">
       <table class="sc">
         <thead><tr>
           <th>파라미터</th><th>타입</th><th>판정</th><th>σ</th>
           <th>범위밖</th><th>산포</th><th>변곡점</th><th>추이</th><th>근거</th>
         </tr></thead>
-        <tbody>${rows || '<tr><td colspan="9" class="empty">결과가 없습니다.</td></tr>'}</tbody>
+        <tbody>${rows || `<tr><td colspan="9" class="empty">
+          ${scanFilter ? '조건에 맞는 항목이 없습니다.' : '결과가 없습니다.'}</td></tr>`}</tbody>
       </table>
     </div>`;
+
+  if (izPick !== null && izDetail && izDetailFor === izPick) drawIssuePlot(izDetail);
 }
 
-/* 표 안 미니 추이 — 지정 구간은 붉게, 변곡점은 보라 세로선 */
+/* 표 안 미니 추이 — 변곡점 위치를 막대로 (구간 내는 붉게) */
 function sparkline(it) {
   const s = (it.cps || []).length ? it.cps : [];
-  const base = it.base || {};
   const W = 110, H = 26;
-  const pts = it._spark || null;
-  // 스캔 응답에는 시계열을 싣지 않는다(무거움) — 변곡점 위치만 막대로 표시
   if (!s.length) return `<span style="color:var(--tx-muted);font-size:11px;">-</span>`;
-  const marks = s.map(c => {
-    const x = 6 + (s.indexOf(c) + 1) * (W - 12) / (s.length + 1);
+  const marks = s.map((c, i) => {
+    const x = 6 + (i + 1) * (W - 12) / (s.length + 1);
     const col = c.in_sel ? '#dc2626' : '#7c3aed';
     return `<line x1="${x}" y1="4" x2="${x}" y2="${H-4}" stroke="${col}"
              stroke-width="2" stroke-linecap="round"/>`;
@@ -809,39 +917,50 @@ function sparkline(it) {
           stroke="rgba(128,128,128,.3)" stroke-width="1"/>${marks}</svg>`;
 }
 
-/* 표에서 파라미터를 고르면 상세 차트 */
+/* 행 토글 — 같은 행을 다시 누르면 닫는다 */
 async function pickParam(i) {
   if (!izScan) return;
+
+  if (izPick === i) {              // 닫기
+    izPick = null; izDetail = null; izDetailFor = null;
+    renderScan(izScan, izScanTotal);
+    return;
+  }
+
   izPick = i;
-  document.querySelectorAll('table.sc tbody tr').forEach(tr =>
-    tr.classList.toggle('on', Number(tr.dataset.i) === i));
+  izDetail = null; izDetailFor = null;
+  renderScan(izScan, izScanTotal);        // 먼저 '조회 중' 상태로 펼친다
 
   const it = izScan.items[i];
-  izMsg(`${it.param} 상세 조회 중...`);
   const j = await postJSON(API_IZRUN, {
     oper_id: izOper, lot_cd: document.getElementById('iz-lotcd').value || null,
     param: it.param, sel: izSel,
     unit: document.getElementById('iz-unit').value,
   });
+  if (izPick !== i) return;               // 기다리는 동안 다른 행을 눌렀으면 버린다
   if (!j.ok) { izMsg(j.error || '조회 실패', true); return; }
-  izMsg('');
-  renderIssue(j);
-  document.getElementById('iz-res').scrollIntoView({behavior:'smooth', block:'nearest'});
+
+  izDetail = j; izDetailFor = i;
+  renderScan(izScan, izScanTotal);
 }
 
-function renderIssue(r) {
-  const cls = r.status === '이상' ? 'bad'
-            : r.status === '주의' ? 'warn'
-            : (r.status === '정상' ? 'good' : '');
+/* 행 아래에 펼쳐지는 상세 — 차트·변곡점·랏별·장비별 */
+function detailRow(it) {
+  const r = (izDetail && izDetailFor === izScan.items.indexOf(it)) ? izDetail : null;
+  if (!r) {
+    return `<tr class="sc-detail"><td colspan="9">
+      <div class="sc-detail-in"><span class="msg">${esc(it.param)} 상세 조회 중...</span></div>
+    </td></tr>`;
+  }
+
   const s = r.sel || {}, b = r.base || {};
-
-  const tags = (r.checks || []).map(c => `<span class="tag">${esc(c)}</span>`).join('');
-  const reasons = (r.reasons || []).map(x => `· ${esc(x)}`).join('<br>');
-
-  // ── 변곡점 ─────────────────────────────────────
   const cps = r.change_points || [];
+  const lots = r.lots || [];
+  const abn = lots.filter(l => l.status !== '정상');
+  const outAbn = abn.filter(l => !l.in_sel).length;
+
   const cpBox = `
-    <div class="sec-h" style="margin-top:18px;"><h3>변곡점</h3>
+    <div class="sec-h" style="margin-top:16px;"><h3>변곡점</h3>
       <span class="sub">${cps.length ? `${cps.length}곳` : '수준이 바뀐 지점 없음'}</span></div>
     ${r.cp_note ? `<div class="rsn" style="margin-bottom:8px;">${esc(r.cp_note)}</div>` : ''}
     <div class="cp-list">
@@ -849,24 +968,18 @@ function renderIssue(r) {
         <div class="cp-item">${esc(c.at)} · <b>${esc(c.direction)}</b>
           ${c.in_sel ? '<span class="in">이슈 구간 내</span>' : ''}
           <div class="m">${c.before_avg} → ${c.after_avg}
-            (${c.shift_sigma > 0 ? '+' : ''}${c.shift_sigma}σ, t=${c.t},
-             앞 ${c.n_before} / 뒤 ${c.n_after})</div>
+            (${c.shift_sigma > 0 ? '+' : ''}${c.shift_sigma}σ, t=${c.t})</div>
         </div>`).join('') ||
         '<div class="rsn" style="color:var(--tx-muted);">뚜렷한 수준 변화가 없습니다.</div>'}
     </div>`;
 
-  // ── 랏별 ───────────────────────────────────────
-  const lots = r.lots || [];
-  const abn = lots.filter(l => l.status !== '정상');
-  const selAbn = abn.filter(l => l.in_sel).length;
-  const outAbn = abn.filter(l => !l.in_sel).length;
   const lotBox = lots.length ? `
-    <div class="sec-h" style="margin-top:18px;"><h3>랏별 판정</h3>
-      <span class="sub">전체 ${lots.length}랏 · 이상/주의 ${abn.length}랏
-        (지정 구간 ${selAbn} · 그 밖 ${outAbn})</span></div>
+    <div class="sec-h" style="margin-top:16px;"><h3>랏별 판정</h3>
+      <span class="sub">전체 ${lots.length}랏 · 이상/주의 ${abn.length}랏</span></div>
     ${outAbn ? `<div class="rsn" style="margin-bottom:8px;color:var(--warn);">
       지정하지 않은 구간에도 벗어난 랏이 ${outAbn}개 있습니다 —
       이슈가 지정 구간에만 있는 게 아닐 수 있습니다.</div>` : ''}
+    <div style="max-height:220px;overflow-y:auto;">
     <table class="jl"><thead><tr>
       <th>LOT_ID</th><th class="mono">n</th><th class="mono">평균</th>
       <th class="mono">σ</th><th>판정</th><th>구간</th><th>시각</th>
@@ -882,12 +995,11 @@ function renderIssue(r) {
           <td>${l.in_sel ? '<b>지정</b>' : ''}</td>
           <td class="mono">${esc(l.date)}</td>
         </tr>`).join('')}
-    </tbody></table>` : '';
+    </tbody></table></div>` : '';
 
-  // ── 장비별 ─────────────────────────────────────
   const eqp = r.eqp || [];
   const eqpBox = eqp.length ? `
-    <div class="sec-h" style="margin-top:18px;"><h3>장비·챔버별</h3>
+    <div class="sec-h" style="margin-top:16px;"><h3>장비·챔버별</h3>
       <span class="sub">지정 구간 안에서</span></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       ${eqp.map(e => {
@@ -900,28 +1012,21 @@ function renderIssue(r) {
       }).join('')}
     </div>` : '';
 
-  document.getElementById('iz-res').innerHTML = `
-    <div class="verdict ${cls}">
-      <span class="t">${esc(r.status)}</span>
-      <span class="d">${esc(r.sel_desc || '')}</span>
-    </div>
-    <div class="rsn">${tags}${tags ? '<br>' : ''}${reasons}</div>
+  return `<tr class="sc-detail"><td colspan="9"><div class="sc-detail-in">
     <div class="kv">
+      <span><b style="font-size:14px;">${esc(r.param)}</b></span>
       <span>지정 구간 <b>${s.n}장</b> 평균 <b>${s.avg}</b> σ <b>${s.std}</b></span>
       <span>나머지 <b>${b.n}장</b> 평균 <b>${b.avg}</b> σ <b>${b.std}</b></span>
       ${r.sigma == null ? '' : `<span>차이 <b>${r.sigma > 0 ? '+' : ''}${r.sigma}σ</b></span>`}
       ${r.spread ? `<span>산포비 <b>${r.spread}배</b></span>` : ''}
       <span>범위밖 <b>${r.out_cnt}장</b></span>
+      <span style="margin-left:auto;">
+        <button class="btn sm" onclick="event.stopPropagation();pickParam(${izScan.items.indexOf(it)})">닫기</button>
+      </span>
     </div>
     <div class="iz-plot" id="iz-plot"></div>
-    ${cpBox}${lotBox}${eqpBox}`;
-
-  drawIssuePlot(r);
-}
-
-function statusBadge(s) {
-  const m = {'이상':'b-fail','주의':'b-run','정상':'b-done'};
-  return `<span class="badge ${m[s] || 'b-wait'}">${esc(s)}</span>`;
+    ${cpBox}${lotBox}${eqpBox}
+  </div></td></tr>`;
 }
 
 /* 지정 구간을 색으로 구분하고 변곡점을 세로선으로 표시한다 */
