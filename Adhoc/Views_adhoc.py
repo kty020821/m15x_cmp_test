@@ -14,6 +14,8 @@ equipment/views_adhoc.py
   api/issue/context/        구간 지정 후보 (파라미터·LOT_ID·기간)
   api/issue/analyze/        이슈 구간 분석 — 파라미터 1건 상세
   api/issue/scan/           이슈 구간 전 파라미터 스캔 (어디에 변곡이 있었나)
+  issue/report/             파라미터별 차트를 모은 한 파일 HTML 리포트
+                            (브라우저에서 Ctrl+P 하면 PDF 로 저장된다)
 
   ※ 이슈 분석은 적재된 테이블이면 무엇이든 대상이 된다 —
     1회성 결과(ADHOC_*)도, 정기 적재분도 같은 API 를 쓴다.
@@ -29,11 +31,12 @@ import re
 import traceback
 
 from django.shortcuts import render
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from . import adhoc_service as ah
 from . import issue_service as iss
+from . import issue_report as rep
 
 
 def _fail(msg, payload=None, exc=None):
@@ -234,3 +237,55 @@ def issue_analyze(request):
         return _fail(str(e))                 # 입력 오류는 그대로 안내
     except Exception as e:
         return _fail(f'분석 실패: {e}', exc=e)
+
+
+@csrf_exempt
+def issue_report(request):
+    """
+    이슈 스캔 결과를 한 파일 HTML 리포트로 만든다.
+
+    ★ JSON 이 아니라 HTML 문서를 그대로 돌려준다 —
+      새 탭에서 열리고, 그 상태로 Ctrl+P 하면 PDF 가 된다.
+      PDF 라이브러리(weasyprint 등)를 서버에 깔 필요가 없다.
+
+    GET 으로도 받는다. 새 탭 열기(window.open)가 GET 이라 그렇다.
+    """
+    g = request.GET if request.method == 'GET' else _body(request)
+
+    oper_id = g.get('oper_id')
+    if not _safe(oper_id):
+        return HttpResponse('<h3>oper_id 형식 오류</h3>', status=200,
+                            content_type='text/html; charset=utf-8')
+
+    sel = g.get('sel')
+    if isinstance(sel, str):
+        try:
+            sel = json.loads(sel)
+        except Exception:
+            sel = {}
+    sel = sel or {}
+
+    params = g.get('params')
+    if isinstance(params, str):
+        params = [p for p in re.split(r'[,\s]+', params) if p]
+
+    only = str(g.get('only_issue', '1')).lower() not in ('0', 'false', 'no')
+    download = str(g.get('download', '')).lower() in ('1', 'true', 'yes')
+
+    try:
+        html = rep.build_report(
+            oper_id, g.get('lot_cd') or None, sel,
+            unit=g.get('unit') or 'lot', params=params or None,
+            only_issue=only, title=g.get('title') or '')
+    except ValueError as e:
+        html = f'<h3>리포트를 만들지 못했습니다</h3><p>{e}</p>'
+    except Exception as e:
+        traceback.print_exc()
+        html = f'<h3>리포트 생성 실패</h3><p>{e.__class__.__name__}: {e}</p>'
+
+    resp = HttpResponse(html, content_type='text/html; charset=utf-8')
+    if download:
+        from datetime import datetime
+        name = f'issue_report_{oper_id}_{datetime.now():%Y%m%d_%H%M}.html'
+        resp['Content-Disposition'] = f'attachment; filename="{name}"'
+    return resp
