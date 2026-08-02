@@ -159,36 +159,61 @@ def _sel_clause(sel, have):
     """
     선택 구간을 (조건문, 인자, 설명) 으로.
     선택에 해당하지 않는 나머지는 NOT (조건) 으로 쓴다.
+
+    mode
+      range   기간
+      lots    랏 목록
+      wafers  웨이퍼 id 목록
+      both    기간 + 랏을 함께 (combine 으로 결합 방식 지정)
+                and : 그 기간 '안의' 그 랏들만   ← 좁힌다
+                or  : 그 기간 '또는' 그 랏들     ← 넓힌다
     """
     mode = (sel or {}).get('mode', 'range')
 
-    if mode == 'range':
+    def _range():
         d1 = str(sel.get('date_from') or '').strip()
         d2 = str(sel.get('date_to') or '').strip()
         if not d1 or not d2:
             raise ValueError('이슈 구간의 시작·종료 일시를 지정하세요')
         if d1 > d2:
             d1, d2 = d2, d1
-        return ('"DATE" >= %s AND "DATE" <= %s', [d1, d2],
+        return ('("DATE" >= %s AND "DATE" <= %s)', [d1, d2],
                 f'기간 {d1} ~ {d2}')
 
-    if mode == 'lots':
+    def _lots():
         lots = [str(v).strip() for v in (sel.get('lot_ids') or []) if str(v).strip()]
         if not lots:
             raise ValueError('이슈 랏(LOT_ID)을 하나 이상 지정하세요')
         if 'LOT_ID' not in have:
             raise ValueError('이 테이블에 LOT_ID 컬럼이 없습니다')
         ph = ",".join(["%s"] * len(lots))
-        return (f'"LOT_ID" IN ({ph})', lots,
+        return (f'("LOT_ID" IN ({ph}))', lots,
                 f'랏 {len(lots)}개 ({", ".join(lots[:5])}'
                 f'{" 외" if len(lots) > 5 else ""})')
+
+    if mode == 'range':
+        return _range()
+
+    if mode == 'lots':
+        return _lots()
+
+    if mode == 'both':
+        r_sql, r_args, r_desc = _range()
+        l_sql, l_args, l_desc = _lots()
+        combine = str(sel.get('combine') or 'and').lower()
+        if combine == 'or':
+            return (f'({r_sql} OR {l_sql})', r_args + l_args,
+                    f'{r_desc} 또는 {l_desc}')
+        # 기본은 AND — "그 기간 안의 그 랏들" 이 가장 흔한 요구다
+        return (f'({r_sql} AND {l_sql})', r_args + l_args,
+                f'{r_desc} 안의 {l_desc}')
 
     if mode == 'wafers':
         ids = [int(v) for v in (sel.get('ids') or []) if str(v).strip().isdigit()]
         if not ids:
             raise ValueError('선택된 웨이퍼가 없습니다')
         ph = ",".join(["%s"] * len(ids))
-        return (f'id IN ({ph})', ids, f'웨이퍼 {len(ids)}장')
+        return (f'(id IN ({ph}))', ids, f'웨이퍼 {len(ids)}장')
 
     raise ValueError(f'알 수 없는 구간 지정 방식: {mode}')
 
