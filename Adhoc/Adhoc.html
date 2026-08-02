@@ -187,6 +187,18 @@ table.sc tbody tr.on { background: var(--bg-2); }
 .spark { vertical-align: middle; }
 .caret { display: inline-block; width: 12px; color: var(--tx-muted);
   font-size: 10px; }
+
+/* 컬럼 필터 — 머리글 안에 넣어 헤더 행을 하나로 유지한다
+   (행이 둘이면 sticky top 오프셋을 픽셀로 맞춰야 해 깨지기 쉽다) */
+.fx { display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
+  font-family: var(--ah-mono); font-size: 11px; font-weight: 700;
+  color: var(--tx-1); background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: 7px;
+  padding: 4px 6px; outline: none; }
+.fx::placeholder { color: var(--tx-muted); font-weight: 600;
+  font-family: var(--ah-font); }
+.fx:focus { border-color: var(--accent); }
+select.fx { font-family: var(--ah-font); cursor: pointer; }
 table.sc tbody tr.on .caret { color: var(--accent); }
 tr.sc-detail > td { background: var(--bg-2); padding: 0; }
 .sc-detail-in { padding: 14px 16px; }
@@ -332,11 +344,12 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
         </label>
         <div class="sel-body" id="body-range">
           <div class="grid">
-            <div class="fld"><label>시작 일시</label>
-              <input id="iz-from" placeholder="2025-08-05 00:00:00">
+            <div class="fld"><label>시작일</label>
+              <input id="iz-from" type="date">
               <span class="hint" id="iz-range-hint"></span></div>
-            <div class="fld"><label>종료 일시</label>
-              <input id="iz-to" placeholder="2025-08-07 23:59:59"></div>
+            <div class="fld"><label>종료일</label>
+              <input id="iz-to" type="date">
+              <span class="hint">종료일은 그날 끝(23:59:59)까지 포함합니다</span></div>
           </div>
         </div>
       </div>
@@ -667,11 +680,16 @@ async function loadIssueContext(initLotCd) {
   document.getElementById('iz-pcnt').value = `${izParams.length}개 스캔 대상`;
 
   // 기간 입력칸에 데이터 범위를 안내하고 기본값으로 넣어 둔다
+  // date 입력은 YYYY-MM-DD 만 받는다
+  const d0 = (j.date_min || '').slice(0, 10);
+  const d1 = (j.date_max || '').slice(0, 10);
   document.getElementById('iz-range-hint').textContent =
-    j.date_min ? `데이터 범위 ${j.date_min} ~ ${j.date_max}` : '';
+    d0 ? `데이터 범위 ${d0} ~ ${d1}` : '';
   if (initLotCd) {
-    document.getElementById('iz-from').value = j.date_min || '';
-    document.getElementById('iz-to').value   = j.date_max || '';
+    const f = document.getElementById('iz-from');
+    const t = document.getElementById('iz-to');
+    f.min = t.min = d0; f.max = t.max = d1;   // 달력에서 범위 밖은 못 고르게
+    f.value = d0; t.value = d1;
   }
 
   izLots = j.lot_ids || [];
@@ -932,7 +950,27 @@ function setReportEnabled(on) {
 /* ── 스캔 결과 표 ─────────────────────────────
    ★ 요약 카드로 필터링하고, 행을 누르면 그 자리에서 상세가 펼쳐진다.
      상세를 표 아래 멀리 그리면 확인할 때마다 위아래로 오가야 한다. */
-let scanFilter = '';        // '' | '이상' | '주의' | 'cp'
+let scanFilter = '';        // 요약 카드 필터: '' | '이상' | '주의' | 'cp'
+/* 컬럼 필터 — 표 머리글에서 거른다.
+   ★ 행을 다시 그리지 않고 걸러낸 목록만 렌더하므로,
+     필터 값은 여기 보관했다가 렌더 후 입력칸에 되살린다. */
+const colF = {param: '', ptype: '', status: '', cp: ''};
+
+function setColF(k, v) {
+  colF[k] = v;
+  izPick = null;                    // 필터가 바뀌면 열린 상세는 닫는다
+  renderScan(izScan, izScanTotal);
+}
+
+function clearColF() {
+  Object.keys(colF).forEach(k => { colF[k] = ''; });
+  izPick = null;
+  renderScan(izScan, izScanTotal);
+}
+
+function hasColF() {
+  return Object.values(colF).some(v => String(v || '').trim() !== '');
+}
 
 function setScanFilter(f) {
   scanFilter = (scanFilter === f) ? '' : f;   // 같은 카드를 다시 누르면 해제
@@ -941,15 +979,36 @@ function setScanFilter(f) {
 }
 
 function passFilter(it) {
-  if (!scanFilter) return true;
-  if (scanFilter === 'cp') return !!it.cp_in_sel;
-  return it.status === scanFilter;
+  // 요약 카드
+  if (scanFilter) {
+    if (scanFilter === 'cp') { if (!it.cp_in_sel) return false; }
+    else if (it.status !== scanFilter) return false;
+  }
+  // 컬럼 필터
+  if (colF.param &&
+      !String(it.param || '').toUpperCase().includes(colF.param.toUpperCase()))
+    return false;
+  if (colF.ptype && (it.ptype || 'ETC') !== colF.ptype) return false;
+  if (colF.status && it.status !== colF.status) return false;
+  if (colF.cp === 'in'   && !it.cp_in_sel) return false;
+  if (colF.cp === 'any'  && !((it.cps || []).length)) return false;
+  if (colF.cp === 'none' && (it.cps || []).length) return false;
+  return true;
 }
 
 let izScanTotal = 0, izDetail = null, izDetailFor = null;
 
 function renderScan(j, total) {
+  if (!j) return;
   izScanTotal = total || izScanTotal;
+
+  /* ★ 스크롤 위치 보존 —
+     행을 누르면 표 전체를 다시 그리는데, 그대로 두면 스크롤이 맨 위로
+     튀어 방금 누른 행을 다시 찾아야 한다. 표 안쪽과 페이지 양쪽을 되돌린다. */
+  const oldWrap = document.querySelector('.sc-wrap');
+  const keepIn  = oldWrap ? oldWrap.scrollTop : 0;
+  const keepWin = window.scrollY;
+
   const items = j.items || [];
   const partial = total && j.n_param < total;
   const shown = items.filter(passFilter);
@@ -958,6 +1017,11 @@ function renderScan(j, total) {
     <div class="scan-card ${cls} ${scanFilter === key ? 'on' : ''}"
          onclick="setScanFilter('${key}')" title="클릭하면 해당 항목만 봅니다">
       <div class="n">${n}</div><div class="l">${label}</div></div>`;
+
+  // 타입 선택지는 결과에서 뽑는다 (공정마다 구성이 다르다)
+  const types = [...new Set(items.map(x => x.ptype || 'ETC'))].sort();
+  const opt = (v, cur, label) =>
+    `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(label)}</option>`;
 
   const rows = shown.map(it => {
     const i = items.indexOf(it);
@@ -999,18 +1063,51 @@ function renderScan(j, total) {
     <div class="note">
       요약 카드를 누르면 해당 항목만 걸러집니다 (다시 누르면 해제).
       행을 누르면 그 자리에서 상세가 펼쳐지고, 다시 누르면 닫힙니다.
-      ${scanFilter ? `<b style="color:var(--tx-1);"> · 지금 «${esc(scanFilter === 'cp' ? '구간 내 변곡' : scanFilter)}» 만 보는 중 (${shown.length}개)</b>` : ''}
+      ${scanFilter ? `<b style="color:var(--tx-1);"> · 지금 «${esc(scanFilter === 'cp' ? '구간 내 변곡' : scanFilter)}» 만 보는 중</b>` : ''}
+      ${(scanFilter || hasColF()) ? ` · <b style="color:var(--tx-1);">${shown.length} / ${items.length}개 표시</b>` : ''}
+      ${hasColF() ? ` <button class="btn sm" style="padding:2px 9px;"
+          onclick="clearColF()">컬럼 필터 해제</button>` : ''}
     </div>
     <div class="sc-wrap">
       <table class="sc">
         <thead><tr>
-          <th>파라미터</th><th>타입</th><th>판정</th><th>σ</th>
-          <th>범위밖</th><th>산포</th><th>변곡점</th><th>추이</th><th>근거</th>
+          <th>파라미터
+            <input class="fx" id="fx-param" placeholder="포함 문자 검색"
+                   oninput="setColF('param', this.value)"></th>
+          <th>타입
+            <select class="fx" id="fx-ptype" onchange="setColF('ptype', this.value)">
+              ${opt('', colF.ptype, '전체')}
+              ${types.map(t => opt(t, colF.ptype, t)).join('')}
+            </select></th>
+          <th>판정
+            <select class="fx" id="fx-status" onchange="setColF('status', this.value)">
+              ${opt('', colF.status, '전체')}
+              ${['이상','주의','정상','참고','데이터없음','기준없음']
+                 .map(v => opt(v, colF.status, v)).join('')}
+            </select></th>
+          <th>σ</th><th>범위밖</th><th>산포</th>
+          <th>변곡점
+            <select class="fx" id="fx-cp" onchange="setColF('cp', this.value)">
+              ${opt('', colF.cp, '전체')}
+              ${opt('in', colF.cp, '구간 내')}
+              ${opt('any', colF.cp, '있음')}
+              ${opt('none', colF.cp, '없음')}
+            </select></th>
+          <th>추이</th><th>근거</th>
         </tr></thead>
         <tbody>${rows || `<tr><td colspan="9" class="empty">
           ${scanFilter ? '조건에 맞는 항목이 없습니다.' : '결과가 없습니다.'}</td></tr>`}</tbody>
       </table>
     </div>`;
+
+  // 필터 입력값 되살리기 (표를 통째로 다시 그렸으므로)
+  const pf = document.getElementById('fx-param');
+  if (pf) pf.value = colF.param;
+
+  // 스크롤 되돌리기 — 다시 그리기 전 위치 그대로
+  const newWrap = document.querySelector('.sc-wrap');
+  if (newWrap) newWrap.scrollTop = keepIn;
+  window.scrollTo(0, keepWin);
 
   if (izPick !== null && izDetail && izDetailFor === izPick) drawIssuePlot(izDetail);
 }
