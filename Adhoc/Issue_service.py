@@ -208,16 +208,51 @@ def _stats(cur, table, param, where, args):
 # ══════════════════════════════════════════════════════════
 # 변곡점 탐지
 # ══════════════════════════════════════════════════════════
-def _t_stat(vals, i):
-    """분할점 i 에서 전후 평균 차이의 t 통계량"""
-    n1, n2 = i, len(vals) - i
+# 변곡점 탐지에 쓸 시계열 길이 상한.
+#   탐지 비용은 길이에 비례하고, 재귀까지 겹치면 긴 시계열에서 응답이 늦어진다.
+#   수천 점을 다 봐도 '수준이 바뀐 지점' 판단은 달라지지 않으므로 줄여서 본다.
+CP_MAX_POINTS = 1500
+
+
+def _prefix(vals):
+    """
+    누적합·누적제곱합.
+
+    ★ 이게 성능의 핵심이다.
+      예전에는 분할점마다 전후 평균·분산을 전체 순회로 구해 O(n²) 이었다.
+      시계열이 수천 점이면(1년치 조회의 랏 수) 수백만~수천만 번 연산이 되어
+      응답이 사실상 멈춘다. 누적합을 한 번 만들어 두면 어떤 분할점이든
+      평균·분산을 O(1) 로 구할 수 있어 전체가 O(n) 이 된다.
+    """
+    n = len(vals)
+    s1 = [0.0] * (n + 1)
+    s2 = [0.0] * (n + 1)
+    for i, v in enumerate(vals):
+        s1[i + 1] = s1[i] + v
+        s2[i + 1] = s2[i] + v * v
+    return s1, s2
+
+
+def _seg_stats(s1, s2, a, b):
+    """[a, b) 구간의 (개수, 평균, 표본분산) — 누적합에서 O(1)"""
+    n = b - a
+    if n <= 0:
+        return 0, 0.0, 0.0
+    tot = s1[b] - s1[a]
+    sq  = s2[b] - s2[a]
+    m = tot / n
+    if n < 2:
+        return n, m, 0.0
+    var = (sq - tot * tot / n) / (n - 1)
+    return n, m, max(var, 0.0)
+
+
+def _t_at(s1, s2, n, i):
+    """분할점 i 에서 전후 평균 차이의 t 통계량 — O(1)"""
+    n1, m1, v1 = _seg_stats(s1, s2, 0, i)
+    n2, m2, v2 = _seg_stats(s1, s2, i, n)
     if n1 < 2 or n2 < 2:
         return 0.0, None, None
-    a, b = vals[:i], vals[i:]
-    m1 = sum(a) / n1
-    m2 = sum(b) / n2
-    v1 = sum((x - m1) ** 2 for x in a) / (n1 - 1)
-    v2 = sum((x - m2) ** 2 for x in b) / (n2 - 1)
     sp = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)
     if sp <= 0:
         return (0.0, m1, m2) if m1 == m2 else (999.0, m1, m2)
@@ -225,7 +260,16 @@ def _t_stat(vals, i):
     return (abs(m2 - m1) / se if se > 0 else 0.0), m1, m2
 
 
-def _find_change_points(series, base_std, depth=0, offset=0, found=None):
+def _downsample(series, cap=CP_MAX_POINTS):
+    """긴 시계열을 균등 간격으로 줄인다 (수준 변화 판단에는 영향이 없다)"""
+    if len(series) <= cap:
+        return series
+    step = len(series) / cap
+    return [series[int(i * step)] for i in range(cap)]
+
+
+def _find_change_points(series, base_std, depth=0, offset=0, found=None,
+                        _pre=None):
     """
     이진 분할로 변곡점을 찾는다.
 
@@ -234,16 +278,23 @@ def _find_change_points(series, base_std, depth=0, offset=0, found=None):
 
     가장 강한 분할점을 찾아 확정하고, 좌우 구간에서 다시 찾는다.
     미세한 변동까지 잡으면 노이즈가 되므로 CP_MIN_SIGMA 로 거른다.
+
+    ★ 누적합(_prefix)으로 각 분할점을 O(1) 에 평가한다 — 전체 O(n).
+      전체 순회 방식은 O(n²) 라 시계열이 길면 응답이 멈춘다.
     """
     if found is None:
         found = []
+        series = _downsample(series)          # 최상위에서 한 번만 줄인다
     if len(series) < CP_MIN_SEG * 2 or len(found) >= CP_MAX or depth > 3:
         return found
 
     vals = [s['v'] for s in series]
+    n = len(vals)
+    s1, s2 = _prefix(vals)
+
     best_i, best_t, best_m1, best_m2 = None, 0.0, None, None
-    for i in range(CP_MIN_SEG, len(vals) - CP_MIN_SEG + 1):
-        t, m1, m2 = _t_stat(vals, i)
+    for i in range(CP_MIN_SEG, n - CP_MIN_SEG + 1):
+        t, m1, m2 = _t_at(s1, s2, n, i)
         if t > best_t:
             best_i, best_t, best_m1, best_m2 = i, t, m1, m2
 
@@ -261,7 +312,7 @@ def _find_change_points(series, base_std, depth=0, offset=0, found=None):
         'before_avg': _f(best_m1), 'after_avg': _f(best_m2),
         'shift': _f(shift), 'shift_sigma': round(shift_sigma, 2) if shift_sigma else None,
         't': round(best_t, 2),
-        'n_before': best_i, 'n_after': len(vals) - best_i,
+        'n_before': best_i, 'n_after': n - best_i,
         'direction': '상승' if shift > 0 else '하락',
     })
 
@@ -480,10 +531,11 @@ def _judge_one(param, ptype, s_in, s_out, out_cnt, series, sel_flag):
     b_avg, b_std = s_out['avg'], s_out['std']
 
     # 변곡점은 타입과 무관하게 찾는다 (PART 도 추이는 볼 가치가 있다)
-    cps = _find_change_points(series, b_std) if len(series) >= CP_MIN_SEG * 2 else []
+    ds = _downsample(series)
+    cps = _find_change_points(ds, b_std) if len(ds) >= CP_MIN_SEG * 2 else []
     for c in cps:
         i = c['index']
-        c['in_sel'] = bool(series[i]['in_sel']) if 0 <= i < len(series) else False
+        c['in_sel'] = bool(ds[i]['in_sel']) if 0 <= i < len(ds) else False
     it['cps'] = cps
     it['cp_in_sel'] = any(c.get('in_sel') for c in cps)
 
@@ -779,13 +831,15 @@ def _series_and_cp(cur, table, param, base_where, base_args,
                    'in_sel': bool(r[3])}
                   for r in cur.fetchall()]
 
-    cps = _find_change_points(series, b_std) if len(series) >= CP_MIN_SEG * 2 else []
+    ds = _downsample(series)
+    cps = _find_change_points(ds, b_std) if len(ds) >= CP_MIN_SEG * 2 else []
 
     # 변곡점이 선택 구간 안에서 일어났는지 표시 —
+    #   인덱스는 다운샘플된 시계열 기준이므로 그쪽에서 읽는다
     # "이슈 구간에서 수준이 바뀌었다" 를 확인하는 핵심 정보다
     for c in cps:
         i = c['index']
-        c['in_sel'] = bool(series[i]['in_sel']) if 0 <= i < len(series) else False
+        c['in_sel'] = bool(ds[i]['in_sel']) if 0 <= i < len(ds) else False
 
     # ★ 같은 방향 변곡점이 여러 개면 계단이 아니라 드리프트다.
     #   이진 분할은 완만한 추세를 여러 계단으로 쪼개므로, 그대로 보여주면
