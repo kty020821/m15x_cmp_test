@@ -201,8 +201,10 @@ def issue_scan(request):
     if not _safe(oper_id):
         return _fail('oper_id 형식 오류', {'items': []})
     try:
+        # params 를 주면 그 묶음만 — 화면이 나눠 호출해 진행률을 보여준다
         res = iss.scan_all(oper_id, b.get('lot_cd') or None,
-                           b.get('sel') or {}, unit=b.get('unit') or 'lot')
+                           b.get('sel') or {}, unit=b.get('unit') or 'lot',
+                           params=b.get('params') or None)
         return JsonResponse({'ok': True, **res})
     except ValueError as e:
         return _fail(str(e), {'items': []})
