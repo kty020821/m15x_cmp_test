@@ -352,7 +352,7 @@ def _find_change_points(series, base_std, depth=0, offset=0, found=None,
 # 본체
 # ══════════════════════════════════════════════════════════
 def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
-             params=None):
+             params=None, with_series=False, series_points=400):
     """
     등록된 전 파라미터를 한 번에 스캔한다.
 
@@ -372,6 +372,9 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
     ★ params 를 주면 그 파라미터만 처리한다.
       화면이 전체를 몇 덩어리로 나눠 호출해 진행률을 보여주기 위한 것 —
       한 번에 100개를 처리하면 몇십 초 동안 아무 표시도 못 한다.
+
+    ★ with_series=True 면 각 항목에 차트용 시계열을 함께 담는다.
+      리포트(HTML) 생성에만 쓴다 — 화면 표에는 필요 없고 응답만 무거워진다.
     """
     from . import param_types as pt
 
@@ -420,8 +423,12 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
     for p in params:
         ptype = pt.classify(p)
         s_in, s_out = stat_in.get(p, {}), stat_out.get(p, {})
+        ser = series_map.get(p, [])
         it = _judge_one(p, ptype, s_in, s_out, out_cnt.get(p, 0),
-                        series_map.get(p, []), sel_flag)
+                        ser, sel_flag)
+        if with_series:
+            # 리포트 차트용 — 점이 너무 많으면 파일이 커지므로 줄인다
+            it['series'] = _downsample(ser, series_points)
         items.append(it)
 
     items.sort(key=lambda x: -x['severity'])
