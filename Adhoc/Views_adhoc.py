@@ -275,7 +275,9 @@ def issue_report(request):
     try:
         html = rep.build_report(
             oper_id, g.get('lot_cd') or None, sel,
-            unit=g.get('unit') or 'lot', params=params or None,
+            # ★ 기본값으로 덮지 않는다 — 없으면 build_report 가
+            #   그 사실을 리포트에 표기하도록 그대로 넘긴다
+            unit=g.get('unit'), params=params or None,
             only_issue=only, title=g.get('title') or '')
     except ValueError as e:
         html = f'<h3>리포트를 만들지 못했습니다</h3><p>{e}</p>'
