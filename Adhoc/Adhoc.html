@@ -312,6 +312,8 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
     <div class="sec-h"><h3>이슈 구간 분석</h3>
       <span class="sub" id="iz-target"></span>
       <span class="right">
+        <a class="btn sm" id="iz-analysis" target="_blank" href="#"
+           title="트렌드·상관 산점도·요인 분포·AI 진단">분석 페이지에서 열기</a>
         <button class="btn sm" onclick="closeIssue()">닫기</button>
       </span></div>
 
@@ -391,6 +393,7 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
               <span class="msg" id="iz-paste-msg" style="color:var(--tx-muted);"></span>
             </div>
             <div class="note">엑셀에서 랏 목록을 복사해 그대로 붙여넣으면 됩니다.
+              LOT_ID 는 앞 7자리로 대조하므로 9자리로 붙여넣어도 맞습니다.
               조회 결과에 없는 랏은 알려 드립니다.</div>
           </div>
         </div>
@@ -587,7 +590,7 @@ async function loadJobs() {
           ? `<button class="btn sm pri" onclick="runJob(${job.job_id})">실행</button>` : ''}
         ${open}
         ${job.status === '완료' && job.rows > 0
-          ? `<button class="btn sm" onclick="openIssue('${esc(job.oper_id)}','${esc(c.oper_id||'')}')">이슈 분석</button>` : ''}
+          ? `<button class="btn sm" onclick="openIssue('${esc(job.oper_id)}','${esc(c.oper_id||'')}','${esc((job.lot_cds||[])[0]||'')}')">이슈 분석</button>` : ''}
         <button class="btn sm danger" onclick="delJob(${job.job_id})">삭제</button></td>
     </tr>`;
   }).join('');
@@ -628,7 +631,7 @@ async function delJob(id) {
      선택 구간이 전체에 섞이면 이상값이 기준을 끌어올려
      차이가 실제보다 작게 보인다.
    ══════════════════════════════════════════════════ */
-let izOper = null, izLots = [], izLotSel = new Set();
+let izOper = null, izLots = [], izLotSel = new Set(), izScanLot = '';
 let izParams = [], izScan = null, izSel = null, izPick = null;
 
 function izMsg(t, err) {
@@ -637,8 +640,9 @@ function izMsg(t, err) {
   el.textContent = t;
 }
 
-async function openIssue(operId, label) {
+async function openIssue(operId, label, lotCd) {
   izOper = operId;
+  izScanLot = lotCd || '';
   izLotSel = new Set();
   document.getElementById('iz-target').textContent =
     `${label || operId} — 조회 결과 안에서 이슈 구간을 지정하세요`;
@@ -649,6 +653,8 @@ async function openIssue(operId, label) {
   setReportEnabled(false);
   izMsg('');
   await loadIssueContext(true);
+  const al = document.getElementById('iz-analysis');
+  if (al) al.href = analysisUrl('');
   document.getElementById('use-range').checked = true;
   document.getElementById('use-lots').checked = false;
   setLotInput('pick');
@@ -771,6 +777,12 @@ function setLotInput(m) {
 
 /* 붙여넣은 랏 목록을 반영한다.
    조회 결과에 없는 랏은 알려 준다 — 오타나 다른 공정 랏일 수 있다. */
+/* ★ LOT_ID 는 기본 7자리인데 간혹 9자리가 섞인다.
+   같은 랏인데 표기가 갈리면 선택이 안 맞으므로 항상 앞 7자리로 비교한다.
+   (웨이퍼 단위 식별이 필요하면 이 7자리 뒤에 wf_id 를 붙인다) */
+const LOT_KEY_LEN = 7;
+const lotKey = v => String(v || '').trim().toUpperCase().slice(0, LOT_KEY_LEN);
+
 function applyLotPaste() {
   const raw = document.getElementById('iz-lotpaste').value || '';
   const want = raw.split(/[\s,;\t\n]+/).map(x => x.trim()).filter(Boolean);
@@ -778,11 +790,13 @@ function applyLotPaste() {
     document.getElementById('iz-paste-msg').textContent = '입력된 랏이 없습니다';
     return;
   }
-  const known = new Map(izLots.map(l => [String(l.lot_id).toUpperCase(), l.lot_id]));
+  // 7자리 키로 대조 — 9자리로 붙여넣어도 맞는다
+  const known = new Map(izLots.map(l => [lotKey(l.lot_id), l.lot_id]));
   const hit = [], miss = [];
   want.forEach(w => {
-    const k = known.get(w.toUpperCase());
-    if (k) hit.push(k); else miss.push(w);
+    const k = known.get(lotKey(w));
+    if (k && !hit.includes(k)) hit.push(k);
+    else if (!k) miss.push(w);
   });
 
   izLotSel = new Set(hit);
@@ -790,7 +804,7 @@ function applyLotPaste() {
   document.getElementById('use-lots').checked = true;
   syncSelUI();
   document.getElementById('iz-paste-msg').textContent =
-    `${hit.length}개 적용` +
+    `${hit.length}개 적용 (앞 ${LOT_KEY_LEN}자리로 대조)` +
     (miss.length ? ` · 조회 결과에 없는 랏 ${miss.length}개: ${miss.slice(0, 5).join(', ')}${miss.length > 5 ? ' 외' : ''}` : '');
 }
 
@@ -902,6 +916,19 @@ function showScanError(err, batch) {
     </div>`}
     <div class="note">요청한 파라미터: ${esc((batch || []).slice(0, 5).join(', '))}
       ${(batch || []).length > 5 ? ` 외 ${batch.length - 5}개` : ''}</div>`;
+}
+
+/* 1회성 결과를 분석 페이지에서 이어서 본다.
+   ★ 여기(이슈 분석)는 '무엇이 변했나' 를 찾는 화면이고,
+     분석 페이지는 트렌드 드래그·상관 산점도·요인 분포·AI 진단으로
+     '왜 변했나' 를 파는 화면이다. 파라미터까지 넘겨 바로 그려지게 한다. */
+function analysisUrl(param) {
+  const q = new URLSearchParams({
+    oper: izOper || '',
+    lot: document.getElementById('iz-lotcd').value || (izScanLot || ''),
+    param: param || '',
+  });
+  return URL_ANALYSIS + '?' + q.toString();
 }
 
 /* ── 리포트 ───────────────────────────────────
@@ -1231,7 +1258,11 @@ function detailRow(it) {
       ${r.sigma == null ? '' : `<span>차이 <b>${r.sigma > 0 ? '+' : ''}${r.sigma}σ</b></span>`}
       ${r.spread ? `<span>산포비 <b>${r.spread}배</b></span>` : ''}
       <span>범위밖 <b>${r.out_cnt}장</b></span>
-      <span style="margin-left:auto;">
+      <span style="margin-left:auto;display:flex;gap:6px;">
+        <a class="btn sm" target="_blank"
+           onclick="event.stopPropagation();"
+           href="${analysisUrl(it.param)}"
+           title="트렌드·상관 산점도·요인 분포·AI 진단으로 이어서 봅니다">분석 페이지에서 열기</a>
         <button class="btn sm" onclick="event.stopPropagation();pickParam(${izScan.items.indexOf(it)})">닫기</button>
       </span>
     </div>
