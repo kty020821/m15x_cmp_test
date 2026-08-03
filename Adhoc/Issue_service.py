@@ -59,6 +59,19 @@ CP_MIN_SIGMA = 0.8    # 전후 평균 차이가 이 σ 미만이면 무시 (미�
 # LOT 판정
 LOT_MIN_N    = 3      # 랏당 웨이퍼가 이보다 적으면 신뢰도 낮음 표기
 
+# ── LOT_ID 자릿수 ─────────────────────────────────────────
+#   LOT_ID 는 기본 7자리인데 간혹 9자리가 섞인다(뒤에 덧붙는 자리).
+#   같은 랏인데 표기가 갈리면 선택·집계·판정이 전부 어긋나므로
+#   비교와 그룹핑은 항상 앞 7자리로 맞춘다.
+#   (웨이퍼 단위 식별이 필요하면 이 7자리 뒤에 wf_id 를 붙인다)
+LOT_KEY_LEN = 7
+LOT_KEY_SQL = f'left("LOT_ID", {LOT_KEY_LEN})'
+
+
+def lot_key(v):
+    """랏 표기를 비교용 키로 — 앞 7자리"""
+    return str(v or '').strip().upper()[:LOT_KEY_LEN]
+
 
 def _conn():
     return connections['analysis_db']
@@ -135,12 +148,14 @@ def context(oper_id, lot_cd=None):
 
         lot_ids = []
         if 'LOT_ID' in have:
-            # 랏 선택 후보 — 시간순이어야 눈으로 찾기 쉽다
+            # 랏 선택 후보 — 시간순이어야 눈으로 찾기 쉽다.
+            # ★ 7자리 키로 묶는다. 9자리 표기가 섞이면 같은 랏이
+            #   목록에 두 번 나와 고를 때 혼란스럽다.
             cur.execute(f'''
-                SELECT "LOT_ID", COUNT(*), MIN("DATE")
+                SELECT {LOT_KEY_SQL}, COUNT(*), MIN("DATE")
                 FROM {table} {where}
                 {"AND" if where else "WHERE"} "LOT_ID" IS NOT NULL
-                GROUP BY "LOT_ID" ORDER BY MIN("DATE")
+                GROUP BY {LOT_KEY_SQL} ORDER BY MIN("DATE")
             ''', args)
             lot_ids = [{'lot_id': r[0], 'n': r[1],
                         'date': str(r[2])[:19] if r[2] else ''}
@@ -188,15 +203,17 @@ def _sel_clause(sel, have):
         return ('("DATE" >= %s AND "DATE" <= %s)', [d1, d2], label)
 
     def _lots():
-        lots = [str(v).strip() for v in (sel.get('lot_ids') or []) if str(v).strip()]
-        if not lots:
+        raw = [str(v).strip() for v in (sel.get('lot_ids') or []) if str(v).strip()]
+        if not raw:
             raise ValueError('이슈 랏(LOT_ID)을 하나 이상 지정하세요')
         if 'LOT_ID' not in have:
             raise ValueError('이 테이블에 LOT_ID 컬럼이 없습니다')
-        ph = ",".join(["%s"] * len(lots))
-        return (f'("LOT_ID" IN ({ph}))', lots,
-                f'랏 {len(lots)}개 ({", ".join(lots[:5])}'
-                f'{" 외" if len(lots) > 5 else ""})')
+        # ★ 7자리 키로 비교한다 — 9자리 표기가 섞여도 같은 랏으로 잡힌다
+        keys = sorted({lot_key(v) for v in raw})
+        ph = ",".join(["%s"] * len(keys))
+        return (f'({LOT_KEY_SQL} IN ({ph}))', keys,
+                f'랏 {len(keys)}개 ({", ".join(keys[:5])}'
+                f'{" 외" if len(keys) > 5 else ""})')
 
     if mode == 'range':
         return _range()
@@ -223,6 +240,41 @@ def _sel_clause(sel, have):
         return (f'(id IN ({ph}))', ids, f'웨이퍼 {len(ids)}장')
 
     raise ValueError(f'알 수 없는 구간 지정 방식: {mode}')
+
+
+def _part_clauses(sel, have):
+    """
+    기간·랏 조건을 각각 돌려준다 (없으면 None).
+
+    ★ 화면에서 색을 셋으로 나누기 위한 것 —
+      이슈 구간 전체는 한 색, 그중 지정한 랏은 다른 색으로 보여 주려면
+      점마다 '구간에 속하는지' 와 '지정 랏인지' 를 따로 알아야 한다.
+      판정용 선택 집합(_sel_clause)은 combine 규칙에 따라 합쳐진 것이라
+      그것만으로는 둘을 구분할 수 없다.
+    """
+    mode = (sel or {}).get('mode', 'range')
+    rng = lots = None
+
+    if mode in ('range', 'both'):
+        d1 = str(sel.get('date_from') or '').strip()
+        d2 = str(sel.get('date_to') or '').strip()
+        if d1 and d2:
+            if d1 > d2:
+                d1, d2 = d2, d1
+            if len(d1) == 10:
+                d1 = d1 + ' 00:00:00'
+            if len(d2) == 10:
+                d2 = d2 + ' 23:59:59'
+            rng = ('("DATE" >= %s AND "DATE" <= %s)', [d1, d2])
+
+    if mode in ('lots', 'both') and 'LOT_ID' in have:
+        keys = sorted({lot_key(v) for v in (sel.get('lot_ids') or [])
+                       if str(v).strip()})
+        if keys:
+            ph = ",".join(["%s"] * len(keys))
+            lots = (f'({LOT_KEY_SQL} IN ({ph}))', keys)
+
+    return rng, lots
 
 
 def _stats(cur, table, param, where, args):
@@ -421,9 +473,11 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
                                   stat_out, CHUNK)
 
         # ── 3. 변곡점용 시계열 (랏 평균, 한 번에) ────────
+        parts = _part_clauses(sel, have)
         series_map, sel_flag = _bulk_series(cur, table, params,
                                             base_where, base_args,
-                                            sel_sql, sel_args, have, unit)
+                                            sel_sql, sel_args, have, unit,
+                                            parts=parts)
 
     # ── 4. 파라미터별 판정 ───────────────────────────────
     items = []
@@ -507,34 +561,51 @@ def _bulk_out_count(cur, table, params, where, args, stat_out, chunk):
 
 
 def _bulk_series(cur, table, params, base_where, base_args,
-                 sel_sql, sel_args, have, unit):
+                 sel_sql, sel_args, have, unit, parts=None):
     """
     전 파라미터의 시계열을 한 번에 읽는다.
 
     기본은 랏 평균 — (랏 수 × 파라미터 수) 라 가볍고 노이즈도 적다.
     웨이퍼 단위는 파라미터가 많으면 메모리가 위험해 상세 보기에서만 쓴다.
+
+    parts 를 주면 구간/랏 소속을 따로 담는다 (3색 표시용).
     """
+    rng, lots = (parts or (None, None))
+    extra, extra_args = [], []
+    if rng:
+        extra.append(rng[0]); extra_args += rng[1]
+    else:
+        extra.append('FALSE')
+    if lots:
+        extra.append(lots[0]); extra_args += lots[1]
+    else:
+        extra.append('FALSE')
+
     if unit == 'lot' and 'LOT_ID' in have:
         aggs = ", ".join(f'AVG("{p}")' for p in params)
+        eagg = ", ".join(f'BOOL_OR({e})' for e in extra)
         cur.execute(f'''
-            SELECT MIN("DATE"), "LOT_ID", BOOL_OR({sel_sql}), {aggs}
+            SELECT MIN("DATE"), {LOT_KEY_SQL}, BOOL_OR({sel_sql}), {eagg}, {aggs}
             FROM {table} WHERE {base_where}
-            GROUP BY "LOT_ID" ORDER BY MIN("DATE")
-        ''', sel_args + base_args)
+            GROUP BY {LOT_KEY_SQL} ORDER BY MIN("DATE")
+        ''', sel_args + extra_args + base_args)
         rows = cur.fetchall()
-        labels = [{'x': str(r[0])[:19], 'label': r[1], 'in_sel': bool(r[2])}
+        labels = [{'x': str(r[0])[:19], 'label': r[1], 'in_sel': bool(r[2]),
+                   'in_range': bool(r[3]), 'in_lots': bool(r[4])}
                   for r in rows]
-        offset = 3
+        offset = 5
     else:
         cols = ", ".join(f'"{p}"' for p in params)
+        esel = ", ".join(f'({e})' for e in extra)
         cur.execute(f'''
-            SELECT "DATE", ({sel_sql}), {cols}
+            SELECT "DATE", ({sel_sql}), {esel}, {cols}
             FROM {table} WHERE {base_where} ORDER BY "DATE"
-        ''', sel_args + base_args)
+        ''', sel_args + extra_args + base_args)
         rows = cur.fetchall()
-        labels = [{'x': str(r[0])[:19], 'label': '', 'in_sel': bool(r[1])}
+        labels = [{'x': str(r[0])[:19], 'label': '', 'in_sel': bool(r[1]),
+                   'in_range': bool(r[2]), 'in_lots': bool(r[3])}
                   for r in rows]
-        offset = 2
+        offset = 4
 
     series_map = {}
     for j, p in enumerate(params):
@@ -543,7 +614,9 @@ def _bulk_series(cur, table, params, base_where, base_args,
             v = r[offset + j]
             if v is not None:
                 pts.append({'x': labels[i]['x'], 'v': float(v),
-                            'in_sel': labels[i]['in_sel']})
+                            'in_sel': labels[i]['in_sel'],
+                            'in_range': labels[i]['in_range'],
+                            'in_lots': labels[i]['in_lots']})
         series_map[p] = pts
     return series_map, labels
 
@@ -793,9 +866,10 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
                                        sel_sql, sel_args, b_avg, b_std)
 
         # ── 시계열 + 변곡점 ──────────────────────────────
+        parts = _part_clauses(sel, have)
         r['series'], r['change_points'], r['cp_note'] = _series_and_cp(
             cur, table, param, base_where, base_args,
-            sel_sql, sel_args, b_std, unit, have)
+            sel_sql, sel_args, b_std, unit, have, parts=parts)
 
         # 선택 구간 안에서 일어난 변곡점 — 이슈 구간 판정의 직접 근거
         inside = [c for c in r['change_points'] if c.get('in_sel')]
@@ -817,13 +891,343 @@ def _lot_breakdown(cur, table, param, base_where, base_args,
     선택 구간에 든 랏은 in_sel=True 로 표시해, 지목한 랏만 이상한지
     아니면 다른 랏도 같이 이상한지 한눈에 볼 수 있게 한다.
     """
+    # ★ 7자리 키로 그룹 — 9자리가 섞여도 같은 랏으로 묶인다
     cur.execute(f'''
-        SELECT "LOT_ID", COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
+        SELECT {LOT_KEY_SQL}, COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
                MIN("DATE"),
                BOOL_OR({sel_sql}) AS in_sel
         FROM {table}
         WHERE ({base_where}) AND "{param}" IS NOT NULL AND "LOT_ID" IS NOT NULL
-        GROUP BY "LOT_ID" ORDER BY MIN("DATE")
+        GROUP BY {LOT_KEY_SQL} ORDER BY MIN("DATE")
+    ''', sel_args + base_args)
+
+    out = []
+    for lot_id, n, avg, std, dt, in_sel in cur.fetchall():
+        sig = round((float(avg) - b_avg) / b_std, 2) \
+              if (b_std and b_std > 0 and avg is not None) else None
+        st = '정상'
+        if sig is not None:
+            if abs(sig) >= SIGMA_ALERT:
+                st = '이상'
+            elif abs(sig) >= SIGMA_WARN:
+                st = '주의'
+        out.append({
+            'lot_id': lot_id, 'n': n, 'avg': _f(avg), 'std': _f(std),
+            'sigma': sig, 'status': st, 'in_sel': bool(in_sel),
+            'date': str(dt)[:19] if dt else '',
+            'low_n': n < LOT_MIN_N,
+        })
+    return out
+
+
+def _series_and_cp(cur, table, param, base_where, base_args,
+                   sel_sql, sel_args, b_std, unit, have, parts=None):
+    """
+    시계열(차트용)과 변곡점.
+
+    ★ parts=(range_clause, lots_clause) 를 주면 각 점에 in_range / in_lots 를
+      따로 담는다. 화면에서 '이슈 구간 전체'와 '그중 지정한 랏'을
+      다른 색으로 보여 주기 위한 것이다.
+    """
+    rng, lots = (parts or (None, None))
+    extra_sel, extra_args = [], []
+    if rng:
+        extra_sel.append(rng[0]); extra_args += rng[1]
+    else:
+        extra_sel.append('FALSE')
+    if lots:
+        extra_sel.append(lots[0]); extra_args += lots[1]
+    else:
+        extra_sel.append('FALSE')
+
+    if unit == 'lot' and 'LOT_ID' in have:
+        agg = ", ".join(f'BOOL_OR({e})' for e in extra_sel)
+        cur.execute(f'''
+            SELECT {LOT_KEY_SQL}, MIN("DATE"), AVG("{param}"), COUNT(*),
+                   BOOL_OR({sel_sql}), {agg}
+            FROM {table}
+            WHERE ({base_where}) AND "{param}" IS NOT NULL
+            GROUP BY {LOT_KEY_SQL} ORDER BY MIN("DATE")
+        ''', sel_args + extra_args + base_args)
+        series = [{'x': str(r[1])[:19], 'label': r[0], 'v': float(r[2]),
+                   'n': r[3], 'in_sel': bool(r[4]),
+                   'in_range': bool(r[5]), 'in_lots': bool(r[6])}
+                  for r in cur.fetchall() if r[2] is not None]
+    else:
+        sel_extra = ", ".join(f'({e})' for e in extra_sel)
+        # ★ 웨이퍼 식별자는 '랏 7자리 + wf_id' 로 만든다.
+        #   LOT_ID 에 9자리가 섞여 있어도 같은 규칙으로 붙어야
+        #   다른 화면·다른 조회 결과와 웨이퍼가 서로 맞는다.
+        has_wf = 'WF_ID' in have and 'LOT_ID' in have
+        wf_sel = (f", {LOT_KEY_SQL} || '.' || CAST(\"WF_ID\" AS VARCHAR)"
+                  if has_wf else ", NULL")
+        cur.execute(f'''
+            SELECT id, "DATE", "{param}", ({sel_sql}), {sel_extra}{wf_sel}
+            FROM {table}
+            WHERE ({base_where}) AND "{param}" IS NOT NULL
+            ORDER BY "DATE"
+        ''', sel_args + extra_args + base_args)
+        series = [{'x': str(r[1])[:19], 'id': r[0], 'v': float(r[2]),
+                   'in_sel': bool(r[3]),
+                   'in_range': bool(r[4]), 'in_lots': bool(r[5]),
+                   'label': r[6] or ''}
+                  for r in cur.fetchall()]
+
+    cps = _find_change_points(ds, b_std) if len(ds) >= CP_MIN_SEG * 2 else []
+    for c in cps:
+        i = c['index']
+        c['in_sel'] = bool(ds[i]['in_sel']) if 0 <= i < len(ds) else False
+    it['cps'] = cps
+    it['cp_in_sel'] = any(c.get('in_sel') for c in cps)
+
+    if len(cps) >= 3 and len({c['direction'] for c in cps}) == 1:
+        it['cp_note'] = f"{cps[0]['direction']} 드리프트"
+
+    # 소모품은 σ 판정을 하지 않는다 (누적·리셋)
+    if ptype == 'PART':
+        it['status'] = '참고'
+        it['reasons'] = ['소모품 계열 — 구간 비교 판정 제외 (변곡점만 참고)']
+        if it['cp_in_sel']:
+            c = [x for x in cps if x.get('in_sel')][0]
+            it['reasons'].append(f"{c['at']} {c['direction']} "
+                                 f"({c['shift_sigma']:+.1f}σ)")
+        return it
+
+    level = 0
+    reasons, checks = [], []
+
+    if b_std and b_std > 0:
+        sigma = (s_in['avg'] - b_avg) / b_std
+        it['sigma'] = round(sigma, 2)
+        if abs(sigma) >= SIGMA_ALERT:
+            level = 2
+            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ '
+                           f'({s_in["avg"]} vs {b_avg})')
+            checks.append('L')
+        elif abs(sigma) >= SIGMA_WARN:
+            level = max(level, 1)
+            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ')
+            checks.append('L')
+
+    if out_cnt >= OUT_ALERT:
+        level = 2
+        reasons.append(f'나머지 범위 밖 {out_cnt}장')
+        checks.append('R')
+    elif out_cnt >= OUT_WARN:
+        level = max(level, 1)
+        reasons.append(f'나머지 범위 밖 {out_cnt}장')
+        checks.append('R')
+
+    if b_std and b_std > 0 and s_in.get('std') and s_in['n'] >= MIN_N:
+        ratio = s_in['std'] / b_std
+        it['spread'] = round(ratio, 2)
+        if ratio >= SPREAD_ALERT:
+            level = 2
+            reasons.append(f'산포가 {ratio:.1f}배 — 조건 혼입 의심')
+            checks.append('S')
+        elif ratio >= SPREAD_WARN:
+            level = max(level, 1)
+            reasons.append(f'산포가 {ratio:.1f}배')
+            checks.append('S')
+
+    # ★ 지정 구간 안에서 수준이 바뀐 것이 이 화면의 핵심 신호다
+    if it['cp_in_sel']:
+        c = [x for x in cps if x.get('in_sel')][0]
+        level = max(level, 1)
+        reasons.append(f"{c['at']} 무렵 {c['direction']} "
+                       f"({c['before_avg']} → {c['after_avg']}, "
+                       f"{c['shift_sigma']:+.1f}σ)")
+        checks.append('C')
+
+    it['status']  = ['정상', '주의', '이상'][level]
+    it['checks']  = checks
+    it['reasons'] = reasons or ['나머지와 유의한 차이 없음']
+
+    sev = level * 100
+    if it['sigma'] is not None:
+        sev += min(abs(it['sigma']), 10) * 5
+    sev += min(out_cnt, 25) * 2
+    if it['spread']:
+        sev += max(0, it['spread'] - 1) * 10
+    if it['cp_in_sel']:
+        sev += 40          # 지정 구간 내 변곡은 가장 직접적인 근거
+    it['severity'] = round(sev, 1)
+    return it
+
+
+def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
+    """
+    이슈 구간 분석.
+
+      unit='wafer' 웨이퍼 단위로 변곡점 탐지 (세밀)
+      unit='lot'   랏 평균으로 (노이즈가 적어 큰 흐름이 보인다)
+
+    반환: 판정 · 선택/기준 통계 · 변곡점 · 랏별 · 장비별 · 시계열
+    """
+    if not _safe_name(param):
+        raise ValueError('파라미터 이름 형식 오류')
+
+    table = _table(oper_id)
+    with _conn().cursor() as cur:
+        if not _exists(cur, table):
+            raise ValueError(f'{table} 이 없습니다')
+        have = _cols(cur, table)
+        if param.upper() not in have:
+            raise ValueError(f'{param} 컬럼이 없습니다')
+
+        # 대상 범위 (device 한정)
+        base_where, base_args = '1=1', []
+        if lot_cd and 'LOT_CD' in have:
+            base_where, base_args = '"LOT_CD" = %s', [lot_cd]
+
+        sel_sql, sel_args, sel_desc = _sel_clause(sel, have)
+        in_where  = f'({base_where}) AND ({sel_sql})'
+        out_where = f'({base_where}) AND NOT ({sel_sql})'
+        in_args   = base_args + sel_args
+        out_args  = base_args + sel_args
+
+        s_in  = _stats(cur, table, param, in_where, in_args)
+        s_out = _stats(cur, table, param, out_where, out_args)
+
+        r = {
+            'oper_id': oper_id, 'lot_cd': lot_cd, 'param': param,
+            'sel_desc': sel_desc, 'unit': unit,
+            'sel': s_in, 'base': s_out,
+            'sigma': None, 'out_cnt': 0, 'spread': None,
+            'checks': [], 'reasons': [], 'status': '정상',
+            'change_points': [], 'cp_note': '',
+            'lots': [], 'eqp': [], 'series': [],
+        }
+
+        if not s_in['n']:
+            r['status'] = '데이터없음'
+            r['reasons'] = ['선택한 구간에 해당하는 데이터가 없습니다']
+            return r
+        if not s_out['n']:
+            r['status'] = '기준없음'
+            r['reasons'] = ['선택 구간을 뺀 나머지 데이터가 없어 비교할 수 없습니다']
+            return r
+
+        level = 0
+        reasons, checks = [], []
+        b_avg, b_std = s_out['avg'], s_out['std']
+
+        # ── L 수준이탈 ───────────────────────────────────
+        if b_std and b_std > 0:
+            sigma = (s_in['avg'] - b_avg) / b_std
+            r['sigma'] = round(sigma, 2)
+            if abs(sigma) >= SIGMA_ALERT:
+                level = 2
+                reasons.append(f'선택 구간 평균이 나머지 대비 {sigma:+.1f}σ '
+                               f'({s_in["avg"]} vs {b_avg})')
+                checks.append('L-수준이탈')
+            elif abs(sigma) >= SIGMA_WARN:
+                level = max(level, 1)
+                reasons.append(f'선택 구간 평균이 나머지 대비 {sigma:+.1f}σ')
+                checks.append('L-수준이탈')
+
+        # ── R 범위이탈 ───────────────────────────────────
+        cur.execute(f'''
+            SELECT COUNT(*) FROM {table}
+            WHERE {in_where} AND "{param}" IS NOT NULL
+              AND ("{param}" < %s OR "{param}" > %s)
+        ''', in_args + [s_out['min'], s_out['max']])
+        out_cnt = cur.fetchone()[0]
+        r['out_cnt'] = out_cnt
+        if out_cnt >= OUT_ALERT:
+            level = 2
+            reasons.append(f'나머지 범위({s_out["min"]}~{s_out["max"]}) 밖 '
+                           f'웨이퍼 {out_cnt}장')
+            checks.append('R-범위이탈')
+        elif out_cnt >= OUT_WARN:
+            level = max(level, 1)
+            reasons.append(f'나머지 범위 밖 웨이퍼 {out_cnt}장')
+            checks.append('R-범위이탈')
+
+        # ── S 산포확대 ───────────────────────────────────
+        if b_std and b_std > 0 and s_in['std'] and s_in['n'] >= MIN_N:
+            ratio = s_in['std'] / b_std
+            r['spread'] = round(ratio, 2)
+            if ratio >= SPREAD_ALERT:
+                level = 2
+                reasons.append(f'선택 구간 산포가 나머지의 {ratio:.1f}배 '
+                               f'(σ {s_in["std"]} vs {b_std}) — 조건 혼입 의심')
+                checks.append('S-산포확대')
+            elif ratio >= SPREAD_WARN:
+                level = max(level, 1)
+                reasons.append(f'선택 구간 산포가 나머지의 {ratio:.1f}배')
+                checks.append('S-산포확대')
+
+        # ── E 단독이탈 (장비·챔버) ───────────────────────
+        key = 'EQP_CH_ID' if 'EQP_CH_ID' in have else (
+              'EQP_ID' if 'EQP_ID' in have else None)
+        if key:
+            cur.execute(f'''
+                SELECT "{key}", COUNT(*), AVG("{param}")
+                FROM {table}
+                WHERE {in_where} AND "{param}" IS NOT NULL
+                  AND COALESCE("{key}", '') <> ''
+                GROUP BY "{key}" ORDER BY 1
+            ''', in_args)
+            for eqp, n, avg in cur.fetchall():
+                es = round((float(avg) - b_avg) / b_std, 2) \
+                     if b_std and b_std > 0 else None
+                r['eqp'].append({'eqp': eqp, 'n': n, 'avg': _f(avg),
+                                 'sigma': es})
+            if len(r['eqp']) >= 2:
+                hot  = [e for e in r['eqp']
+                        if e['sigma'] is not None and abs(e['sigma']) >= EQP_SIGMA]
+                calm = [e for e in r['eqp']
+                        if e['sigma'] is not None and abs(e['sigma']) < SIGMA_WARN]
+                if len(hot) == 1 and calm:
+                    level = 2
+                    reasons.append(f"{hot[0]['eqp']} 단독 이탈 "
+                                   f"({hot[0]['sigma']:+.1f}σ, {hot[0]['n']}장)")
+                    checks.append('E-단독이탈')
+
+        r['status']  = ['정상', '주의', '이상'][level]
+        r['checks']  = checks
+        r['reasons'] = reasons or ['나머지 구간과 유의한 차이가 없습니다']
+
+        # ── 랏별 판정 — "특정 랏만 이상했나" ─────────────
+        if 'LOT_ID' in have:
+            r['lots'] = _lot_breakdown(cur, table, param, base_where, base_args,
+                                       sel_sql, sel_args, b_avg, b_std)
+
+        # ── 시계열 + 변곡점 ──────────────────────────────
+        parts = _part_clauses(sel, have)
+        r['series'], r['change_points'], r['cp_note'] = _series_and_cp(
+            cur, table, param, base_where, base_args,
+            sel_sql, sel_args, b_std, unit, have, parts=parts)
+
+        # 선택 구간 안에서 일어난 변곡점 — 이슈 구간 판정의 직접 근거
+        inside = [c for c in r['change_points'] if c.get('in_sel')]
+        if inside:
+            c = inside[0]
+            r['reasons'].append(
+                f"선택 구간 내 {c['at']} 무렵 수준이 {c['direction']} "
+                f"({c['before_avg']} → {c['after_avg']}, {c['shift_sigma']:+.1f}σ)")
+            if 'C-변곡점' not in r['checks']:
+                r['checks'].append('C-변곡점')
+
+    return r
+
+
+def _lot_breakdown(cur, table, param, base_where, base_args,
+                   sel_sql, sel_args, b_avg, b_std):
+    """
+    랏별 평균과 이탈 정도.
+    선택 구간에 든 랏은 in_sel=True 로 표시해, 지목한 랏만 이상한지
+    아니면 다른 랏도 같이 이상한지 한눈에 볼 수 있게 한다.
+    """
+    # ★ 7자리 키로 그룹 — 9자리가 섞여도 같은 랏으로 묶인다
+    cur.execute(f'''
+        SELECT {LOT_KEY_SQL}, COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
+               MIN("DATE"),
+               BOOL_OR({sel_sql}) AS in_sel
+        FROM {table}
+        WHERE ({base_where}) AND "{param}" IS NOT NULL AND "LOT_ID" IS NOT NULL
+        GROUP BY {LOT_KEY_SQL} ORDER BY MIN("DATE")
     ''', sel_args + base_args)
 
     out = []
