@@ -652,8 +652,9 @@ ssTech.setOptions(optsFromSelect('raw-tech'));
    ══════════════════════════════════════════════════ */
 async function openFromUrl() {
   const q = new URLSearchParams(location.search);
-  const oper = q.get('oper');
-  const lot  = q.get('lot');
+  const oper  = q.get('oper');
+  const lot   = q.get('lot');
+  const param = q.get('param');
   if (!oper) return;
 
   const isAdhoc = /^ADHOC_/i.test(oper);
@@ -669,6 +670,22 @@ async function openFromUrl() {
     if (sub) sub.textContent =
       `1회성 조회 결과를 분석 중입니다 (${oper}) — 정기 적재 데이터가 아닙니다`;
   }
+
+  /* ★ param 까지 주면 그것으로 바로 조회한다.
+     1회성 조회 결과에서 이상한 파라미터를 찾은 뒤 곧바로 트렌드·상관·요인·AI
+     분석으로 넘어올 수 있게 하기 위한 것 — 여기서 다시 고르게 하면
+     방금 본 것을 또 찾아야 한다.
+     onOperChange 가 파라미터 목록을 비동기로 채우므로 채워질 때까지 기다린다. */
+  if (!param) return;
+  for (let i = 0; i < 40; i++) {
+    if (corrParams && corrParams.length) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  if (!corrParams || !corrParams.includes(param)) return;
+
+  ssParam.setValue(param, param);
+  if (!ssCorrX.value) ssCorrX.setValue(param, param);
+  runQuery();                          // 바로 트렌드까지 그린다
 }
 
 // 범례는 항상 하나가 선택돼 있어야 한다
