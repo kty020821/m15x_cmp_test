@@ -43,19 +43,35 @@ equipment/param_types.py
 import re
 
 # ── 타입 목록 (화면 드롭박스 순서) ────────────────────────
-TYPES = ['THK', 'TIME', 'PRESSURE', 'PART', 'DEFECT', 'ETC']
+TYPES = ['THK', 'TIME', 'PRESSURE', 'PART', 'RESPONSE', 'DEFECT', 'ETC']
+
+# 규칙을 고칠 때마다 올린다.
+# 배포된 파일이 최신인지 화면에서 확인하는 용도 —
+# "고쳤는데 반영이 안 된다" 의 대부분은 파일이 안 올라간 것이다.
+RULES_VERSION = '2026-08-10 (RESP_/DEF_ 접두어 우선, A숫자 PRESSURE)'
 
 TYPE_LABELS = {
     'THK':      '두께·제거량',
     'TIME':     'Polishing Time',
     'PRESSURE': '압력',
     'PART':     '소모품 (Pad/Head/Disk)',
+    'RESPONSE': 'Response 계측',
     'DEFECT':   'Defect',
     'ETC':      '기타',
 }
 
+# ── Inline 계측 접두어 ────────────────────────────────────
+#   Response·Defect 컬럼은 merge 단계에서 이 접두어를 붙여 만든다.
+#   RESP_<STEP>_<PARAM> / DEF_<STEP>_<PARAM>
+#   ★ 접두어로 판정하는 이유: 이름 안쪽에 THK·TIME 같은 단어가 들어 있어도
+#     그건 공정 파라미터가 아니라 계측 결과다. 다른 규칙보다 먼저 본다.
+PREFIX_RESP = 'RESP_'
+PREFIX_DEF  = 'DEF_'
+
 # 평균±σ 규칙으로 판정하는 타입 (계측값 계열)
-MEASURED_TYPES = {'THK', 'TIME', 'PRESSURE', 'ETC'}
+#   RESPONSE 는 계측값이므로 평균±σ 로 판정한다.
+#   DEFECT 는 카운트라 중앙값 배수, PART 는 소모품이라 판정 제외.
+MEASURED_TYPES = {'THK', 'TIME', 'PRESSURE', 'RESPONSE', 'ETC'}
 
 
 # ══════════════════════════════════════════════════════════
@@ -112,6 +128,12 @@ def classify(param):
     if not p:
         return 'ETC'
 
+    # ★ 접두어가 최우선 — RESP_ADI_CD_THK 를 THK 로 잘못 잡으면 안 된다
+    if p.startswith(PREFIX_RESP):
+        return 'RESPONSE'
+    if p.startswith(PREFIX_DEF):
+        return 'DEFECT'
+
     if RE_DEFECT.search(p):
         return 'DEFECT'
     if RE_THK_CORE.search(p):
@@ -154,3 +176,31 @@ def label(t):
 def options():
     """화면 드롭박스용 [(값, 표시명), ...]"""
     return [(t, f'{t} — {TYPE_LABELS[t]}') for t in TYPES]
+
+
+def rule_summary():
+    """
+    지금 서버에 올라와 있는 규칙을 그대로 보여준다.
+
+    "규칙을 고쳤는데 반영이 안 된다" 는 대부분 파일이 배포되지 않은 것이다.
+    화면에서 정규식을 직접 보면 그 자리에서 판별된다.
+    """
+    return {
+        'version': RULES_VERSION,
+        'rules': [
+            {'type': 'RESPONSE', 'pattern': f'{PREFIX_RESP}* (접두어 우선)'},
+            {'type': 'DEFECT',   'pattern': f'{PREFIX_DEF}* | ' + RE_DEFECT.pattern},
+            {'type': 'THK',      'pattern': RE_THK_CORE.pattern},
+            {'type': 'PRESSURE', 'pattern': RE_PRESSURE.pattern +
+                                            ' | ' + RE_PRESSURE_WORD.pattern},
+            {'type': 'PART',     'pattern': RE_PART.pattern +
+                                            ' | TIME 인데 독립 숫자 세그먼트 없음'},
+            {'type': 'TIME',     'pattern': 'TIME + 독립 숫자 세그먼트 (PR_4_TIME)'},
+            {'type': 'THK(2차)', 'pattern': RE_THK_STAT.pattern},
+        ],
+        # 규칙이 살아 있는지 확인용 표본 — 결과가 다르면 옛 파일이다
+        'samples': [{'param': p, 'type': classify(p)} for p in
+                    ('PA_A1', 'PA_Z1', 'BRUSH_CNT', 'RRING_CNT',
+                     'PR_TIME', 'PR_4_TIME', 'CU_THK_AVG', 'CU_RR',
+                     'RESP_ADI_CD_THK', 'DEF_AEI_SCRATCH_CNT')],
+    }
