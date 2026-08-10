@@ -28,8 +28,8 @@ from . import issue_service as iss
 #   ★ 작게 잡아 한 화면·한 페이지에 여러 개가 들어가게 한다.
 #     크게 그리면 파라미터 하나 보려고 계속 스크롤해야 하고
 #     인쇄하면 장수만 늘어난다.
-W, H = 480, 150
-PAD_L, PAD_R, PAD_T, PAD_B = 46, 12, 16, 22
+W, H = 660, 250
+PAD_L, PAD_R, PAD_T, PAD_B = 54, 14, 20, 26
 
 # 상태별 색 — 화면과 같게 맞춘다
 COLORS = {
@@ -152,14 +152,22 @@ def _chart(it):
     #   측정값은 연속 신호가 아니라 웨이퍼·랏 단위의 개별 관측이라
     #   선으로 이으면 없는 추세가 있는 것처럼 보인다.
     #   나머지 → 구간 → 지정 랏 순으로 그려 중요한 점이 위에 오게 한다.
+    #   ★ 같은 색끼리 <g> 로 묶는다. 점마다 fill·opacity·r 을 반복하면
+    #     점이 많을 때 파일이 몇 배로 커진다. 묶으면 좌표만 남는다.
     order = sorted(range(len(ser)),
                    key=lambda i: (bool(ser[i].get('in_range')),
                                   bool(ser[i].get('in_lots'))))
+    #     r 은 <g> 로 상속되지 않으므로 점마다 남기고,
+    #     fill 과 fill-opacity 만 묶는다 (둘 다 상속되는 속성).
+    groups = {}
     for i in order:
         p = ser[i]
-        col, rr, op = _pt_color(p)
-        parts.append(f'<circle cx="{px(i):.1f}" cy="{py(p["v"]):.1f}" '
-                     f'r="{rr}" fill="{col}" opacity="{op}"/>')
+        style = _pt_color(p)
+        groups.setdefault(style, []).append(
+            f'<circle cx="{px(i):.1f}" cy="{py(p["v"]):.1f}" r="{style[1]}"/>')
+    for (col, rr, op), circles in groups.items():
+        parts.append(f'<g fill="{col}" fill-opacity="{op}">'
+                     + ''.join(circles) + '</g>')
 
     # 변곡점
     for c in (it.get('cps') or []):
@@ -238,7 +246,7 @@ table.idx a { color:var(--tx); text-decoration:none; font-weight:700; }
 .tag { display:inline-block; font-size:10px; font-weight:700; color:var(--tx2);
   background:var(--bg2); border:1px solid var(--bd); border-radius:20px;
   padding:1px 7px; margin-right:3px; font-family:'SF Mono',monospace; }
-.secs { display:grid; grid-template-columns:repeat(auto-fit,minmax(430px,1fr));
+.secs { display:grid; grid-template-columns:repeat(auto-fit,minmax(560px,1fr));
   gap:12px; align-items:start; }
 .sec { border:1px solid var(--bd); border-radius:14px; padding:13px 15px; }
 .sec.bad { border-color:#fecaca; } .sec.warn { border-color:#fde68a; }
@@ -248,8 +256,7 @@ table.idx a { color:var(--tx); text-decoration:none; font-weight:700; }
   color:var(--tx2); margin:6px 0; }
 .kv b { color:var(--tx); font-family:'SF Mono',monospace; }
 .rsn { font-size:11px; color:var(--tx); line-height:1.6; }
-.chart { width:100%; max-width:480px; height:auto; display:block;
-  margin:8px 0 2px; }
+.chart { width:100%; height:auto; display:block; margin:8px 0 2px; }
 .ax { font-size:9px; fill:var(--mut); font-family:'SF Mono',monospace; }
 .cp { font-size:9px; fill:var(--cp); font-weight:700;
   font-family:'SF Mono',monospace; }
@@ -281,7 +288,7 @@ table.idx a { color:var(--tx); text-decoration:none; font-weight:700; }
 
 
 def build_report(oper_id, lot_cd, sel, unit=None, params=None,
-                 only_issue=True, title=''):
+                 only_issue=True, title='', points=None):
     """
     이슈 스캔 결과를 HTML 문자열로 만든다.
 
@@ -299,8 +306,18 @@ def build_report(oper_id, lot_cd, sel, unit=None, params=None,
         print('[report] 요청에 unit 이 없어 기본값(lot)으로 만듭니다 — '
               '화면이 웨이퍼 단위였다면 결과가 다르게 보입니다')
 
+    # 차트에 찍을 점 수. 0 이하면 전부 그린다.
+    #   ★ 점이 많을수록 파일이 커진다 — 점 하나가 SVG 로 약 35바이트라
+    #     10,000점 × 파라미터 20개면 7MB 가 넘는다. 기본값은 그 균형점이다.
+    try:
+        pts_cap = int(points) if points not in (None, '') else 5000
+    except (TypeError, ValueError):
+        pts_cap = 5000
+    if pts_cap <= 0:
+        pts_cap = 10 ** 9          # 전부
+
     res = iss.scan_all(oper_id, lot_cd, sel, unit=unit, params=params,
-                       with_series=True)
+                       with_series=True, series_points=pts_cap)
     items = res.get('items') or []
 
     if only_issue:
