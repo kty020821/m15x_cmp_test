@@ -44,6 +44,7 @@ T_OPER   = 'cmp_cfg_oper'
 T_LOT    = 'cmp_cfg_lot'
 T_PARAM  = 'cmp_cfg_param'
 T_DEFECT = 'cmp_cfg_defect'
+T_RESP   = 'cmp_cfg_response'
 
 # ★ 타입 목록과 분류 규칙은 param_types.py 가 단일 소재지다.
 #   여기서 다시 정의하면 양쪽이 어긋난다.
@@ -117,9 +118,31 @@ def ensure_tables():
               lot_cd  VARCHAR(50),
               step_id VARCHAR(100),
               step_desc VARCHAR(200),
+              param   VARCHAR(100),
               use_yn  VARCHAR(1) DEFAULT 'Y'
             )
         ''')
+        # 기존 테이블에는 param 이 없다 — 있으면 그대로 두고 없으면 추가한다
+        cur.execute(f"ALTER TABLE {T_DEFECT} "
+                    f"ADD COLUMN IF NOT EXISTS param VARCHAR(100)")
+
+        # ── Response 계측 ────────────────────────────────
+        #   Inline 에서 실제로 관리하는 것은 Response 와 Defect 다.
+        #   Defect 과 같은 구조 — 스텝 하나에 관리 파라미터 여러 개,
+        #   파라미터 1개당 1행으로 등록한다.
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {T_RESP} (
+              id BIGSERIAL PRIMARY KEY,
+              oper_id VARCHAR(100),
+              lot_cd  VARCHAR(50),
+              step_id VARCHAR(100),
+              step_desc VARCHAR(200),
+              param   VARCHAR(100),
+              use_yn  VARCHAR(1) DEFAULT 'Y'
+            )
+        ''')
+        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{T_RESP}_oper '
+                    f'ON {T_RESP} (oper_id)')
         for t in (T_LOT, T_PARAM, T_DEFECT):
             cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{t}_oper '
                         f'ON {t} (oper_id)')
@@ -143,7 +166,8 @@ def list_opers():
                    (SELECT COUNT(DISTINCT l.lot_cd) FROM {T_LOT} l
                      WHERE l.oper_id = o.oper_id),
                    (SELECT COUNT(*) FROM {T_PARAM}  p WHERE p.oper_id = o.oper_id),
-                   (SELECT COUNT(*) FROM {T_DEFECT} d WHERE d.oper_id = o.oper_id)
+                   (SELECT COUNT(*) FROM {T_DEFECT} d WHERE d.oper_id = o.oper_id),
+                   (SELECT COUNT(*) FROM {T_RESP}   s WHERE s.oper_id = o.oper_id)
             FROM {T_OPER} o ORDER BY o.oper_desc NULLS LAST, o.oper_id
         ''')
         rows = cur.fetchall()
@@ -156,7 +180,7 @@ def list_opers():
         'oper_id': r[0], 'oper_desc': r[1] or '', 'fab': r[2] or '',
         'eq_model': r[3] or '', 'use_yn': r[4] or 'Y',
         'updated_at': str(r[5])[:19] if r[5] else '',
-        'n_lot': r[6], 'n_param': r[7], 'n_defect': r[8],
+        'n_lot': r[6], 'n_param': r[7], 'n_defect': r[8], 'n_resp': r[9],
         'loaded': _an_table(r[0]) in tables,
     } for r in rows]
 
@@ -188,13 +212,24 @@ def get_oper(oper_id):
         params = [{'param': r[0], 'param_type': r[1] or '', 'use_yn': r[2] or 'Y'}
                   for r in cur.fetchall()]
 
+        # Defect · Response — 둘 다 '스텝 + 관리 파라미터 1개' 가 한 행이다
         cur.execute(f'''
-            SELECT lot_cd, step_id, step_desc, use_yn FROM {T_DEFECT}
-            WHERE oper_id = %s ORDER BY lot_cd, step_id
+            SELECT lot_cd, step_id, step_desc, param, use_yn FROM {T_DEFECT}
+            WHERE oper_id = %s ORDER BY lot_cd, step_id, param
         ''', [oper_id])
         defects = [{'lot_cd': r[0] or '', 'step_id': r[1] or '',
-                    'step_desc': r[2] or '', 'use_yn': r[3] or 'Y'}
+                    'step_desc': r[2] or '', 'param': r[3] or '',
+                    'use_yn': r[4] or 'Y'}
                    for r in cur.fetchall()]
+
+        cur.execute(f'''
+            SELECT lot_cd, step_id, step_desc, param, use_yn FROM {T_RESP}
+            WHERE oper_id = %s ORDER BY lot_cd, step_id, param
+        ''', [oper_id])
+        resps = [{'lot_cd': r[0] or '', 'step_id': r[1] or '',
+                  'step_desc': r[2] or '', 'param': r[3] or '',
+                  'use_yn': r[4] or 'Y'}
+                 for r in cur.fetchall()]
 
     return {
         'oper_id': row[0], 'oper_desc': row[1] or '', 'fab': row[2] or '',
@@ -202,12 +237,38 @@ def get_oper(oper_id):
         'pre_oper_desc': row[5] or '', 'pre_oper_param': row[6] or '',
         'use_yn': row[7] or 'Y',
         'lots': lots, 'params': params, 'defects': defects,
+        'resps': resps,
     }
 
 
 # ══════════════════════════════════════════════════════════
 # 저장 / 삭제
 # ══════════════════════════════════════════════════════════
+def type_overview():
+    """
+    전 공정 파라미터의 현재 타입 분포와, ETC 로 남은 이름 목록.
+
+    ETC 목록이 핵심이다 — 규칙이 실제 이름 형태를 못 잡고 있으면
+    여기 그대로 드러난다. (예: 규칙은 (^|_)A\\d 인데 실제 이름이
+    PAA1 처럼 A 앞에 글자가 붙어 있으면 안 걸린다)
+    """
+    ensure_tables()
+    counts, etc = {}, []
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT DISTINCT param, COALESCE(param_type, '')
+            FROM {T_PARAM} ORDER BY param
+        ''')
+        for param, saved in cur.fetchall():
+            t = pt.resolve(param, saved)
+            counts[t] = counts.get(t, 0) + 1
+            if t == 'ETC' and len(etc) < 80:
+                etc.append({'param': param,
+                            'saved': saved or '(자동)',
+                            'auto': pt.classify(param)})
+    return {'counts': counts, 'etc': etc, 'rule': pt.rule_summary()}
+
+
 def type_mismatches():
     """
     저장된 param_type 과 현재 규칙의 자동 분류 결과가 다른 항목.
@@ -315,18 +376,30 @@ def save_oper(d, user=''):
         params.append((name, t,
                        'N' if _up(p.get('use_yn')) == 'N' else 'Y'))
 
-    defects, dseen = [], set()
-    for it in d.get('defects', []):
-        lot  = _up(it.get('lot_cd'))
-        step = _up(it.get('step_id'))
-        if not step:
-            continue
-        key = (lot, step)
-        if key in dseen:
-            continue
-        dseen.add(key)
-        defects.append((lot, step, _s(it.get('step_desc')),
+    def _steps(key):
+        """
+        Defect · Response 공통 — 스텝 + 관리 파라미터 1개가 한 행.
+        중복 판단 키는 (lot_cd, step_id, param) 이다.
+        파라미터가 비어 있어도 스텝만 등록할 수 있게 허용한다
+        (조회 스텝은 정해졌는데 관리 항목이 아직 안 정해진 경우).
+        """
+        out, seen = [], set()
+        for it in d.get(key, []):
+            lot  = _up(it.get('lot_cd'))
+            step = _up(it.get('step_id'))
+            prm  = _up(it.get('param'))
+            if not step:
+                continue
+            k = (lot, step, prm)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append((lot, step, _s(it.get('step_desc')), prm,
                         'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
+        return out
+
+    defects = _steps('defects')
+    resps   = _steps('resps')
 
     with _conn().cursor() as cur:
         cur.execute(f'''
@@ -347,7 +420,7 @@ def save_oper(d, user=''):
               'N' if _up(d.get('use_yn')) == 'N' else 'Y',
               datetime.now(), _s(user)[:100]])
 
-        for t in (T_LOT, T_PARAM, T_DEFECT):
+        for t in (T_LOT, T_PARAM, T_DEFECT, T_RESP):
             cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
 
         for lot, rec, use in lots:
@@ -358,13 +431,16 @@ def save_oper(d, user=''):
             cur.execute(f'INSERT INTO {T_PARAM} (oper_id, param, param_type, '
                         f'use_yn) VALUES (%s,%s,%s,%s)',
                         [oper_id, name, t, use])
-        for lot, step, desc, use in defects:
-            cur.execute(f'INSERT INTO {T_DEFECT} (oper_id, lot_cd, step_id, '
-                        f'step_desc, use_yn) VALUES (%s,%s,%s,%s,%s)',
-                        [oper_id, lot, step, desc, use])
+        for tbl, rows_ in ((T_DEFECT, defects), (T_RESP, resps)):
+            for lot, step, desc, prm, use in rows_:
+                cur.execute(f'INSERT INTO {tbl} (oper_id, lot_cd, step_id, '
+                            f'step_desc, param, use_yn) '
+                            f'VALUES (%s,%s,%s,%s,%s,%s)',
+                            [oper_id, lot, step, desc, prm, use])
 
     return {'oper_id': oper_id, 'lots': len(lots),
-            'params': len(params), 'defects': len(defects)}
+            'params': len(params), 'defects': len(defects),
+            'resps': len(resps)}
 
 
 def delete_oper(oper_id):
@@ -434,23 +510,97 @@ def build_config_df(include_unused=False):
     return pd.DataFrame(rows, columns=FLAT_COLS)
 
 
-def build_defect_config_df(include_unused=False):
+# ══════════════════════════════════════════════════════════
+# Response · Defect 컬럼 이름 규칙
+#   ★ 여기가 단일 소재지다. merge 코드·화면 미리보기·점검이 모두 이 함수를
+#     통해야 이름이 갈리지 않는다. 규칙을 바꿀 일이 생겨도 한 곳만 고친다.
+# ══════════════════════════════════════════════════════════
+STEP_PREFIX = {'resp': 'RESP', 'def': 'DEF'}
+
+
+def _slug_name(v):
+    """컬럼명에 쓸 수 있게 정리 — 영숫자·_ 만 남기고 대문자로"""
+    out = re.sub(r'[^0-9A-Za-z_]+', '_', str(v or '').strip().upper())
+    return re.sub(r'_+', '_', out).strip('_')
+
+
+def step_column(kind, step, param):
     """
-    defect 계측 스텝 목록 — defect_service 가 조회 조건을 만들 때 쓴다.
-    컬럼: OPER_ID, LOT_CD, STEP_ID, STEP_DESC
+    Response·Defect 측정값이 들어갈 최종 컬럼 이름.
+
+      kind  'resp' | 'def'
+      step  측정 스텝 명 (스텝 이름이 있으면 그것, 없으면 STEP_ID)
+      param 관리 파라미터
+
+    예) step_column('resp', 'ADI_CD', 'THK') -> 'RESP_ADI_CD_THK'
+
+    ★ 스텝 명을 넣는 이유: 같은 파라미터를 여러 스텝에서 관리하면
+      스텝 없이는 컬럼이 겹친다.
+    ★ 접두어를 두는 이유: 이름만으로 resp/def 를 걸러낼 수 있어야 하고,
+      공정 파라미터와 이름이 겹쳐도(THK 등) 충돌하지 않는다.
+    """
+    pre = STEP_PREFIX.get(str(kind).lower(), 'RESP')
+    st, pm = _slug_name(step), _slug_name(param)
+    if not pm:
+        return ''                       # 파라미터가 없으면 컬럼도 없다
+    return f'{pre}_{st}_{pm}' if st else f'{pre}_{pm}'
+
+
+def _step_config_df(table, include_unused=False):
+    """
+    Defect · Response 계측 스텝 목록 (구조가 같다).
+    컬럼: OPER_ID, LOT_CD, STEP_ID, STEP_DESC, PARAM
     """
     ensure_tables()
     cond = "" if include_unused else "WHERE COALESCE(use_yn,'Y') <> 'N'"
     with _conn().cursor() as cur:
         cur.execute(f'''
-            SELECT oper_id, lot_cd, step_id, step_desc
-            FROM {T_DEFECT} {cond} ORDER BY oper_id, lot_cd, step_id
+            SELECT oper_id, lot_cd, step_id, step_desc, param
+            FROM {table} {cond} ORDER BY oper_id, lot_cd, step_id, param
         ''')
         rows = cur.fetchall()
-    return pd.DataFrame(
-        [{'OPER_ID': r[0], 'LOT_CD': r[1] or '', 'STEP_ID': r[2] or '',
-          'STEP_DESC': r[3] or ''} for r in rows],
-        columns=['OPER_ID', 'LOT_CD', 'STEP_ID', 'STEP_DESC'])
+    kind = 'def' if table == T_DEFECT else 'resp'
+    out = []
+    for r in rows:
+        step_id, desc, prm = r[2] or '', r[3] or '', r[4] or ''
+        out.append({
+            'OPER_ID': r[0], 'LOT_CD': r[1] or '', 'STEP_ID': step_id,
+            'STEP_DESC': desc, 'PARAM': prm,
+            # 스텝 이름이 있으면 그것, 없으면 STEP_ID 로 컬럼을 만든다
+            'COLUMN': step_column(kind, desc or step_id, prm),
+        })
+    return pd.DataFrame(out, columns=['OPER_ID', 'LOT_CD', 'STEP_ID',
+                                      'STEP_DESC', 'PARAM', 'COLUMN'])
+
+
+def build_defect_config_df(include_unused=False):
+    """defect 계측 스텝 목록 — defect_service 가 조회 조건을 만들 때 쓴다"""
+    return _step_config_df(T_DEFECT, include_unused)
+
+
+def build_response_config_df(include_unused=False):
+    """response 계측 스텝 목록 — response 조회 조건을 만들 때 쓴다"""
+    return _step_config_df(T_RESP, include_unused)
+
+
+def response_steps(oper_id, lot_cd=None):
+    """
+    한 공정의 response 스텝·파라미터.
+    반환: [{'step_id','step_desc','params':[...]}]  — 스텝별로 묶어 준다
+    """
+    df = build_response_config_df()
+    df = df[df['OPER_ID'] == str(oper_id).upper()]
+    if lot_cd:
+        df = df[(df['LOT_CD'] == str(lot_cd).upper()) | (df['LOT_CD'] == '')]
+    out = {}
+    for _, r in df.iterrows():
+        k = r['STEP_ID']
+        o = out.setdefault(k, {'step_id': k, 'step_desc': r['STEP_DESC'],
+                               'params': [], 'columns': []})
+        if r['PARAM'] and r['PARAM'] not in o['params']:
+            o['params'].append(r['PARAM'])
+            o['columns'].append(r['COLUMN'])
+    return list(out.values())
 
 
 def defect_steps(oper_id, lot_cd=None):
