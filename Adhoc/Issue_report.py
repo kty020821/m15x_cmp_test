@@ -1,4 +1,3 @@
-
 """
 equipment/issue_report.py
 ════════════════════════════════════════════════════════════
@@ -395,7 +394,10 @@ def build_report(oper_id, lot_cd, sel, unit=None, params=None,
         # ★ 차트마다 실제로 몇 점을 무슨 단위로 그렸는지 적는다.
         #   메타를 못 보고 지나쳐도 여기서 바로 확인된다.
         n_pt = len(it.get('series') or [])
-        cap_txt = f'{n_pt}점 · {unit_txt}'
+        n_raw = it.get('n_raw') or n_pt
+        cap_txt = f'{n_pt:,}점 · {unit_txt}'
+        if n_raw > n_pt:
+            cap_txt += f' (원본 {n_raw:,}점에서 줄임)'
 
         secs.append(f'''
 <div class="sec {cls}" id="p{n}">
