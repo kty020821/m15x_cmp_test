@@ -216,6 +216,15 @@ def prefill(oper_id):
 # 조회 / 삭제
 # ══════════════════════════════════════════════════════════
 def list_jobs(limit=50):
+    """
+    요청 목록.
+
+    ★ 결과 테이블 존재 여부(has_table)를 함께 준다.
+      '완료' 로 남아 있어도 테이블이 없을 수 있다 —
+      0행으로 끝났거나, 보관 기간 정리로 지워졌거나, 저장이 실패한 경우.
+      그걸 모르면 화면이 분석·리포트 버튼을 열어 주고
+      '테이블이 없다' 는 에러로만 알게 된다.
+    """
     ensure_tables()
     with _conn().cursor() as cur:
         cur.execute(f'''
@@ -224,6 +233,10 @@ def list_jobs(limit=50):
             FROM {T_JOB} ORDER BY id DESC LIMIT %s
         ''', [int(limit)])
         rows = cur.fetchall()
+
+        cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE %s",
+                    ['cmp_analysis_adhoc_%'])
+        have_tables = {r[0] for r in cur.fetchall()}
 
     out = []
     for r in rows:
@@ -241,6 +254,8 @@ def list_jobs(limit=50):
             'cond': cond,
             'oper_id': adhoc_oper_id(r[0]),      # 분석 API 에 넘길 값
             'lot_cds': cond.get('lot_cds', []),
+            'has_table': adhoc_table(r[0]) in have_tables,
+            'table': adhoc_table(r[0]),
         })
     return out
 
