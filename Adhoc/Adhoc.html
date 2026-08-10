@@ -445,6 +445,13 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
       <label class="msg" style="color:var(--tx-2);font-weight:700;">
         <input type="checkbox" id="rep-all" style="vertical-align:middle;">
         정상 항목까지 포함</label>
+      <label class="msg" style="color:var(--tx-2);font-weight:700;">
+        차트 점
+        <select id="rep-points" class="btn sm" style="font-weight:700;">
+          <option value="5000">5,000</option>
+          <option value="20000">20,000</option>
+          <option value="0">전부 (파일 커짐)</option>
+        </select></label>
       <span class="msg" id="iz-msg"></span>
     </div>
     <div class="iz-prog" id="iz-prog">
@@ -1032,6 +1039,7 @@ function openReport(download) {
     unit: document.getElementById('iz-unit').value,
     sel: JSON.stringify(izSel),
     only_issue: document.getElementById('rep-all').checked ? '0' : '1',
+    points: document.getElementById('rep-points').value,
     title: `${izOper} 이슈 구간 분석`,
   });
 
