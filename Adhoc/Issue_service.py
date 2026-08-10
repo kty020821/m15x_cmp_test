@@ -411,7 +411,7 @@ def _find_change_points(series, base_std, depth=0, offset=0, found=None,
 # 본체
 # ══════════════════════════════════════════════════════════
 def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
-             params=None, with_series=False, series_points=400):
+             params=None, with_series=False, series_points=1500):
     """
     등록된 전 파라미터를 한 번에 스캔한다.
 
@@ -488,7 +488,10 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
         it = _judge_one(p, ptype, s_in, s_out, out_cnt.get(p, 0),
                         ser, sel_flag)
         if with_series:
-            # 리포트 차트용 — 점이 너무 많으면 파일이 커지므로 줄인다
+            # 리포트 차트용 — 점이 너무 많으면 파일이 커지므로 줄인다.
+            # ★ 원본 점 수도 남긴다: 웨이퍼 단위인데 차트가 성기면
+            #   단위가 잘못된 게 아니라 다운샘플 때문임을 구분할 수 있어야 한다.
+            it['n_raw'] = len(ser)
             it['series'] = _downsample(ser, series_points)
         items.append(it)
 
