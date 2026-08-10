@@ -117,6 +117,11 @@ table.et th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
   color: var(--tx-1); background: var(--bg-2);
   border: 1px solid var(--bd); border-radius: 7px;
   padding: 4px 7px; outline: none; }
+.colprev { font-family: var(--cf-mono); font-size: 11px; font-weight: 700;
+  color: var(--tx-2); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.colprev.none { color: var(--tx-muted); }
+.warn-txt { color: var(--warn); font-weight: 700; }
 .fx::placeholder { color: var(--tx-muted); font-weight: 600;
   font-family: var(--cf-font); }
 .fx:focus { border-color: var(--accent); }
@@ -251,6 +256,8 @@ table.et tr.sel select { color: var(--tx-2); }
       파라미터 <span class="cp-n" id="cp-n-params"></span></label>
     <label><input type="checkbox" id="cp-lots">
       Device <span class="cp-n" id="cp-n-lots"></span></label>
+    <label><input type="checkbox" id="cp-resps">
+      Response 스텝 <span class="cp-n" id="cp-n-resps"></span></label>
     <label><input type="checkbox" id="cp-defects">
       Defect 스텝 <span class="cp-n" id="cp-n-defects"></span></label>
     <label><input type="checkbox" id="cp-info">
@@ -349,7 +356,7 @@ async function loadOpers() {
       <div class="id">${esc(o.oper_id)}</div>
       <div class="meta">
         <span class="dot ${o.loaded ? 'on' : 'off'}"></span>
-        device ${o.n_lot} · param ${o.n_param}${o.n_defect ? ` · defect ${o.n_defect}` : ''}
+        device ${o.n_lot} · param ${o.n_param}${o.n_resp ? ` · resp ${o.n_resp}` : ''}${o.n_defect ? ` · defect ${o.n_defect}` : ''}
       </div>
     </div>`).join('')
     || '<div class="empty" style="padding:20px;">등록된 공정이 없습니다.</div>';
@@ -359,7 +366,8 @@ async function openOper(id) {
   const j = await postJSON(API_OPER, {oper_id: id});
   if (!j.ok) { msg(j.error || '조회 실패', true); return; }
   cur = j.oper;
-  FILT.lots = {}; FILT.params = {}; FILT.defects = {};   // 공정 바뀌면 필터 초기화
+  cur.resps = cur.resps || [];   // 옛 응답 호환
+  FILT.lots = {}; FILT.params = {}; FILT.defects = {}; FILT.resps = {};
   renderEditor();
   loadOpers();
 }
@@ -367,7 +375,8 @@ async function openOper(id) {
 function newOper() {
   cur = {oper_id: '', oper_desc: '', fab: '', eq_model: '',
          pre_oper_id: '', pre_oper_desc: '', pre_oper_param: '',
-         use_yn: 'Y', lots: [], params: [], defects: [], _new: true};
+         use_yn: 'Y', lots: [], params: [], defects: [], resps: [],
+         _new: true};
   renderEditor();
   loadOpers();
 }
@@ -488,14 +497,57 @@ function renderEditor() {
     </div>
 
     <div class="sec">
+      <div class="sec-h"><h3>Response 계측 스텝</h3>
+        <span class="sub" id="rcnt"></span>
+        <span class="sub">— 관리 파라미터 1개당 1행으로 등록</span>
+        <span class="right">
+          <button class="btn sm" id="fclr-resps" style="display:none;"
+                  onclick="clearFilter('resps')">필터 해제</button>
+          <button class="btn sm danger" id="del-resps" disabled
+                  onclick="delSelected('resps')">선택 삭제</button>
+          <button class="btn sm" onclick="clearRows('resps')">전체 비우기</button>
+          <button class="btn sm" onclick="openBulk('resps')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="addResp()">+ 추가</button>
+        </span></div>
+      <div class="tbl-scroll">
+        <table class="et">
+          <thead><tr>
+            <th class="ck"><input type="checkbox" id="all-resps"
+                onchange="selAll('resps', this.checked)"></th>
+            <th style="width:16%;">LOT_CD
+              <input class="fx" id="fx-resps-lot_cd" placeholder="검색"
+                     oninput="setFilter('resps','lot_cd',this.value)"></th>
+            <th style="width:22%;">STEP_ID *
+              <input class="fx" id="fx-resps-step_id" placeholder="검색"
+                     oninput="setFilter('resps','step_id',this.value)"></th>
+            <th style="width:22%;">스텝 이름
+              <input class="fx" id="fx-resps-step_desc" placeholder="검색"
+                     oninput="setFilter('resps','step_desc',this.value)"></th>
+            <th style="width:20%;">관리 PARAM
+              <input class="fx" id="fx-resps-param" placeholder="검색"
+                     oninput="setFilter('resps','param',this.value)"></th>
+            <th style="width:20%;">생성 컬럼
+              <span class="fx" style="border-color:transparent;
+                    background:transparent;color:var(--tx-muted);
+                    font-weight:600;">merge 결과 이름</span></th>
+            <th style="width:10%;">사용
+              <select class="fx" id="fx-resps-use_yn"
+                      onchange="setFilter('resps','use_yn',this.value)">
+                <option value="">전체</option>
+                <option value="Y">사용</option>
+                <option value="N">제외</option>
+              </select></th>
+            <th></th></tr></thead>
+          <tbody id="rtbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="sec">
       <div class="sec-h"><h3>Defect 계측 스텝</h3>
         <span class="sub" id="dcnt"></span>
-        <span class="sub">— device 마다 검사 스텝이 다를 때 등록</span>
+        <span class="sub">— 관리 파라미터 1개당 1행으로 등록</span>
         <span class="right">
-          <button class="btn sm danger" id="del-defects" disabled
-                  onclick="delSelected('defects')">선택 삭제</button>
-          <button class="btn sm" onclick="clearRows('defects')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('defects')">엑셀 붙여넣기</button>
           <button class="btn sm" id="fclr-defects" style="display:none;"
                   onclick="clearFilter('defects')">필터 해제</button>
           <button class="btn sm danger" id="del-defects" disabled
@@ -509,16 +561,23 @@ function renderEditor() {
           <thead><tr>
             <th class="ck"><input type="checkbox" id="all-defects"
                 onchange="selAll('defects', this.checked)"></th>
-            <th style="width:22%;">LOT_CD
+            <th style="width:16%;">LOT_CD
               <input class="fx" id="fx-defects-lot_cd" placeholder="검색"
                      oninput="setFilter('defects','lot_cd',this.value)"></th>
-            <th style="width:28%;">STEP_ID *
+            <th style="width:22%;">STEP_ID *
               <input class="fx" id="fx-defects-step_id" placeholder="검색"
                      oninput="setFilter('defects','step_id',this.value)"></th>
-            <th style="width:32%;">설명
+            <th style="width:22%;">스텝 이름
               <input class="fx" id="fx-defects-step_desc" placeholder="검색"
                      oninput="setFilter('defects','step_desc',this.value)"></th>
-            <th style="width:14%;">사용
+            <th style="width:20%;">관리 PARAM
+              <input class="fx" id="fx-defects-param" placeholder="검색"
+                     oninput="setFilter('defects','param',this.value)"></th>
+            <th style="width:20%;">생성 컬럼
+              <span class="fx" style="border-color:transparent;
+                    background:transparent;color:var(--tx-muted);
+                    font-weight:600;">merge 결과 이름</span></th>
+            <th style="width:10%;">사용
               <select class="fx" id="fx-defects-use_yn"
                       onchange="setFilter('defects','use_yn',this.value)">
                 <option value="">전체</option>
@@ -539,7 +598,7 @@ function renderEditor() {
     </div>`;
 
   restoreFilterInputs();       // 화면을 새로 만들었으므로 필터 값 되살리기
-  renderLots(); renderParams(); renderDefects();
+  renderLots(); renderParams(); renderResps(); renderDefects();
   refreshAutoTypes(true);      // '자동 (…)' 표시 채우기
 }
 
@@ -630,35 +689,67 @@ async function suggestParams() {
 }
 
 /* ── defect 스텝 ───────────────────────────── */
-function renderDefects() {
-  document.getElementById('dtbody').innerHTML = cur.defects.map((d, i) => `
+/* Defect · Response 는 구조가 같아 한 함수로 그린다 */
+function renderStepTable(key) {
+  const t = TBL[key];
+  const rows = cur[key] || [];
+  document.getElementById(t.tbody).innerHTML = rows.map((d, i) => `
     <tr class="${d._sel ? 'sel' : ''}">
       <td class="ck"><input type="checkbox" ${d._sel ? 'checked' : ''}
-            onchange="cur.defects[${i}]._sel=this.checked;markSel('defects',${i},this.checked)"></td>
+            onchange="cur.${key}[${i}]._sel=this.checked;markSel('${key}',${i},this.checked)"></td>
       <td><input value="${esc(d.lot_cd)}" placeholder="5E2"
-                 data-tbl="defects" data-row="${i}" data-col="0"
-                 oninput="cur.defects[${i}].lot_cd=this.value.toUpperCase()"></td>
+                 data-tbl="${key}" data-row="${i}" data-col="0"
+                 oninput="cur.${key}[${i}].lot_cd=this.value.toUpperCase()"></td>
       <td><input value="${esc(d.step_id)}" placeholder="STEP_ID"
-                 data-tbl="defects" data-row="${i}" data-col="1"
-                 oninput="cur.defects[${i}].step_id=this.value.toUpperCase()"></td>
-      <td><input value="${esc(d.step_desc)}" placeholder="설명 (선택)"
-                 data-tbl="defects" data-row="${i}" data-col="2"
-                 oninput="cur.defects[${i}].step_desc=this.value"></td>
-      <td><select data-tbl="defects" data-row="${i}" data-col="3"
-                  onchange="cur.defects[${i}].use_yn=this.value">
+                 data-tbl="${key}" data-row="${i}" data-col="1"
+                 oninput="cur.${key}[${i}].step_id=this.value.toUpperCase()"></td>
+      <td><input value="${esc(d.step_desc)}" placeholder="스텝 이름 (선택)"
+                 data-tbl="${key}" data-row="${i}" data-col="2"
+                 oninput="cur.${key}[${i}].step_desc=this.value"></td>
+      <td><input value="${esc(d.param)}" placeholder="관리 PARAM"
+                 data-tbl="${key}" data-row="${i}" data-col="3"
+                 oninput="cur.${key}[${i}].param=this.value.toUpperCase()"></td>
+      <td class="colprev ${colName(key, d) ? '' : 'none'}"
+          title="병합 후 이 이름의 컬럼에 값이 들어갑니다">
+        ${colName(key, d) || '<span class="warn-txt">PARAM 필요</span>'}</td>
+      <td><select data-tbl="${key}" data-row="${i}" data-col="4"
+                  onchange="cur.${key}[${i}].use_yn=this.value">
         <option value="Y" ${d.use_yn !== 'N' ? 'selected' : ''}>사용</option>
         <option value="N" ${d.use_yn === 'N' ? 'selected' : ''}>제외</option>
       </select></td>
-      <td><span class="row-del" onclick="delDefect(${i})">×</span></td>
+      <td><span class="row-del" onclick="delStepRow('${key}',${i})">×</span></td>
     </tr>`).join('')
-    || '<tr><td colspan="6" class="none-row">defect 스텝이 없습니다. 추가하거나 엑셀에서 붙여넣으세요.</td></tr>';
-  applyFilter('defects');
+    || `<tr><td colspan="8" class="none-row">${t.label}이 없습니다.
+        추가하거나 엑셀에서 붙여넣으세요.</td></tr>`;
+  applyFilter(key);
 }
-function addDefect() {
-  cur.defects.push({lot_cd:'', step_id:'', step_desc:'', use_yn:'Y'});
-  renderDefects();
+/* 서버 config_service.step_column 과 같은 규칙.
+   ★ 두 곳에 규칙이 있는 게 이상적이진 않지만, 저장 전에 결과를 보여주려면
+     화면에서도 만들 수밖에 없다. 규칙을 바꿀 땐 반드시 양쪽을 함께 고칠 것. */
+function slugName(v) {
+  return String(v || '').trim().toUpperCase()
+    .replace(/[^0-9A-Z_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
 }
-function delDefect(i) { cur.defects.splice(i,1); renderDefects(); }
+function colName(key, d) {
+  const pre = key === 'defects' ? 'DEF' : 'RESP';
+  const st = slugName(d.step_desc || d.step_id);
+  const pm = slugName(d.param);
+  if (!pm) return '';
+  return st ? `${pre}_${st}_${pm}` : `${pre}_${pm}`;
+}
+
+function renderDefects() { renderStepTable('defects'); }
+function renderResps()   { renderStepTable('resps'); }
+
+function addStepRow(key) {
+  cur[key] = cur[key] || [];
+  cur[key].push(TBL[key].blank());
+  TBL[key].render();
+}
+function delStepRow(key, i) { cur[key].splice(i, 1); TBL[key].render(); }
+
+function addDefect() { addStepRow('defects'); }
+function addResp()   { addStepRow('resps'); }
 
 /* ══════════════════════════════════════════════════
    엑셀 붙여넣기
@@ -688,12 +779,25 @@ const TBL = {
     render: () => renderParams(),
   },
   defects: {
-    cols: ['lot_cd', 'step_id', 'step_desc', 'use_yn'],
-    filterCols: {lot_cd: 1, step_id: 1, step_desc: 1, use_yn: 1},
+    cols: ['lot_cd', 'step_id', 'step_desc', 'param', 'use_yn'],
+    filterCols: {lot_cd: 1, step_id: 1, step_desc: 1, param: 1, use_yn: 1},
     tbody: 'dtbody', count: 'dcnt',
     label: 'Defect 스텝',
-    blank: () => ({lot_cd: '', step_id: '', step_desc: '', use_yn: 'Y'}),
+    blank: () => ({lot_cd: '', step_id: '', step_desc: '', param: '',
+                   use_yn: 'Y'}),
     render: () => renderDefects(),
+  },
+  /* Response — Defect 과 구조가 같다.
+     Inline 에서 실제로 관리하는 건 Response 와 Defect 이고,
+     스텝 하나에 관리 파라미터가 여럿이라 파라미터 1개당 1행으로 둔다. */
+  resps: {
+    cols: ['lot_cd', 'step_id', 'step_desc', 'param', 'use_yn'],
+    filterCols: {lot_cd: 1, step_id: 1, step_desc: 1, param: 1, use_yn: 1},
+    tbody: 'rtbody', count: 'rcnt',
+    label: 'Response 스텝',
+    blank: () => ({lot_cd: '', step_id: '', step_desc: '', param: '',
+                   use_yn: 'Y'}),
+    render: () => renderResps(),
   },
 };
 
@@ -890,43 +994,97 @@ async function checkMismatch() {
   if (!j.ok) { msg(j.error || '조회 실패', true); return; }
 
   const items = j.items || [];
-  if (!items.length) {
-    msg('타입 불일치 없음 — 저장된 타입이 현재 규칙과 모두 일치합니다');
-    document.getElementById('vpanel').style.display = 'none';
-    return;
+  const etc   = j.etc || [];
+  const rule  = j.rule || {};
+  const counts = j.counts || {};
+
+  // ── 지금 서버에 올라와 있는 규칙 ──────────────────
+  //   "고쳤는데 반영이 안 된다" 의 대부분은 파일이 배포되지 않은 것이다.
+  const samples = (rule.samples || [])
+    .map(x => `${esc(x.param)}→<b>${esc(x.type)}</b>`).join(' · ');
+  const ruleBox = `
+    <div class="vitem">
+      <div class="h">현재 서버 규칙
+        <span class="tb">${esc(rule.version || '(버전 표기 없음)')}</span></div>
+      ${(rule.rules || []).map(r =>
+        `<div class="iss"><b>${esc(r.type)}</b> — <span style="font-family:var(--cf-mono);">${esc(r.pattern)}</span></div>`
+      ).join('')}
+      <div class="iss" style="margin-top:6px;">표본 분류: ${samples}</div>
+      <div class="iss" style="color:var(--tx-muted);margin-top:4px;">
+        PA_A1 이 PRESSURE 가 아니면 param_types.py 가 배포되지 않았거나
+        서버 재시작이 안 된 것입니다.</div>
+    </div>`;
+
+  // ── 타입 분포 ────────────────────────────────────
+  const distBox = `
+    <div class="vitem">
+      <div class="h">타입 분포 <span class="tb">파라미터 이름 기준(중복 제거)</span></div>
+      <div class="iss">${Object.entries(counts).sort()
+        .map(([t, n]) => `${esc(t)} ${n}`).join(' · ') || '없음'}</div>
+    </div>`;
+
+  // ── ETC 로 남은 이름 ─────────────────────────────
+  const etcBox = etc.length ? `
+    <div class="vitem ${etc.length ? 'bad' : ''}">
+      <div class="h">ETC 로 남은 파라미터 <span class="tb">${etc.length}종</span></div>
+      <div class="iss warn" style="font-family:var(--cf-mono);">
+        ${etc.slice(0, 60).map(e => esc(e.param)).join(', ')}
+        ${etc.length > 60 ? ` 외 ${etc.length - 60}종` : ''}</div>
+      <div class="iss" style="color:var(--tx-muted);margin-top:6px;">
+        여기 있는 이름이 규칙에 안 걸린 것입니다. 이름 형태가 규칙과
+        다르면(예: 규칙은 A 앞이 시작이나 _ 인데 실제는 PAA1)
+        param_types.py 의 정규식을 그 형태에 맞게 고쳐야 합니다.</div>
+    </div>` : '';
+
+  // ── 불일치 ───────────────────────────────────────
+  let mismatchBox = '';
+  if (items.length) {
+    const byParam = {};
+    items.forEach(i => { (byParam[i.param] = byParam[i.param] || []).push(i); });
+    mismatchBox = `
+      <div class="vitem bad">
+        <div class="h">저장된 타입이 현재 규칙과 다릅니다
+          <span class="tb">${items.length}건 / 파라미터 ${Object.keys(byParam).length}종</span></div>
+        ${Object.entries(byParam).slice(0, 40).map(([p, list]) => `
+          <div class="iss warn">· <b>${esc(p)}</b> —
+            ${list.map(i => `${esc(i.oper_id)}: ${esc(i.saved)}`).join(', ')}
+            → 현재 규칙 <b>${esc(list[0].auto)}</b></div>`).join('')}
+        ${Object.keys(byParam).length > 40
+          ? `<div class="iss">· 외 ${Object.keys(byParam).length - 40}종</div>` : ''}
+      </div>`;
+  } else {
+    mismatchBox = `
+      <div class="vitem ok">
+        <div class="h">저장된 타입과 현재 규칙이 모두 일치합니다</div>
+        <div class="iss">그래도 ETC 가 많다면 규칙 자체가 그 이름을
+          못 잡고 있는 것입니다. 위 'ETC 로 남은 파라미터' 를 보세요.</div>
+      </div>`;
   }
 
-  // 같은 파라미터가 공정마다 다른 타입인 경우를 위로 올린다
-  const byParam = {};
-  items.forEach(i => { (byParam[i.param] = byParam[i.param] || []).push(i); });
-
-  msg(`타입 불일치 ${items.length}건 — 아래에서 확인 후 정리하세요`, true);
-  document.getElementById('vpanel').style.display = 'block';
-  document.getElementById('vlist').innerHTML = `
-    <div class="vitem bad">
-      <div class="h">저장된 타입이 현재 규칙과 다릅니다
-        <span class="tb">${items.length}건 / 파라미터 ${Object.keys(byParam).length}종</span></div>
-      ${Object.entries(byParam).slice(0, 40).map(([p, list]) => `
-        <div class="iss warn">· <b>${esc(p)}</b> —
-          ${list.map(i => `${esc(i.oper_id)}: ${esc(i.saved)}`).join(', ')}
-          → 현재 규칙 <b>${esc(list[0].auto)}</b></div>`).join('')}
-      ${Object.keys(byParam).length > 40
-        ? `<div class="iss">· 외 ${Object.keys(byParam).length - 40}종</div>` : ''}
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+  const actions = `
+    <div class="vitem">
+      <div class="h">정리</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
         <button class="btn pri sm" onclick="reclassifyAll('clear')">
           자동으로 되돌리기 (권장)</button>
         <button class="btn sm" onclick="reclassifyAll('refresh')">
           현재 규칙으로 덮어쓰기</button>
       </div>
-      <div class="iss" style="margin-top:8px;color:var(--tx-muted);">
+      <div class="iss" style="color:var(--tx-muted);">
         · <b>자동으로 되돌리기</b> — 저장된 타입을 비웁니다. 읽을 때마다
         규칙으로 분류하므로 앞으로 규칙을 고쳐도 자동으로 따라갑니다.<br>
         · <b>덮어쓰기</b> — 지금 규칙 결과를 저장합니다. 규칙을 또 고치면
-        다시 어긋나므로 그때마다 실행해야 합니다.<br>
+        다시 어긋납니다.<br>
         · 정리 후 인라인 모니터링에서 <b>결과 초기화 → 점검 시작</b> 을
         해야 점검 결과의 타입도 갱신됩니다.
       </div>
     </div>`;
+
+  msg(items.length ? `타입 불일치 ${items.length}건` : '타입 불일치 없음',
+      items.length > 0);
+  document.getElementById('vpanel').style.display = 'block';
+  document.getElementById('vlist').innerHTML =
+    ruleBox + distBox + etcBox + mismatchBox + actions;
   document.getElementById('vpanel').scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 
@@ -988,6 +1146,7 @@ function openCopy() {
   document.getElementById('cp-src').innerHTML = others.map(o =>
     `<option value="${esc(o.oper_id)}">${esc(o.oper_desc || o.oper_id)}` +
     ` — param ${o.n_param} · device ${o.n_lot}` +
+    `${o.n_resp ? ' · resp ' + o.n_resp : ''}` +
     `${o.n_defect ? ' · defect ' + o.n_defect : ''}</option>`).join('');
   document.getElementById('cp-replace').checked = false;
 
@@ -1010,13 +1169,16 @@ function updateCopyCounts() {
   set('cp-n-params', o.n_param, '개');
   set('cp-n-lots', o.n_lot, '행');
   set('cp-n-defects', o.n_defect, '행');
+  set('cp-n-resps', o.n_resp, '행');
 }
 
 /* 같은 항목인지 판단하는 키 — 추가 모드에서 중복을 걸러낸다 */
 const COPY_KEY = {
   params:  r => String(r.param || '').toUpperCase(),
   lots:    r => `${r.lot_cd || ''}|${r.recipe_id || ''}`.toUpperCase(),
-  defects: r => `${r.lot_cd || ''}|${r.step_id || ''}`.toUpperCase(),
+  // 스텝은 파라미터까지 합쳐야 같은 항목인지 판단된다
+  defects: r => `${r.lot_cd||''}|${r.step_id||''}|${r.param||''}`.toUpperCase(),
+  resps:   r => `${r.lot_cd||''}|${r.step_id||''}|${r.param||''}`.toUpperCase(),
 };
 
 function mergeRows(k, rows, replace) {
@@ -1061,6 +1223,9 @@ async function applyCopy() {
   }
   if (document.getElementById('cp-defects').checked) {
     done.push(mergeRows('defects', src.defects, replace));
+  }
+  if (document.getElementById('cp-resps').checked) {
+    done.push(mergeRows('resps', src.resps, replace));
   }
   if (document.getElementById('cp-info').checked) {
     // 공정 ID·공정명은 제외 — 그 둘이 공정을 구분하는 값이다
