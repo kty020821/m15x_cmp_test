@@ -107,6 +107,8 @@ table.et { width: 100%; border-collapse: collapse; }
 table.et th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
   text-align: left; padding: 7px 8px; border-bottom: 1.5px solid var(--bd);
   letter-spacing: .03em;
+  /* 칸이 좁아도 머리글이 한 줄로 유지되게 한다 (세로로 접히던 문제) */
+  white-space: nowrap;
   /* 파라미터가 수십~수백 개라 스크롤해도 머리글이 보여야 한다 */
   position: sticky; top: 0; background: var(--bg-3); z-index: 2; }
 
@@ -514,23 +516,23 @@ function renderEditor() {
           <thead><tr>
             <th class="ck"><input type="checkbox" id="all-resps"
                 onchange="selAll('resps', this.checked)"></th>
-            <th style="width:16%;">LOT_CD
+            <th style="width:12%;">LOT_CD
               <input class="fx" id="fx-resps-lot_cd" placeholder="검색"
                      oninput="setFilter('resps','lot_cd',this.value)"></th>
-            <th style="width:22%;">STEP_ID *
+            <th style="width:18%;">STEP_ID *
               <input class="fx" id="fx-resps-step_id" placeholder="검색"
                      oninput="setFilter('resps','step_id',this.value)"></th>
-            <th style="width:22%;">스텝 이름
+            <th style="width:16%;">스텝 이름
               <input class="fx" id="fx-resps-step_desc" placeholder="검색"
                      oninput="setFilter('resps','step_desc',this.value)"></th>
-            <th style="width:20%;">관리 PARAM
+            <th style="width:16%;">관리 PARAM
               <input class="fx" id="fx-resps-param" placeholder="검색"
                      oninput="setFilter('resps','param',this.value)"></th>
             <th style="width:20%;">생성 컬럼
               <span class="fx" style="border-color:transparent;
                     background:transparent;color:var(--tx-muted);
                     font-weight:600;">merge 결과 이름</span></th>
-            <th style="width:10%;">사용
+            <th style="width:14%;">사용
               <select class="fx" id="fx-resps-use_yn"
                       onchange="setFilter('resps','use_yn',this.value)">
                 <option value="">전체</option>
@@ -561,23 +563,23 @@ function renderEditor() {
           <thead><tr>
             <th class="ck"><input type="checkbox" id="all-defects"
                 onchange="selAll('defects', this.checked)"></th>
-            <th style="width:16%;">LOT_CD
+            <th style="width:12%;">LOT_CD
               <input class="fx" id="fx-defects-lot_cd" placeholder="검색"
                      oninput="setFilter('defects','lot_cd',this.value)"></th>
-            <th style="width:22%;">STEP_ID *
+            <th style="width:18%;">STEP_ID *
               <input class="fx" id="fx-defects-step_id" placeholder="검색"
                      oninput="setFilter('defects','step_id',this.value)"></th>
-            <th style="width:22%;">스텝 이름
+            <th style="width:16%;">스텝 이름
               <input class="fx" id="fx-defects-step_desc" placeholder="검색"
                      oninput="setFilter('defects','step_desc',this.value)"></th>
-            <th style="width:20%;">관리 PARAM
+            <th style="width:16%;">관리 PARAM
               <input class="fx" id="fx-defects-param" placeholder="검색"
                      oninput="setFilter('defects','param',this.value)"></th>
             <th style="width:20%;">생성 컬럼
               <span class="fx" style="border-color:transparent;
                     background:transparent;color:var(--tx-muted);
                     font-weight:600;">merge 결과 이름</span></th>
-            <th style="width:10%;">사용
+            <th style="width:14%;">사용
               <select class="fx" id="fx-defects-use_yn"
                       onchange="setFilter('defects','use_yn',this.value)">
                 <option value="">전체</option>
