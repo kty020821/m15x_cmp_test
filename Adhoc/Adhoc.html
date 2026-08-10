@@ -188,6 +188,16 @@ table.sc tbody tr.on { background: var(--bg-2); }
 .caret { display: inline-block; width: 12px; color: var(--tx-muted);
   font-size: 10px; }
 
+/* 접었다 펴는 영역 — 조건을 정하고 나면 차트에 자리를 내준다 */
+.fold.off { display: none; }
+.fold-btn { padding: 4px 11px; border-radius: var(--r-sm); font-size: 11px;
+  font-weight: 800; cursor: pointer; border: 1px solid var(--bd);
+  background: var(--bg-2); color: var(--tx-2); }
+.fold-btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.fold-sum { font-size: 11px; font-weight: 700; color: var(--tx-2);
+  font-family: var(--ah-mono); margin-left: 4px; }
+.fold-sum:empty { display: none; }
+
 /* 컬럼 필터 — 머리글 안에 넣어 헤더 행을 하나로 유지한다
    (행이 둘이면 sticky top 오프셋을 픽셀로 맞춰야 해 깨지기 쉽다) */
 .fx { display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
@@ -228,11 +238,15 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
   <div class="panel">
     <div class="sec-h"><h3>조회 조건</h3>
       <span class="sub">등록된 공정을 고르면 파라미터까지 채워집니다</span>
+      <span class="fold-sum" id="q-sum"></span>
       <span class="right">
         <select id="pf-oper" class="btn" style="font-weight:700;"></select>
         <button class="btn sm" onclick="prefill()">기준정보에서 채우기</button>
+        <button class="fold-btn" id="q-fold-btn"
+                onclick="toggleFold('q')">접기</button>
       </span></div>
 
+    <div class="fold" id="q-fold">
     <div class="grid">
       <div class="fld"><label>시작일 *</label>
         <input id="f-date_from" type="date">
@@ -284,6 +298,7 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
       정보는 안 붙습니다). 기간은 30일 단위로 쪼개 조회되므로 1년치는 그만큼 걸립니다.
       파라미터 수는 속도에 큰 영향이 없습니다.
     </div>
+    </div>
   </div>
 
   <!-- 요청 목록 -->
@@ -311,12 +326,16 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
   <div class="panel iz" id="iz">
     <div class="sec-h"><h3>이슈 구간 분석</h3>
       <span class="sub" id="iz-target"></span>
+      <span class="fold-sum" id="iz-sum"></span>
       <span class="right">
         <a class="btn sm" id="iz-analysis" target="_blank" href="#"
            title="트렌드·상관 산점도·요인 분포·AI 진단">분석 페이지에서 열기</a>
+        <button class="fold-btn" id="iz-fold-btn"
+                onclick="toggleFold('iz')">조건 접기</button>
         <button class="btn sm" onclick="closeIssue()">닫기</button>
       </span></div>
 
+    <div class="fold" id="iz-fold">
     <div class="grid">
       <div class="fld"><label>LOT_CD</label>
         <select id="iz-lotcd" onchange="loadIssueContext()"></select></div>
@@ -411,6 +430,7 @@ tr.sc-detail > td { background: var(--bg-2); padding: 0; }
             <span class="sub">— 둘 중 하나라도 해당하면 (넓힘)</span></label>
         </div>
       </div>
+    </div>
     </div>
 
     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -548,6 +568,7 @@ async function submitJob() {
     fmsg(`요청 등록 완료 (#${j.job_id}) — 목록에서 '실행' 을 누르세요`);
   }
   loadJobs();
+  toggleFold('q', true);          // 등록했으면 조건은 접어 목록에 자리를 준다
 }
 
 /* ── 요청 목록 ─────────────────────────────── */
@@ -666,6 +687,7 @@ async function openIssue(operId, label, lotCd) {
   document.getElementById('use-lots').checked = false;
   setLotInput('pick');
   syncSelUI();
+  toggleFold('iz', false);        // 새로 열 때는 조건부터 정해야 한다
   document.getElementById('iz').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
@@ -892,7 +914,10 @@ async function runScan() {
       renderScan(izScan, total);
       setReportEnabled(izScan.items.length > 0);   // 중간에도 받아볼 수 있게
     }
-    if (!scanStop) izMsg(`스캔 완료 — ${izScan.items.length}개 파라미터`);
+    if (!scanStop) {
+      izMsg(`스캔 완료 — ${izScan.items.length}개 파라미터`);
+      toggleFold('iz', true);      // 결과를 볼 차례이므로 조건은 접는다
+    }
   } finally {
     scanAbort = null;
     document.getElementById('btn-scan').disabled = false;
@@ -936,6 +961,59 @@ function analysisUrl(param) {
     param: param || '',
   });
   return URL_ANALYSIS + '?' + q.toString();
+}
+
+/* ══════════════════════════════════════════════════
+   조건 영역 접기
+
+   조건을 정하고 나면 그 자리는 차트에 내주는 게 낫다.
+   ★ 접었을 때 지금 조건이 무엇인지 한 줄 요약을 머리글에 남긴다 —
+     접어 놓고 조건을 잊으면 결과를 잘못 읽게 된다.
+   ══════════════════════════════════════════════════ */
+const FOLD = {q: false, iz: false};
+
+function toggleFold(k, force) {
+  const on = (force === undefined) ? !FOLD[k] : !!force;   // on = 접힌 상태
+  FOLD[k] = on;
+  const box = document.getElementById(k + '-fold');
+  const btn = document.getElementById(k + '-fold-btn');
+  if (box) box.classList.toggle('off', on);
+  if (btn) btn.textContent = on
+    ? (k === 'iz' ? '조건 펼치기' : '펼치기')
+    : (k === 'iz' ? '조건 접기' : '접기');
+  updateFoldSummary(k);
+}
+
+function updateFoldSummary(k) {
+  const el = document.getElementById(k + '-sum');
+  if (!el) return;
+  if (!FOLD[k]) { el.textContent = ''; return; }
+
+  if (k === 'q') {
+    const d1 = g('date_from'), d2 = g('date_to');
+    const n = g('params').split(/[,\s\n]+/).filter(Boolean).length;
+    el.textContent = [g('oper_id'), g('lot_cds'),
+                      (d1 && d2) ? `${d1}~${d2}` : '',
+                      n ? `파라미터 ${n}` : ''].filter(Boolean).join(' · ');
+    return;
+  }
+
+  // 이슈 분석 — 지금 지정한 구간을 그대로 보여준다
+  const useR = document.getElementById('use-range').checked;
+  const useL = document.getElementById('use-lots').checked;
+  const parts = [];
+  if (useR) parts.push(`${document.getElementById('iz-from').value} ~ ` +
+                       `${document.getElementById('iz-to').value}`);
+  if (useL) parts.push(`랏 ${izLotSel.size}개`);
+  if (useR && useL) {
+    const c = document.querySelector('input[name=cmb]:checked');
+    parts.push(c && c.value === 'or' ? '(또는)' : '(둘 다)');
+  }
+  const unit = document.getElementById('iz-unit');
+  parts.push(unit && unit.value === 'wafer' ? '웨이퍼' : '랏 평균');
+  const lc = document.getElementById('iz-lotcd').value;
+  if (lc) parts.unshift(lc);
+  el.textContent = parts.filter(Boolean).join(' · ');
 }
 
 /* ── 리포트 ───────────────────────────────────
