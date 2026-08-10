@@ -98,6 +98,21 @@ def _f(v, nd=3):
     return round(float(v), nd) if v is not None else None
 
 
+def _no_table_msg(table, oper_id):
+    """
+    결과 테이블이 없을 때의 안내.
+
+    1회성 조회(ADHOC_*)는 조회 결과가 0행이면 테이블 자체가 만들어지지 않고,
+    보관 기간(KEEP_DAYS)이 지나면 정리된다. 원인을 같이 알려 준다.
+    """
+    if str(oper_id or '').upper().startswith('ADHOC_'):
+        return (f'{table} 이 없습니다. 1회성 조회 결과가 남아 있지 않습니다 — '
+                f'조회 결과가 0행이었거나, 보관 기간이 지나 정리됐거나, '
+                f'요청이 아직 완료되지 않았습니다. '
+                f'같은 조건으로 다시 조회한 뒤 분석해 주세요.')
+    return f'{table} 이 없습니다. 해당 공정이 아직 적재되지 않았습니다.'
+
+
 def _safe_name(v):
     return bool(v) and bool(re.match(r'^[0-9A-Za-z_]+$', str(v)))
 
@@ -122,7 +137,7 @@ def context(oper_id, lot_cd=None):
 
     with _conn().cursor() as cur:
         if not _exists(cur, table):
-            return {'ok': False, 'error': f'{table} 이 없습니다'}
+            return {'ok': False, 'error': _no_table_msg(table, oper_id)}
 
         cur.execute("""
             SELECT column_name, data_type FROM information_schema.columns
@@ -442,7 +457,7 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
 
     with _conn().cursor() as cur:
         if not _exists(cur, table):
-            raise ValueError(f'{table} 이 없습니다')
+            raise ValueError(_no_table_msg(table, oper_id))
         have = _cols(cur, table)
 
         all_params = _numeric_params(cur, table)[:max_params]
@@ -744,7 +759,7 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
     table = _table(oper_id)
     with _conn().cursor() as cur:
         if not _exists(cur, table):
-            raise ValueError(f'{table} 이 없습니다')
+            raise ValueError(_no_table_msg(table, oper_id))
         have = _cols(cur, table)
         if param.upper() not in have:
             raise ValueError(f'{param} 컬럼이 없습니다')
