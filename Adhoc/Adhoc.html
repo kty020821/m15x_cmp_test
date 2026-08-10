@@ -571,7 +571,12 @@ async function loadJobs() {
 
   document.getElementById('jbody').innerHTML = jobs.map(job => {
     const c = job.cond || {};
-    const open = job.status === '완료' && job.rows > 0
+    /* ★ '완료' 라도 결과 테이블이 없을 수 있다 —
+       0행으로 끝났거나 보관 기간 정리로 지워진 경우.
+       그때 분석 버튼을 열어 주면 '테이블이 없다' 는 에러만 보게 된다. */
+    const ready = job.status === '완료' && job.rows > 0 && job.has_table !== false;
+    const gone  = job.status === '완료' && job.has_table === false;
+    const open = ready
       ? `<a class="btn sm" href="${URL_ANALYSIS}?oper=${encodeURIComponent(job.oper_id)}`
         + `&lot=${encodeURIComponent((job.lot_cds || [])[0] || '')}">분석 열기</a>`
       : '';
@@ -588,9 +593,11 @@ async function loadJobs() {
       <td style="white-space:nowrap;">
         ${(job.status === '대기' || job.status === '실패')
           ? `<button class="btn sm pri" onclick="runJob(${job.job_id})">실행</button>` : ''}
-        ${open}
-        ${job.status === '완료' && job.rows > 0
+        ${ready ? open : ''}
+        ${ready
           ? `<button class="btn sm" onclick="openIssue('${esc(job.oper_id)}','${esc(c.oper_id||'')}','${esc((job.lot_cds||[])[0]||'')}')">이슈 분석</button>` : ''}
+        ${gone ? `<span class="msg" style="color:var(--warn);font-weight:700;"
+            title="${esc(job.table||'')}">결과 없음 — 다시 조회 필요</span>` : ''}
         <button class="btn sm danger" onclick="delJob(${job.job_id})">삭제</button></td>
     </tr>`;
   }).join('');
