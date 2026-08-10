@@ -973,83 +973,35 @@ def _series_and_cp(cur, table, param, base_where, base_args,
                    'label': r[6] or ''}
                   for r in cur.fetchall()]
 
+    # ★ 변곡점은 다운샘플한 시계열에서 찾는다 (탐지 비용을 일정하게 유지)
+    ds = _downsample(series)
     cps = _find_change_points(ds, b_std) if len(ds) >= CP_MIN_SEG * 2 else []
+
+    # 변곡점이 선택 구간 안에서 일어났는지 표시 —
+    #   "이슈 구간에서 수준이 바뀌었다" 를 확인하는 핵심 정보다.
+    #   인덱스는 다운샘플된 시계열 기준이므로 그쪽에서 읽는다.
     for c in cps:
         i = c['index']
         c['in_sel'] = bool(ds[i]['in_sel']) if 0 <= i < len(ds) else False
-    it['cps'] = cps
-    it['cp_in_sel'] = any(c.get('in_sel') for c in cps)
 
+    # ★ 같은 방향 변곡점이 여러 개면 계단이 아니라 드리프트다.
+    #   이진 분할은 완만한 추세를 여러 계단으로 쪼개므로, 그대로 보여주면
+    #   "변곡점이 3개" 로 잘못 읽힌다. 성격을 함께 알려준다.
+    note = ''
     if len(cps) >= 3 and len({c['direction'] for c in cps}) == 1:
-        it['cp_note'] = f"{cps[0]['direction']} 드리프트"
+        total = sum(c['shift'] or 0 for c in cps)
+        note = (f"변곡점이 {len(cps)}개인데 모두 {cps[0]['direction']} 방향입니다 — "
+                f"계단식 변화가 아니라 서서히 이동하는 드리프트로 보입니다 "
+                f"(누적 {_f(total)})")
+    elif len(cps) == 1:
+        c = cps[0]
+        note = (f"{c['at']} 무렵 수준이 {c['direction']}했습니다 "
+                f"({c['before_avg']} → {c['after_avg']}, {c['shift_sigma']:+.1f}σ)")
 
-    # 소모품은 σ 판정을 하지 않는다 (누적·리셋)
-    if ptype == 'PART':
-        it['status'] = '참고'
-        it['reasons'] = ['소모품 계열 — 구간 비교 판정 제외 (변곡점만 참고)']
-        if it['cp_in_sel']:
-            c = [x for x in cps if x.get('in_sel')][0]
-            it['reasons'].append(f"{c['at']} {c['direction']} "
-                                 f"({c['shift_sigma']:+.1f}σ)")
-        return it
+    # 차트가 무거워지지 않게 표본을 줄인다 (판정은 전체로 이미 끝났다)
+    MAX_PTS = 3000
+    if len(series) > MAX_PTS:
+        step = len(series) // MAX_PTS + 1
+        series = series[::step]
 
-    level = 0
-    reasons, checks = [], []
-
-    if b_std and b_std > 0:
-        sigma = (s_in['avg'] - b_avg) / b_std
-        it['sigma'] = round(sigma, 2)
-        if abs(sigma) >= SIGMA_ALERT:
-            level = 2
-            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ '
-                           f'({s_in["avg"]} vs {b_avg})')
-            checks.append('L')
-        elif abs(sigma) >= SIGMA_WARN:
-            level = max(level, 1)
-            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ')
-            checks.append('L')
-
-    if out_cnt >= OUT_ALERT:
-        level = 2
-        reasons.append(f'나머지 범위 밖 {out_cnt}장')
-        checks.append('R')
-    elif out_cnt >= OUT_WARN:
-        level = max(level, 1)
-        reasons.append(f'나머지 범위 밖 {out_cnt}장')
-        checks.append('R')
-
-    if b_std and b_std > 0 and s_in.get('std') and s_in['n'] >= MIN_N:
-        ratio = s_in['std'] / b_std
-        it['spread'] = round(ratio, 2)
-        if ratio >= SPREAD_ALERT:
-            level = 2
-            reasons.append(f'산포가 {ratio:.1f}배 — 조건 혼입 의심')
-            checks.append('S')
-        elif ratio >= SPREAD_WARN:
-            level = max(level, 1)
-            reasons.append(f'산포가 {ratio:.1f}배')
-            checks.append('S')
-
-    # ★ 지정 구간 안에서 수준이 바뀐 것이 이 화면의 핵심 신호다
-    if it['cp_in_sel']:
-        c = [x for x in cps if x.get('in_sel')][0]
-        level = max(level, 1)
-        reasons.append(f"{c['at']} 무렵 {c['direction']} "
-                       f"({c['before_avg']} → {c['after_avg']}, "
-                       f"{c['shift_sigma']:+.1f}σ)")
-        checks.append('C')
-
-    it['status']  = ['정상', '주의', '이상'][level]
-    it['checks']  = checks
-    it['reasons'] = reasons or ['나머지와 유의한 차이 없음']
-
-    sev = level * 100
-    if it['sigma'] is not None:
-        sev += min(abs(it['sigma']), 10) * 5
-    sev += min(out_cnt, 25) * 2
-    if it['spread']:
-        sev += max(0, it['spread'] - 1) * 10
-    if it['cp_in_sel']:
-        sev += 40          # 지정 구간 내 변곡은 가장 직접적인 근거
-    it['severity'] = round(sev, 1)
-    return it
+    return series, cps, note
