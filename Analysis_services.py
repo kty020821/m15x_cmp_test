@@ -29,7 +29,7 @@ equipment/analysis_service.py
 import re
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from django.db import connections
 from psycopg2.extras import execute_values
 
@@ -674,7 +674,7 @@ select alias_lot_id, wf_id, end_tm as rep_end_tm, oper_id, oper_det_desc,
        param_nm, meas_val
 from lake_catalog.tas.tas_rep_wf_metr_inf
 where mt {mt}
-  and fab = '{fab}'
+  and fab_id = '{fab}'
   and lot_cd = '{lot_cd}'
   and oper_id = '{step}'
   and param_nm in ({params})
@@ -690,6 +690,36 @@ where mt {mt}
   and step_id = '{step}'
   and defect_class_nm in ({params})
 """
+
+# ── 실행한 쿼리 보관 ──────────────────────────────────────
+#   ★ Lake 조회가 실패하면 '무슨 쿼리를 던졌는지' 를 봐야 원인을 안다.
+#     최근 것만 들고 있다가 로그·터미널에서 꺼내 볼 수 있게 한다.
+from collections import deque
+QUERY_LOG = deque(maxlen=40)
+
+
+def _log_query(label, query, rows=None, error=None):
+    QUERY_LOG.append({
+        'at': datetime.now().strftime('%H:%M:%S'),
+        'label': label, 'query': query.strip(),
+        'rows': rows, 'error': str(error) if error else None,
+    })
+
+
+def last_queries(n=5, label=None):
+    """최근 실행한 쿼리 (터미널·shell 에서 확인용)"""
+    items = [q for q in QUERY_LOG if not label or q['label'] == label]
+    return list(items)[-n:]
+
+
+def print_queries(n=5, label=None):
+    for q in last_queries(n, label):
+        head = f"[{q['at']}] {q['label']}"
+        tail = (f"실패: {q['error']}" if q['error']
+                else f"{q['rows']:,}행" if q['rows'] is not None else '')
+        print(f'\n─── {head} · {tail} ' + '─' * 30)
+        print(q['query'])
+
 
 # 조회 후 컬럼 이름 통일 — 뒤 단계(pivot·merge)를 하나로 쓰기 위한 것
 STEP_SQL = {'resp': SQL_REP, 'def': SQL_DEF}
@@ -742,7 +772,23 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
                       else f"between '{mt_s}' and '{mt_e}'")
                 query = sql.format(mt=mt, fab=fab, lot_cd=lot_cd,
                                    step=st['step_id'], params=p_in)
-                d = run_query(lake, query)
+
+                # 첫 쿼리는 전문을 남긴다 — 조건이 의도대로 들어갔는지 확인용
+                if done == 0 and VERBOSE:
+                    print(f'\n─── [{label}] 실행 쿼리 ' + '─' * 40)
+                    print(query.strip())
+                    print('─' * 58)
+
+                try:
+                    d = run_query(lake, query)
+                except Exception as e:
+                    _log_query(label, query, error=e)
+                    # 실패하면 쿼리를 그대로 보여준다 (Lake 에 붙여 넣어 확인)
+                    print(f'\n[{label}] 조회 실패 — 아래 쿼리를 확인하세요')
+                    print(query.strip())
+                    raise
+
+                _log_query(label, query, rows=(0 if d is None else len(d)))
                 if d is not None and not d.empty:
                     dfs.append(d)
 
@@ -775,6 +821,49 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
         lambda k: desc_map.get(k, ''))
     return out
 
+
+
+def preview_step_sql(df_info, oper_id, kind, days=30,
+                     date_from=None, date_to=None, limit=6):
+    """
+    실제로 던질 쿼리를 만들어서 돌려준다 (실행은 하지 않음).
+
+    ★ Lake 에 붙여넣어 그대로 확인할 수 있게 하기 위한 것.
+      조회가 실패했을 때 '어떤 조건이 들어갔나' 를 눈으로 보는 게
+      가장 빠르다.
+    """
+    cond  = get_oper_cond(df_info, oper_id)
+    label = STEP_LABEL[kind]
+    steps = cond.get('resp_steps' if kind == 'resp' else 'def_steps') or []
+    if not steps:
+        return []
+
+    sql = STEP_SQL[kind]
+    fab = str(cond.get('fab') or '').lower()
+    lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
+    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+
+    out = []
+    for st in steps:
+        params = [p for p in st.get('params') or [] if p]
+        lots = [l for l in (st.get('lot_cds') or lots_all) if l]
+        if not params or not lots:
+            continue
+        p_in = ", ".join("'" + str(p).replace("'", "''") + "'" for p in params)
+        for lot_cd in lots:
+            for dt_s, dt_e, mt_s, mt_e in chunks:
+                mt = (f"= '{mt_s}'" if mt_s == mt_e
+                      else f"between '{mt_s}' and '{mt_e}'")
+                out.append({
+                    'label': label, 'step_id': st['step_id'],
+                    'lot_cd': lot_cd, 'mt': mt,
+                    'query': sql.format(mt=mt, fab=fab, lot_cd=lot_cd,
+                                        step=st['step_id'],
+                                        params=p_in).strip(),
+                })
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def pivot_steps(df, kind):
