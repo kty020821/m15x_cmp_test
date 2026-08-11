@@ -1256,7 +1256,7 @@ async function applyCopy() {
      같이 지워지는 사고를 막기 위함.
    ══════════════════════════════════════════════════ */
 const FILT = {};
-['lots', 'params', 'defects'].forEach(k => { FILT[k] = {}; });
+['lots', 'params', 'defects', 'resps'].forEach(k => { FILT[k] = {}; });
 
 function hasFilter(k) {
   return Object.values(FILT[k] || {}).some(v => String(v || '').trim() !== '');
@@ -1415,7 +1415,9 @@ function collect() {
     use_yn: g('use_yn'),
     lots: strip(cur.lots.filter(l => (l.lot_cd || '').trim())),
     params: strip(cur.params.filter(p => (p.param || '').trim())),
-    defects: strip(cur.defects.filter(d => (d.step_id || '').trim())),
+    defects: strip((cur.defects || []).filter(d => (d.step_id || '').trim())),
+    // ★ 빠뜨리면 서버가 기존 행을 지운 뒤 넣을 게 없어 통째로 사라진다
+    resps:   strip((cur.resps   || []).filter(d => (d.step_id || '').trim())),
   };
 }
 
@@ -1428,6 +1430,7 @@ async function saveOper() {
   const j = await postJSON(API_SAVE, d);
   if (!j.ok) { edMsg(j.error || '저장 실패', true); return; }
   edMsg(`저장 완료 — device ${j.saved.lots} · param ${j.saved.params}`
+        + (j.saved.resps   ? ` · response ${j.saved.resps}` : '')
         + (j.saved.defects ? ` · defect ${j.saved.defects}` : '')
         + ` (평면 ${j.saved.lots * j.saved.params}행으로 조합됩니다)`);
   await openOper(d.oper_id);
