@@ -9,6 +9,7 @@ from . import views_analysis as va
 from . import views_monitor as vm
 from . import views_config as vc
 from . import views_adhoc as vh
+from . import views_load as vl
 
 urlpatterns = [
     # ... 기존 경로 ...
@@ -49,6 +50,12 @@ urlpatterns = [
     path('api/issue/analyze/', vh.issue_analyze, name='issue-analyze'),
     path('api/issue/scan/',    vh.issue_scan,    name='issue-scan'),
     path('issue/report/',      vh.issue_report,  name='issue-report'),
+
+    # DB 만들기(적재) — 모니터링·분석 화면 공용
+    path('api/load/status/',   vl.load_status,   name='load-status'),
+    path('api/load/run/',      vl.load_run,      name='load-run'),
+    path('api/load/reset/',    vl.load_reset,    name='load-reset'),
+    path('api/load/history/',  vl.load_history,  name='load-history'),
 
     # Inline Monitoring (신규)
     path('monitor/',             vm.monitor_page,    name='monitor'),
