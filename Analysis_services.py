@@ -917,10 +917,22 @@ def merge_steps(base, df_step, kind):
     if wide is None or wide.empty:
         return base
 
-    key = 'substrate_id' if 'substrate_id' in base.columns else None
+    # ★ finalize_df 가 컬럼을 전부 대문자로 바꾸므로 SUBSTRATE_ID 로 온다.
+    #   반면 pivot_steps 는 소문자 substrate_id 로 만든다.
+    #   어느 쪽이든 찾아서 맞춰 붙인다 — 대소문자 하나 때문에
+    #   조회는 다 해놓고 못 붙이는 일이 없게.
+    key = next((c for c in base.columns if c.lower() == 'substrate_id'), None)
     if key is None:
-        print(f'[{kind}] substrate_id 가 없어 계측을 붙이지 못했습니다')
+        print(f'[{kind}] SUBSTRATE_ID 컬럼이 없어 계측을 붙이지 못했습니다 — '
+              f'base 컬럼: {list(base.columns)[:12]}')
         return base
+
+    if key != 'substrate_id':
+        wide = wide.rename(columns={'substrate_id': key})
+
+    # 값 컬럼도 base 의 표기(대문자)에 맞춘다
+    if key.isupper():
+        wide.columns = [c if c == key else str(c).upper() for c in wide.columns]
 
     before = set(base.columns)
     out = base.merge(wide, on=key, how='left')
