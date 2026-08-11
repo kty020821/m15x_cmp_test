@@ -325,6 +325,10 @@
           <div class="ss" id="ss-param"></div>
         </div>
         <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
+        <button class="btn-run" id="btn-mkdb" onclick="openMkdb()"
+                style="background:transparent;color:var(--tx-2);
+                       border:1px solid var(--bd);"
+                title="선택한 공정의 데이터를 원하는 기간으로 다시 적재합니다">DB 만들기</button>
       </div>
     </div>
   </section>
@@ -409,11 +413,60 @@
 </div>
 
 <!-- Plotly: 사내망 CDN 차단 → static 직접 서빙 -->
+<div id="mkdb" style="display:none;position:fixed;right:24px;bottom:24px;
+     width:390px;background:var(--bg-3);border:1px solid var(--bd);
+     border-radius:16px;padding:16px 18px;z-index:60;
+     box-shadow:0 8px 28px rgba(0,0,0,.18);">
+  <div style="font-size:13px;font-weight:800;color:var(--tx-1);
+       margin-bottom:4px;">DB 만들기</div>
+  <div style="font-size:11px;font-weight:600;color:var(--tx-muted);
+       margin-bottom:12px;" id="mkdb-target"></div>
+
+  <div style="display:flex;flex-direction:column;gap:8px;">
+    <label style="font-size:11px;font-weight:800;color:var(--tx-muted);">
+      기간 선택</label>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;" id="mkdb-presets">
+      <button class="btn-run" onclick="setMkdbDays(30)"
+              style="padding:5px 12px;font-size:11px;">30일</button>
+      <button class="btn-run" onclick="setMkdbDays(45)"
+              style="padding:5px 12px;font-size:11px;">45일</button>
+      <button class="btn-run" onclick="setMkdbDays(90)"
+              style="padding:5px 12px;font-size:11px;">90일</button>
+      <button class="btn-run" onclick="setMkdbDays(180)"
+              style="padding:5px 12px;font-size:11px;">180일</button>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input id="mkdb-from" type="date" style="flex:1;font-size:12px;
+             padding:6px 9px;border:1px solid var(--bd);border-radius:9px;
+             background:var(--bg-2);color:var(--tx-1);outline:none;">
+      <span style="color:var(--tx-muted);">~</span>
+      <input id="mkdb-to" type="date" style="flex:1;font-size:12px;
+             padding:6px 9px;border:1px solid var(--bd);border-radius:9px;
+             background:var(--bg-2);color:var(--tx-1);outline:none;">
+    </div>
+    <div style="font-size:10px;font-weight:600;color:var(--tx-muted);">
+      날짜를 지정하면 그 기간을, 비우면 위 버튼의 최근 N일을 조회합니다</div>
+  </div>
+
+  <div id="mkdb-state" style="font-size:11px;font-weight:700;
+       color:var(--tx-2);margin:12px 0;line-height:1.6;"></div>
+
+  <div style="display:flex;gap:6px;align-items:center;">
+    <button class="btn-run" id="mkdb-go" onclick="runMkdb()">적재 시작</button>
+    <button class="btn-run" onclick="closeMkdb()"
+            style="background:transparent;color:var(--tx-2);
+                   border:1px solid var(--bd);">닫기</button>
+    <span id="mkdb-msg" style="font-size:11px;font-weight:700;"></span>
+  </div>
+</div>
+
 <script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
 <script>
 /* API URL 은 반드시 Django url 태그로 생성 (프록시 경로 자동 부착) */
 const API_OPTIONS   = "{% url 'analysis-options' %}";
 const API_TREND     = "{% url 'analysis-trend' %}";
+const API_LOAD_ST   = "{% url 'load-status' %}";
+const API_LOAD_RUN  = "{% url 'load-run' %}";
 const API_CORR      = "{% url 'analysis-corr' %}";
 const API_STATS     = "{% url 'analysis-stats' %}";
 const API_INSIGHT   = "{% url 'analysis-insight' %}";
@@ -692,6 +745,86 @@ async function openFromUrl() {
 const legendOpts = optsFromSelect('raw-legend');
 ssLegend.setOptions(legendOpts);
 if (legendOpts.length) ssLegend.setValue(legendOpts[0].value, legendOpts[0].label);
+
+/* ══════════════════════════════════════════════════
+   DB 만들기 — 지금 고른 공정을 원하는 기간으로 다시 적재
+
+   ★ 모니터링 화면은 '전 공정 45일' 이 기본이고,
+     여기는 '지금 보고 있는 공정을 원하는 기간만큼' 이 목적이다.
+   ★ 잠금은 서버가 잡는다 — 다른 사람이 같은 공정을 적재 중이면 거절된다.
+   ══════════════════════════════════════════════════ */
+let mkdbDays = 45, mkdbTimer = null;
+
+function mkdbMsg(t, err) {
+  const el = document.getElementById('mkdb-msg');
+  el.textContent = t;
+  el.style.color = err ? 'var(--bad)' : 'var(--good)';
+}
+
+async function openMkdb() {
+  const oper = ssOper.value;
+  if (!oper) { alert('먼저 공정을 선택하세요.'); return; }
+  if (/^ADHOC_/i.test(oper)) {
+    alert('1회성 조회 결과는 다시 적재할 수 없습니다.\n' +
+          '1회성 조회 페이지에서 새로 요청하세요.');
+    return;
+  }
+  document.getElementById('mkdb-target').textContent =
+    `${ssOper.label || oper} (${oper})`;
+  document.getElementById('mkdb').style.display = 'block';
+  setMkdbDays(45);
+  await refreshMkdb();
+}
+
+function closeMkdb() {
+  document.getElementById('mkdb').style.display = 'none';
+  clearTimeout(mkdbTimer);
+}
+
+function setMkdbDays(d) {
+  mkdbDays = d;
+  document.querySelectorAll('#mkdb-presets button').forEach(b =>
+    b.style.opacity = (b.textContent === d + '일') ? '1' : '.5');
+}
+
+async function refreshMkdb() {
+  const oper = ssOper.value;
+  const j = await postJSON(API_LOAD_ST, {});
+  const o = (j.opers || []).find(x => x.oper_id === oper);
+  const el = document.getElementById('mkdb-state');
+  if (!o) { el.textContent = '기준정보에 등록되지 않은 공정입니다.'; return; }
+
+  const run = o.running;
+  el.innerHTML = run
+    ? `<span style="color:var(--warn);">적재 중 — ${esc(run.by || '')} ·
+        ${run.elapsed_min}분 경과<br>${esc(run.message || '')}</span>`
+    : `데이터 최신일 <b>${esc(o.data_max || '-')}</b> · ${(o.rows||0).toLocaleString()}행<br>
+       마지막 적재 ${esc(o.last_at || '-')} ${esc(o.last_by || '')}`;
+  document.getElementById('mkdb-go').disabled = !!run;
+
+  clearTimeout(mkdbTimer);
+  if (document.getElementById('mkdb').style.display !== 'none') {
+    mkdbTimer = setTimeout(refreshMkdb, run ? 5000 : 30000);
+  }
+}
+
+async function runMkdb() {
+  const oper = ssOper.value;
+  if (!oper) return;
+  const df = document.getElementById('mkdb-from').value;
+  const dt = document.getElementById('mkdb-to').value;
+  const span = (df && dt) ? `${df} ~ ${dt}` : `최근 ${mkdbDays}일`;
+  if (!confirm(`${oper} 을 ${span} 로 적재할까요?\n` +
+               `기존 데이터는 새로 조회한 것으로 교체됩니다.`)) return;
+
+  const j = await postJSON(API_LOAD_RUN, {
+    opers: [oper], days: mkdbDays,
+    date_from: df || null, date_to: dt || null,
+  });
+  if (!j.ok) { mkdbMsg(j.error || '실행 실패', true); refreshMkdb(); return; }
+  mkdbMsg(`적재 시작 — ${span}`);
+  refreshMkdb();
+}
 
 openFromUrl();      // ?oper=... 로 들어온 1회성 조회 결과 처리
 
