@@ -215,6 +215,32 @@ def _config_map(cur, oper_id):
     return got or None
 
 
+def _step_columns(oper_id):
+    """
+    기준정보에 등록된 Response·Defect 로 만들어질 컬럼 이름.
+
+    ★ 컬럼 이름 규칙은 config_service.step_column 한 곳에만 있다 —
+      여기서 따로 만들면 적재 결과와 점검 대상이 갈린다.
+    """
+    out = []
+    try:
+        from . import config_service as cfg
+        for kind, builder in (('resp', cfg.build_response_config_df),
+                              ('def',  cfg.build_defect_config_df)):
+            df = builder()
+            if df is None or df.empty:
+                continue
+            sub = df[df['OPER_ID'] == str(oper_id).upper()]
+            for _, r in sub.iterrows():
+                col = str(r.get('COLUMN') or '').strip()
+                if col and col not in out:
+                    out.append(col)
+    except Exception as e:
+        print(f'[monitor] 계측 컬럼 목록 조회 생략: '
+              f'{e.__class__.__name__}: {e}')
+    return out
+
+
 def monitored_params(cur, table, oper_id):
     """
     점검할 (파라미터, 타입) 목록과 출처.
@@ -231,6 +257,19 @@ def monitored_params(cur, table, oper_id):
                if d.lower() in NUMERIC_TYPES}
 
     conf = _config_map(cur, oper_id)
+
+    # ── Inline 계측(Response·Defect) 컬럼 합치기 ──────────
+    #   ★ 이 컬럼들은 cmp_cfg_param 이 아니라 cmp_cfg_response /
+    #     cmp_cfg_defect 에 등록된다. 그대로 두면 기준정보 경로에서
+    #     통째로 빠져 점검이 안 된다.
+    #   ★ 등록된 스텝·파라미터로 만들어질 컬럼 이름을 그대로 계산해
+    #     실제 테이블에 있는 것만 대상에 넣는다.
+    step_cols = _step_columns(oper_id)
+    if step_cols:
+        conf = dict(conf or {})
+        for col in step_cols:
+            conf.setdefault(col, '')      # 타입은 이름 규칙으로 자동 판정
+
     if conf:
         # 챔버 짝 확장 — 짝은 원본의 타입을 물려받는다
         expanded = {}
