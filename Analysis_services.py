@@ -666,7 +666,11 @@ where dt between '{dt_s}' and '{dt_e}'
 STEP_SPEC = {
     'resp': {
         'table':  'lake_catalog.tas.tas_rep_wf_metr_inf',
-        'fab':    'fab',
+        # ★ FAB 필터 컬럼 이름이 테이블마다 다르고 확실치 않다.
+        #   첫 조회에서 실패하면 다음 후보로 재시도하고, 성공한 이름을
+        #   기억해 나머지 조회에 쓴다 (매번 두 번씩 던지지 않도록).
+        'fab':    'fab_id',
+        'fab_alt': ['fab', 'fab_nm'],
         'step':   'oper_id',
         'param':  'param_nm',
         'value':  'meas_val',
@@ -677,6 +681,7 @@ STEP_SPEC = {
     'def': {
         'table':  'lake_catalog.tas.tas_dft_wf_inf',
         'fab':    'fab_id',
+        'fab_alt': ['fab', 'fab_nm'],
         'step':   'step_id',
         'param':  'defect_class_nm',
         'value':  'meas_defect_cnt',
@@ -714,6 +719,39 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
     total = max(1, total)
     done, dfs = 0, []
 
+    # 이번 실행에서 실제로 통한 FAB 컬럼 (첫 성공 후 고정)
+    fab_cols = [spec['fab']] + list(spec.get('fab_alt') or [])
+    state = {'fab_col': None}
+
+    def _run(make_query):
+        """
+        FAB 컬럼 이름 후보를 차례로 시도한다.
+        ★ 이름이 틀리면 'Column ... cannot be resolved' 로 실패하는데,
+          그 한 번 때문에 계측 전체를 포기하지 않도록 한다.
+        """
+        if state['fab_col']:
+            return run_query(lake, make_query(state['fab_col']))
+
+        last = None
+        for cand in fab_cols:
+            try:
+                d = run_query(lake, make_query(cand))
+            except Exception as e:
+                last = e
+                if 'cannot be resolved' in str(e).lower() or 'column' in str(e).lower():
+                    print(f"  [{spec['label']}] FAB 컬럼 '{cand}' 불가 — 다음 후보 시도")
+                    continue
+                raise
+            state['fab_col'] = cand
+            if cand != spec['fab']:
+                print(f"  [{spec['label']}] FAB 컬럼은 '{cand}' 입니다 "
+                      f"(STEP_SPEC 기본값 '{spec['fab']}' 대신 사용)")
+            return d
+        raise RuntimeError(
+            f"{spec['label']} 조회 실패 — FAB 컬럼 후보 {fab_cols} 가 모두 "
+            f"맞지 않습니다. {spec['table']} 의 실제 컬럼명을 확인해 "
+            f"analysis_service.STEP_SPEC 를 고쳐 주세요. (원인: {last})")
+
     for st in steps:
         params = [p for p in st.get('params') or [] if p]
         if not params:
@@ -728,19 +766,23 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
             for dt_s, dt_e, mt_s, mt_e in chunks:
                 mt_cond = (f"= '{mt_s}'" if mt_s == mt_e
                            else f"between '{mt_s}' and '{mt_e}'")
-                query = f"""
+
+                def make_query(fab_col, _mt=mt_cond, _lot=lot_cd,
+                               _step=st['step_id'], _p=p_in):
+                    return f"""
 select alias_lot_id, wf_id, {spec['step']} as step_id,
        {spec['param']} as param, {spec['value']} as value,
        {spec['time']} as end_tm
        {', ' + spec['desc'] + ' as step_desc' if spec['desc'] else ''}
 from {spec['table']}
-where mt {mt_cond}
-  and {spec['fab']} = '{fab}'
-  and lot_cd = '{lot_cd}'
-  and {spec['step']} = '{st['step_id']}'
-  and {spec['param']} in ({p_in})
+where mt {_mt}
+  and {fab_col} = '{fab}'
+  and lot_cd = '{_lot}'
+  and {spec['step']} = '{_step}'
+  and {spec['param']} in ({_p})
 """
-                d = run_query(lake, query)
+
+                d = _run(make_query)
                 if d is not None and not d.empty:
                     d = d.copy()
                     d.columns = d.columns.str.lower()
@@ -1724,12 +1766,17 @@ def save_analysis_df(df, oper_id):
 # ══════════════════════════════════════════════════════════
 # 10. 한 공정 전체 파이프라인
 # ══════════════════════════════════════════════════════════
-def build_analysis_df(lake, df_info, oper_id, days=30):
+def build_analysis_df(lake, df_info, oper_id, days=30,
+                      date_from=None, date_to=None):
     """
     조회 → 정리 → 머지 → 저장형태 정리까지.
     단계별 행수를 로그로 남긴다 — 저장 시 '빈 df' 가 나오면
     이 로그에서 어느 단계가 0인지 바로 보인다.
+
+    date_from/date_to 를 주면 그 기간을, 없으면 오늘부터 days 일 전까지.
+    (분석 화면에서 기간을 직접 고르는 경우에 쓴다)
     """
+    rng = {'date_from': date_from, 'date_to': date_to}
     def _n(tag, d):
         if VERBOSE:
             print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행")
@@ -1737,9 +1784,9 @@ def build_analysis_df(lake, df_info, oper_id, days=30):
 
     cond = get_oper_cond(df_info, oper_id)
 
-    df_src = _n('fetch_src',   fetch_src(lake, cond, days))
-    df_apc = _n('fetch_apc',   fetch_apc(lake, cond, days))
-    df_mes = _n('fetch_mes',   fetch_mes(lake, cond, df_src, days))
+    df_src = _n('fetch_src',   fetch_src(lake, cond, days, **rng))
+    df_apc = _n('fetch_apc',   fetch_apc(lake, cond, days, **rng))
+    df_mes = _n('fetch_mes',   fetch_mes(lake, cond, df_src, days, **rng))
 
     w = _n('pivot_src',   pivot_src(df_src))
     a = _n('prepare_apc', prepare_apc(df_apc))    # IDLE 라벨까지 여기서 계산
@@ -1750,10 +1797,10 @@ def build_analysis_df(lake, df_info, oper_id, days=30):
     # ── Inline 계측 (선택) ───────────────────────────────
     #   등록이 없으면 fetch_steps 가 빈 DF 를 주고 merge_steps 가
     #   그대로 통과시킨다 — 계측 없이도 병합 테이블은 완성된다.
-    df_rep = _n('fetch_rep', fetch_steps(lake, cond, 'resp', days))
+    df_rep = _n('fetch_rep', fetch_steps(lake, cond, 'resp', days, **rng))
     m = _n('merge_rep',      merge_steps(m, df_rep, 'resp'))
 
-    df_def = _n('fetch_def', fetch_steps(lake, cond, 'def', days))
+    df_def = _n('fetch_def', fetch_steps(lake, cond, 'def', days, **rng))
     m = _n('merge_def',      merge_steps(m, df_def, 'def'))
 
     return m
