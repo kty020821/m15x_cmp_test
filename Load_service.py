@@ -270,8 +270,11 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
         progress(job_id, '기준정보 조회 중')
         df_info = svc.get_config()
 
-        progress(job_id, f'{oper_id} 조회 중 (최근 {days}일)')
-        df = svc.build_analysis_df(lake, df_info, oper_id, days=int(days))
+        span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
+                else f'최근 {days}일')
+        progress(job_id, f'{oper_id} 조회 중 ({span})')
+        df = svc.build_analysis_df(lake, df_info, oper_id, days=int(days),
+                                   date_from=date_from, date_to=date_to)
 
         if df is None or df.empty:
             finish(job_id, '완료', 0, '조회 결과가 없습니다')
@@ -280,7 +283,7 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
         progress(job_id, f'{len(df):,}행 저장 중')
         svc.save_analysis_df(df, oper_id)
 
-        finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료')
+        finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})')
         return {'ok': True, 'rows': len(df)}
 
     except Exception as e:
@@ -289,7 +292,8 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
         return {'ok': False, 'error': str(e)}
 
 
-def run_many(oper_ids, days=DEFAULT_DAYS, user=''):
+def run_many(oper_ids, days=DEFAULT_DAYS, user='',
+             date_from=None, date_to=None):
     """
     여러 공정을 순차로 적재한다.
 
@@ -315,12 +319,14 @@ def run_many(oper_ids, days=DEFAULT_DAYS, user=''):
             lake = svc.get_lake()
         print(f'[load] {oper_id} 적재 시작 (최근 {days}일)')
         results.append({'oper_id': oper_id,
-                        **run_oper(oper_id, days=days, user=user, lake=lake)})
+                        **run_oper(oper_id, days=days, user=user, lake=lake,
+                                   date_from=date_from, date_to=date_to)})
 
     return {'done': len(results), 'results': results, 'skipped': skipped}
 
 
-def run_async(oper_ids, days=DEFAULT_DAYS, user=''):
+def run_async(oper_ids, days=DEFAULT_DAYS, user='',
+              date_from=None, date_to=None):
     """
     웹에서 백그라운드로 적재한다.
     스레드에서는 Django 가 커넥션을 정리해 주지 않으므로 직접 닫는다.
@@ -334,7 +340,8 @@ def run_async(oper_ids, days=DEFAULT_DAYS, user=''):
 
     def _worker():
         try:
-            run_many(ids, days=days, user=user)
+            run_many(ids, days=days, user=user,
+                     date_from=date_from, date_to=date_to)
         except Exception:
             traceback.print_exc()
         finally:
