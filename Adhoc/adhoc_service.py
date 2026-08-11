@@ -445,6 +445,9 @@ def run_job(job_id, lake=None, claimed=False):
             'pre_oper_id': c.get('pre_oper_id', ''),
             'pre_oper_desc': c.get('pre_oper_desc', ''),
             'pre_oper_param': c.get('pre_oper_param', ''),
+            # 기준정보에 등록된 계측 스텝을 그대로 쓴다
+            'resp_steps': svc._step_cond(c['oper_id'], 'resp'),
+            'def_steps':  svc._step_cond(c['oper_id'], 'def'),
         }
         d1, d2 = c['date_from'], c['date_to']
 
@@ -488,6 +491,19 @@ def run_job(job_id, lake=None, claimed=False):
         m = svc.merge_sources(w, a, df_mes)
         df = svc.finalize_df(m, cond, df_src)
         took['머지'] = (datetime.now() - t).seconds
+
+        # ── Inline 계측 (등록돼 있을 때만) ────────────────
+        #   정기 적재와 같은 함수를 쓴다 — 다르게 만들면
+        #   같은 데이터인데 1회성 결과만 컬럼이 달라진다.
+        for kind, label in (('resp', 'Response'), ('def', 'Defect')):
+            steps = cond.get('resp_steps' if kind == 'resp' else 'def_steps')
+            if not steps:
+                continue
+            t = mark(f'{label} 계측 조회')
+            d = svc.fetch_steps(lake, cond, kind, date_from=d1, date_to=d2,
+                                on_progress=prog)
+            df = svc.merge_steps(df, d, kind)
+            took[label] = (datetime.now() - t).seconds
 
         # 어느 단계가 오래 걸렸는지 남긴다 — 다음 조회 계획에 쓴다
         detail = ' · '.join(f'{k} {v}초' for k, v in took.items())
