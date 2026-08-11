@@ -663,33 +663,44 @@ where dt between '{dt_s}' and '{dt_e}'
 #     SRC 와 만드는 규칙이 같아야 붙는다. alias_lot_id 는 이미 7자리로
 #     정리된 값이므로 여기서 자르지 않는다.
 # ══════════════════════════════════════════════════════════
-STEP_SPEC = {
-    'resp': {
-        'table':  'lake_catalog.tas.tas_rep_wf_metr_inf',
-        # ★ FAB 필터 컬럼 이름이 테이블마다 다르고 확실치 않다.
-        #   첫 조회에서 실패하면 다음 후보로 재시도하고, 성공한 이름을
-        #   기억해 나머지 조회에 쓴다 (매번 두 번씩 던지지 않도록).
-        'fab':    'fab_id',
-        'fab_alt': ['fab', 'fab_nm'],
-        'step':   'oper_id',
-        'param':  'param_nm',
-        'value':  'meas_val',
-        'time':   'end_tm',
-        'desc':   'oper_det_desc',
-        'label':  'REP',
-    },
-    'def': {
-        'table':  'lake_catalog.tas.tas_dft_wf_inf',
-        'fab':    'fab_id',
-        'fab_alt': ['fab', 'fab_nm'],
-        'step':   'step_id',
-        'param':  'defect_class_nm',
-        'value':  'meas_defect_cnt',
-        'time':   'end_tm',
-        'desc':   None,          # 이 테이블엔 스텝 이름 컬럼이 없다
-        'label':  'DEF',
-    },
+# ── 조회 SQL ──────────────────────────────────────────────
+#   ★ 사용자가 준 쿼리를 그대로 둔다.
+#     select 절에서 컬럼 이름을 바꾸지 않는다 — 이름 정리는 조회 후
+#     파이썬에서 한다. SQL 을 손대면 Lake 에서 실패했을 때
+#     원본 쿼리와 대조하기가 어려워진다.
+#   ★ mt 만 between 을 쓴다 — 30일 넘게 조회하면 월이 바뀐다.
+SQL_REP = """
+select alias_lot_id, wf_id, end_tm as rep_end_tm, oper_id, oper_det_desc,
+       param_nm, meas_val
+from lake_catalog.tas.tas_rep_wf_metr_inf
+where mt {mt}
+  and fab = '{fab}'
+  and lot_cd = '{lot_cd}'
+  and oper_id = '{step}'
+  and param_nm in ({params})
+"""
+
+SQL_DEF = """
+select alias_lot_id, wf_id, step_id, defect_class_nm, meas_defect_cnt,
+       end_tm as def_end_tm
+from lake_catalog.tas.tas_dft_wf_inf
+where mt {mt}
+  and fab_id = '{fab}'
+  and lot_cd = '{lot_cd}'
+  and step_id = '{step}'
+  and defect_class_nm in ({params})
+"""
+
+# 조회 후 컬럼 이름 통일 — 뒤 단계(pivot·merge)를 하나로 쓰기 위한 것
+STEP_SQL = {'resp': SQL_REP, 'def': SQL_DEF}
+STEP_RENAME = {
+    'resp': {'oper_id': 'step_id', 'oper_det_desc': 'lake_step_desc',
+             'param_nm': 'param', 'meas_val': 'value',
+             'rep_end_tm': 'end_tm'},
+    'def':  {'defect_class_nm': 'param', 'meas_defect_cnt': 'value',
+             'def_end_tm': 'end_tm'},
 }
+STEP_LABEL = {'resp': 'REP', 'def': 'DEF'}
 
 
 def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
@@ -699,124 +710,71 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
 
     반환 컬럼: substrate_id, alias_lot_id, wf_id, step_id, step_desc,
               param, value, end_tm
-    등록이 없으면 빈 DataFrame.
+    기준정보에 등록된 스텝이 없으면 빈 DataFrame.
     """
-    spec  = STEP_SPEC[kind]
+    label = STEP_LABEL[kind]
     steps = cond.get('resp_steps' if kind == 'resp' else 'def_steps') or []
     if not steps:
         if VERBOSE:
-            print(f'  [{spec["label"]}] 등록된 계측 스텝 없음 — 조회 생략')
+            print(f'  [{label}] 등록된 계측 스텝 없음 — 조회 생략')
         return pd.DataFrame()
 
+    sql  = STEP_SQL[kind]
     fab  = str(cond.get('fab') or '').lower()
     lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
     chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
 
-    # 진행률 계산용 총 횟수
-    total = 0
-    for st in steps:
-        total += len(st.get('lot_cds') or lots_all) * len(chunks)
-    total = max(1, total)
+    total = sum(len(st.get('lot_cds') or lots_all) * len(chunks)
+                for st in steps) or 1
     done, dfs = 0, []
-
-    # 이번 실행에서 실제로 통한 FAB 컬럼 (첫 성공 후 고정)
-    fab_cols = [spec['fab']] + list(spec.get('fab_alt') or [])
-    state = {'fab_col': None}
-
-    def _run(make_query):
-        """
-        FAB 컬럼 이름 후보를 차례로 시도한다.
-        ★ 이름이 틀리면 'Column ... cannot be resolved' 로 실패하는데,
-          그 한 번 때문에 계측 전체를 포기하지 않도록 한다.
-        """
-        if state['fab_col']:
-            return run_query(lake, make_query(state['fab_col']))
-
-        last = None
-        for cand in fab_cols:
-            try:
-                d = run_query(lake, make_query(cand))
-            except Exception as e:
-                last = e
-                if 'cannot be resolved' in str(e).lower() or 'column' in str(e).lower():
-                    print(f"  [{spec['label']}] FAB 컬럼 '{cand}' 불가 — 다음 후보 시도")
-                    continue
-                raise
-            state['fab_col'] = cand
-            if cand != spec['fab']:
-                print(f"  [{spec['label']}] FAB 컬럼은 '{cand}' 입니다 "
-                      f"(STEP_SPEC 기본값 '{spec['fab']}' 대신 사용)")
-            return d
-        raise RuntimeError(
-            f"{spec['label']} 조회 실패 — FAB 컬럼 후보 {fab_cols} 가 모두 "
-            f"맞지 않습니다. {spec['table']} 의 실제 컬럼명을 확인해 "
-            f"analysis_service.STEP_SPEC 를 고쳐 주세요. (원인: {last})")
 
     for st in steps:
         params = [p for p in st.get('params') or [] if p]
-        if not params:
-            continue
         # 스텝에 LOT_CD 가 지정돼 있으면 그것만, 없으면 공정의 전체 device
         lots = [l for l in (st.get('lot_cds') or lots_all) if l]
-        if not lots:
+        if not params or not lots:
             continue
         p_in = ", ".join("'" + str(p).replace("'", "''") + "'" for p in params)
 
         for lot_cd in lots:
             for dt_s, dt_e, mt_s, mt_e in chunks:
-                mt_cond = (f"= '{mt_s}'" if mt_s == mt_e
-                           else f"between '{mt_s}' and '{mt_e}'")
-
-                def make_query(fab_col, _mt=mt_cond, _lot=lot_cd,
-                               _step=st['step_id'], _p=p_in):
-                    return f"""
-select alias_lot_id, wf_id, {spec['step']} as step_id,
-       {spec['param']} as param, {spec['value']} as value,
-       {spec['time']} as end_tm
-       {', ' + spec['desc'] + ' as step_desc' if spec['desc'] else ''}
-from {spec['table']}
-where mt {_mt}
-  and {fab_col} = '{fab}'
-  and lot_cd = '{_lot}'
-  and {spec['step']} = '{_step}'
-  and {spec['param']} in ({_p})
-"""
-
-                d = _run(make_query)
+                mt = (f"= '{mt_s}'" if mt_s == mt_e
+                      else f"between '{mt_s}' and '{mt_e}'")
+                query = sql.format(mt=mt, fab=fab, lot_cd=lot_cd,
+                                   step=st['step_id'], params=p_in)
+                d = run_query(lake, query)
                 if d is not None and not d.empty:
-                    d = d.copy()
-                    d.columns = d.columns.str.lower()
-                    if 'step_desc' not in d.columns:
-                        d['step_desc'] = st.get('step_desc') or ''
                     dfs.append(d)
 
                 done += 1
                 n = sum(len(x) for x in dfs)
                 if on_progress:
                     on_progress(done, total,
-                                f"{spec['label']} {st['step_id']} {lot_cd} · {n:,}행")
+                                f"{label} {st['step_id']} {lot_cd} · {n:,}행")
                 if VERBOSE:
-                    print(f"  [{spec['label']}] {done}/{total} "
-                          f"{st['step_id']} {lot_cd} {dt_s} 누적 {n:,}행")
+                    print(f"  [{label}] {done}/{total} {st['step_id']} "
+                          f"{lot_cd} {dt_s} 누적 {n:,}행")
 
     if not dfs:
         return pd.DataFrame()
 
     out = pd.concat(dfs, ignore_index=True).drop_duplicates()
+    out.columns = out.columns.str.lower()
+    out = out.rename(columns=STEP_RENAME[kind])
 
-    # SRC 와 같은 규칙으로 병합 키를 만든다
+    # SRC 와 같은 규칙으로 병합 키를 만든다 (alias_lot_id 는 이미 7자리)
     out['substrate_id'] = (out['alias_lot_id'].astype(str) + '.'
                            + out['wf_id'].astype(str))
+
     # ★ 컬럼 이름은 '기준정보만' 으로 정한다.
-    #   Response 는 Lake 가 oper_det_desc 를 주지만 Defect 은 그런 컬럼이 없다.
-    #   Lake 값을 섞어 쓰면 두 종류의 이름 규칙이 생겨 셋업 화면의
-    #   '생성 컬럼' 미리보기와 실제 컬럼이 어긋난다.
-    #   기준정보에 스텝 이름이 비어 있으면 STEP_ID 로 만든다(미리보기와 동일).
+    #   Lake 의 oper_det_desc 를 섞어 쓰면 Defect(그 컬럼이 없음)과
+    #   규칙이 갈려 셋업 화면의 '생성 컬럼' 미리보기와 어긋난다.
     desc_map = {str(s['step_id']).upper(): (s.get('step_desc') or '').strip()
                 for s in steps}
     out['step_desc'] = out['step_id'].astype(str).str.upper().map(
         lambda k: desc_map.get(k, ''))
     return out
+
 
 
 def pivot_steps(df, kind):
