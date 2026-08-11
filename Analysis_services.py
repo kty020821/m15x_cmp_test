@@ -270,7 +270,55 @@ def get_oper_cond(df_info, oper_id):
         'pre_oper_id':    first['PRE_OPER_ID'],
         'pre_oper_desc':  first['PRE_OPER_DESC'],
         'pre_oper_param': first['PRE_OPER_PARAM'],
+        # Inline 계측 — 등록돼 있을 수도, 없을 수도 있다.
+        # 없으면 빈 목록이고 조회 자체를 건너뛴다.
+        'resp_steps':     _step_cond(oper_id, 'resp'),
+        'def_steps':      _step_cond(oper_id, 'def'),
     }
+
+
+def _step_cond(oper_id, kind):
+    """
+    기준정보에서 Response·Defect 계측 스텝을 읽어 조회 조건으로 만든다.
+
+    반환: [{'step_id','step_desc','lot_cds':[...],'params':[...]}]
+
+    ★ 등록이 없으면 빈 목록을 돌려준다 — Response·Defect 는 선택 사항이고,
+      없더라도 APC·SRC·MES 병합 테이블은 그대로 만들어져야 한다.
+    ★ 기준정보를 못 읽어도 빈 목록이다. 계측 하나 때문에
+      전체 적재가 멈추면 안 된다.
+    """
+    try:
+        from . import config_service as cfg
+        df = (cfg.build_response_config_df() if kind == 'resp'
+              else cfg.build_defect_config_df())
+    except Exception as e:
+        print(f'[{kind}] 기준정보 조회 생략: {e.__class__.__name__}: {e}')
+        return []
+
+    if df is None or df.empty:
+        return []
+    df = df[df['OPER_ID'] == str(oper_id).upper()]
+    if df.empty:
+        return []
+
+    out = {}
+    for _, r in df.iterrows():
+        prm = str(r['PARAM'] or '').strip()
+        if not prm:
+            continue                     # 관리 파라미터가 없으면 조회할 게 없다
+        k = str(r['STEP_ID'] or '').strip().upper()
+        if not k:
+            continue
+        o = out.setdefault(k, {'step_id': k,
+                               'step_desc': str(r['STEP_DESC'] or '').strip(),
+                               'lot_cds': [], 'params': []})
+        if prm not in o['params']:
+            o['params'].append(prm)
+        lc = str(r['LOT_CD'] or '').strip().upper()
+        if lc and lc not in o['lot_cds']:
+            o['lot_cds'].append(lc)
+    return list(out.values())
 
 
 # ══════════════════════════════════════════════════════════
@@ -597,6 +645,206 @@ where dt between '{dt_s}' and '{dt_e}'
     if not out:
         return pd.DataFrame()
     return pd.concat(out, ignore_index=True)
+
+
+# ══════════════════════════════════════════════════════════
+# 4-B. Inline 계측 조회 — Response / Defect
+#
+#   Inline 에서 실제로 관리하는 항목이다. 기준정보에 등록돼 있을 때만
+#   조회하며, 없으면 조용히 건너뛴다 (APC·SRC·MES 병합은 그대로 진행).
+#
+#   ★ 두 테이블은 컬럼 이름이 서로 다르다 —
+#       Response : oper_id  / param_nm         / meas_val
+#       Defect   : step_id  / defect_class_nm  / meas_defect_cnt
+#       필터도 fab vs fab_id 로 다르다.
+#     조회 후 같은 이름으로 정규화해 뒤 단계를 하나로 만든다.
+#
+#   ★ 병합 키는 substrate_id (= alias_lot_id + '.' + wf_id).
+#     SRC 와 만드는 규칙이 같아야 붙는다. alias_lot_id 는 이미 7자리로
+#     정리된 값이므로 여기서 자르지 않는다.
+# ══════════════════════════════════════════════════════════
+STEP_SPEC = {
+    'resp': {
+        'table':  'lake_catalog.tas.tas_rep_wf_metr_inf',
+        'fab':    'fab',
+        'step':   'oper_id',
+        'param':  'param_nm',
+        'value':  'meas_val',
+        'time':   'end_tm',
+        'desc':   'oper_det_desc',
+        'label':  'REP',
+    },
+    'def': {
+        'table':  'lake_catalog.tas.tas_dft_wf_inf',
+        'fab':    'fab_id',
+        'step':   'step_id',
+        'param':  'defect_class_nm',
+        'value':  'meas_defect_cnt',
+        'time':   'end_tm',
+        'desc':   None,          # 이 테이블엔 스텝 이름 컬럼이 없다
+        'label':  'DEF',
+    },
+}
+
+
+def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
+                on_progress=None):
+    """
+    Response 또는 Defect 계측값 조회 (long).
+
+    반환 컬럼: substrate_id, alias_lot_id, wf_id, step_id, step_desc,
+              param, value, end_tm
+    등록이 없으면 빈 DataFrame.
+    """
+    spec  = STEP_SPEC[kind]
+    steps = cond.get('resp_steps' if kind == 'resp' else 'def_steps') or []
+    if not steps:
+        if VERBOSE:
+            print(f'  [{spec["label"]}] 등록된 계측 스텝 없음 — 조회 생략')
+        return pd.DataFrame()
+
+    fab  = str(cond.get('fab') or '').lower()
+    lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
+    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+
+    # 진행률 계산용 총 횟수
+    total = 0
+    for st in steps:
+        total += len(st.get('lot_cds') or lots_all) * len(chunks)
+    total = max(1, total)
+    done, dfs = 0, []
+
+    for st in steps:
+        params = [p for p in st.get('params') or [] if p]
+        if not params:
+            continue
+        # 스텝에 LOT_CD 가 지정돼 있으면 그것만, 없으면 공정의 전체 device
+        lots = [l for l in (st.get('lot_cds') or lots_all) if l]
+        if not lots:
+            continue
+        p_in = ", ".join("'" + str(p).replace("'", "''") + "'" for p in params)
+
+        for lot_cd in lots:
+            for dt_s, dt_e, mt_s, mt_e in chunks:
+                mt_cond = (f"= '{mt_s}'" if mt_s == mt_e
+                           else f"between '{mt_s}' and '{mt_e}'")
+                query = f"""
+select alias_lot_id, wf_id, {spec['step']} as step_id,
+       {spec['param']} as param, {spec['value']} as value,
+       {spec['time']} as end_tm
+       {', ' + spec['desc'] + ' as step_desc' if spec['desc'] else ''}
+from {spec['table']}
+where mt {mt_cond}
+  and {spec['fab']} = '{fab}'
+  and lot_cd = '{lot_cd}'
+  and {spec['step']} = '{st['step_id']}'
+  and {spec['param']} in ({p_in})
+"""
+                d = run_query(lake, query)
+                if d is not None and not d.empty:
+                    d = d.copy()
+                    d.columns = d.columns.str.lower()
+                    if 'step_desc' not in d.columns:
+                        d['step_desc'] = st.get('step_desc') or ''
+                    dfs.append(d)
+
+                done += 1
+                n = sum(len(x) for x in dfs)
+                if on_progress:
+                    on_progress(done, total,
+                                f"{spec['label']} {st['step_id']} {lot_cd} · {n:,}행")
+                if VERBOSE:
+                    print(f"  [{spec['label']}] {done}/{total} "
+                          f"{st['step_id']} {lot_cd} {dt_s} 누적 {n:,}행")
+
+    if not dfs:
+        return pd.DataFrame()
+
+    out = pd.concat(dfs, ignore_index=True).drop_duplicates()
+
+    # SRC 와 같은 규칙으로 병합 키를 만든다
+    out['substrate_id'] = (out['alias_lot_id'].astype(str) + '.'
+                           + out['wf_id'].astype(str))
+    # ★ 컬럼 이름은 '기준정보만' 으로 정한다.
+    #   Response 는 Lake 가 oper_det_desc 를 주지만 Defect 은 그런 컬럼이 없다.
+    #   Lake 값을 섞어 쓰면 두 종류의 이름 규칙이 생겨 셋업 화면의
+    #   '생성 컬럼' 미리보기와 실제 컬럼이 어긋난다.
+    #   기준정보에 스텝 이름이 비어 있으면 STEP_ID 로 만든다(미리보기와 동일).
+    desc_map = {str(s['step_id']).upper(): (s.get('step_desc') or '').strip()
+                for s in steps}
+    out['step_desc'] = out['step_id'].astype(str).str.upper().map(
+        lambda k: desc_map.get(k, ''))
+    return out
+
+
+def pivot_steps(df, kind):
+    """
+    계측 long → wide.
+      값 컬럼 : RESP_<STEP>_<PARAM> / DEF_<STEP>_<PARAM>
+      시각    : RESP_DATE / DEF_DATE (그 웨이퍼의 마지막 계측 시각)
+
+    ★ 컬럼 이름은 config_service.step_column 이 정한다 —
+      화면 미리보기·점검과 규칙이 갈리면 안 되므로 반드시 그 함수를 쓴다.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    try:
+        from . import config_service as cfg
+        colname = cfg.step_column
+    except Exception:
+        def colname(k, step, param):
+            pre = 'DEF' if k == 'def' else 'RESP'
+            slug = lambda v: re.sub(r'_+', '_', re.sub(
+                r'[^0-9A-Za-z_]+', '_', str(v or '').upper())).strip('_')
+            st, pm = slug(step), slug(param)
+            return f'{pre}_{st}_{pm}' if st else f'{pre}_{pm}'
+
+    d = df.copy()
+    d['__col'] = [colname(kind, (sd or si), p)
+                  for sd, si, p in zip(d.get('step_desc', ''),
+                                       d['step_id'], d['param'])]
+    d = d[d['__col'] != '']
+    if d.empty:
+        return pd.DataFrame()
+
+    d['value'] = pd.to_numeric(d['value'], errors='coerce')
+    wide = d.pivot_table(index='substrate_id', columns='__col',
+                         values='value', aggfunc='last').reset_index()
+    wide.columns.name = None
+
+    tcol = 'RESP_DATE' if kind == 'resp' else 'DEF_DATE'
+    tm = (d.groupby('substrate_id', as_index=False)['end_tm'].max()
+            .rename(columns={'end_tm': tcol}))
+    return wide.merge(tm, on='substrate_id', how='left')
+
+
+def merge_steps(base, df_step, kind):
+    """
+    병합 테이블에 계측 결과를 붙인다.
+
+    ★ 항상 left join 이다 — 계측은 표본이라 측정 안 된 웨이퍼가 정상이다.
+      inner 로 붙이면 계측 없는 웨이퍼가 통째로 사라진다.
+    ★ 비어 있으면 base 를 그대로 돌려준다 (등록이 없거나 조회 결과가 없을 때).
+    """
+    if base is None or base.empty:
+        return base
+    wide = pivot_steps(df_step, kind)
+    if wide is None or wide.empty:
+        return base
+
+    key = 'substrate_id' if 'substrate_id' in base.columns else None
+    if key is None:
+        print(f'[{kind}] substrate_id 가 없어 계측을 붙이지 못했습니다')
+        return base
+
+    before = set(base.columns)
+    out = base.merge(wide, on=key, how='left')
+    added = [c for c in out.columns if c not in before]
+    if VERBOSE:
+        n_hit = int(out[added[0]].notna().sum()) if added else 0
+        print(f'  [{kind}] 컬럼 {len(added)}개 추가 · 값 있는 웨이퍼 {n_hit:,}장')
+    return out
 
 
 # ══════════════════════════════════════════════════════════
@@ -1497,5 +1745,15 @@ def build_analysis_df(lake, df_info, oper_id, days=30):
     a = _n('prepare_apc', prepare_apc(df_apc))    # IDLE 라벨까지 여기서 계산
 
     m = _n('merge',       merge_sources(w, a, df_mes))
+    m = _n('finalize',    finalize_df(m, cond, df_src))
 
-    return _n('finalize', finalize_df(m, cond, df_src))
+    # ── Inline 계측 (선택) ───────────────────────────────
+    #   등록이 없으면 fetch_steps 가 빈 DF 를 주고 merge_steps 가
+    #   그대로 통과시킨다 — 계측 없이도 병합 테이블은 완성된다.
+    df_rep = _n('fetch_rep', fetch_steps(lake, cond, 'resp', days))
+    m = _n('merge_rep',      merge_steps(m, df_rep, 'resp'))
+
+    df_def = _n('fetch_def', fetch_steps(lake, cond, 'def', days))
+    m = _n('merge_def',      merge_steps(m, df_def, 'def'))
+
+    return m
