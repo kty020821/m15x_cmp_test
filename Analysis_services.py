@@ -668,13 +668,15 @@ where dt between '{dt_s}' and '{dt_e}'
 #     select 절에서 컬럼 이름을 바꾸지 않는다 — 이름 정리는 조회 후
 #     파이썬에서 한다. SQL 을 손대면 Lake 에서 실패했을 때
 #     원본 쿼리와 대조하기가 어려워진다.
-#   ★ mt 만 between 을 쓴다 — 30일 넘게 조회하면 월이 바뀐다.
+#   ★ mt 는 언제나 between 이다. 같은 달이어도 between 을 쓴다 —
+#     조건 형태가 상황에 따라 달라지면 실패했을 때 대조하기 어렵다.
+#   ★ fab 조건은 넣지 않는다. lot_cd 만으로 대상이 정해지고,
+#     fab 값 대소문자 때문에 조회가 실패한 적이 있다.
 SQL_REP = """
 select alias_lot_id, wf_id, end_tm as rep_end_tm, oper_id, oper_det_desc,
        param_nm, meas_val
 from lake_catalog.tas.tas_rep_wf_metr_inf
-where mt {mt}
-  and fab_id = '{fab}'
+where mt between '{mt_s}' and '{mt_e}'
   and lot_cd = '{lot_cd}'
   and oper_id = '{step}'
   and param_nm in ({params})
@@ -684,8 +686,7 @@ SQL_DEF = """
 select alias_lot_id, wf_id, step_id, defect_class_nm, meas_defect_cnt,
        end_tm as def_end_tm
 from lake_catalog.tas.tas_dft_wf_inf
-where mt {mt}
-  and fab_id = '{fab}'
+where mt between '{mt_s}' and '{mt_e}'
   and lot_cd = '{lot_cd}'
   and step_id = '{step}'
   and defect_class_nm in ({params})
@@ -750,7 +751,6 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
         return pd.DataFrame()
 
     sql  = STEP_SQL[kind]
-    fab  = str(cond.get('fab') or '').lower()
     lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
     chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
 
@@ -768,9 +768,7 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
 
         for lot_cd in lots:
             for dt_s, dt_e, mt_s, mt_e in chunks:
-                mt = (f"= '{mt_s}'" if mt_s == mt_e
-                      else f"between '{mt_s}' and '{mt_e}'")
-                query = sql.format(mt=mt, fab=fab, lot_cd=lot_cd,
+                query = sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
                                    step=st['step_id'], params=p_in)
 
                 # 첫 쿼리는 전문을 남긴다 — 조건이 의도대로 들어갔는지 확인용
@@ -839,7 +837,6 @@ def preview_step_sql(df_info, oper_id, kind, days=30,
         return []
 
     sql = STEP_SQL[kind]
-    fab = str(cond.get('fab') or '').lower()
     lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
     chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
 
@@ -852,12 +849,10 @@ def preview_step_sql(df_info, oper_id, kind, days=30,
         p_in = ", ".join("'" + str(p).replace("'", "''") + "'" for p in params)
         for lot_cd in lots:
             for dt_s, dt_e, mt_s, mt_e in chunks:
-                mt = (f"= '{mt_s}'" if mt_s == mt_e
-                      else f"between '{mt_s}' and '{mt_e}'")
                 out.append({
                     'label': label, 'step_id': st['step_id'],
-                    'lot_cd': lot_cd, 'mt': mt,
-                    'query': sql.format(mt=mt, fab=fab, lot_cd=lot_cd,
+                    'lot_cd': lot_cd, 'mt': f"between '{mt_s}' and '{mt_e}'",
+                    'query': sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
                                         step=st['step_id'],
                                         params=p_in).strip(),
                 })
