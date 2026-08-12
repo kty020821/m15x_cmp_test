@@ -686,6 +686,18 @@ def analysis_trend(request):
         out = {'data': data, 'param': param}
         if not data:
             out['note'] = f'{param} 에 표시할 값이 없습니다'
+
+        # ── 겹쳐 그릴 파라미터 ───────────────────────────
+        #   ★ 주 파라미터(data)는 형태를 그대로 둔다 —
+        #     드래그 선택·상관·AI 진단이 그 구조에 기대고 있다.
+        #     추가 파라미터는 overlays 로 따로 실어 차트만 겹쳐 그린다.
+        #   ★ Defect 처럼 스텝마다 몇 점씩 흩어진 항목은 합쳐 봐야
+        #     판단이 되므로 이 기능이 필요하다.
+        overlay = [p for p in (body.get('overlay') or [])
+                   if _safe_name(p) and p.upper() != param.upper()][:8]
+        if overlay:
+            out['overlays'] = _fetch_overlays(table, lot_cd, overlay,
+                                              num_cols, have)
         return JsonResponse(out)
     except Exception as e:
         return _api_fail(f'트렌드 조회 실패: {e}', empty, exc=e)
@@ -695,6 +707,44 @@ def analysis_trend(request):
 # 6. 상관 산점도 + R² + 추세선
 #    범례로 항목을 걸러내면 화면에서 다시 계산한다 (analysis.html)
 # ══════════════════════════════════════════════════════════
+def _fetch_overlays(table, lot_cd, params, num_cols, have):
+    """
+    겹쳐 그릴 파라미터들의 (시각, 값) 목록.
+
+    ★ 한 쿼리로 함께 읽는다 — 파라미터마다 왕복하면 8개면 8번이다.
+      다만 각 파라미터는 NULL 인 행이 제각각이라, 읽은 뒤 파라미터별로
+      NULL 을 걸러 낸다. (Defect 은 측정된 웨이퍼가 드문드문하다)
+    """
+    cols = [p for p in params if p.upper() in num_cols]
+    if not cols:
+        return []
+
+    sel = ", ".join(f'"{c}"' for c in cols)
+    where_any = " OR ".join(f'"{c}" IS NOT NULL' for c in cols)
+    sql = f'''
+        SELECT id, "DATE", {sel}
+        FROM {table}
+        WHERE "LOT_CD" = %s AND ({where_any})
+        ORDER BY "DATE"
+    '''
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute(sql, [lot_cd])
+        rows = cur.fetchall()
+
+    out = []
+    for i, c in enumerate(cols):
+        pts = []
+        for r in rows:
+            v = r[2 + i]
+            if v is None:
+                continue
+            pts.append({'id': r[0],
+                        'date': r[1].strftime('%Y-%m-%d %H:%M:%S') if r[1] else None,
+                        'val': float(v)})
+        out.append({'param': c, 'n': len(pts), 'data': pts})
+    return out
+
+
 @csrf_exempt
 def analysis_corr(request):
     if request.method != 'POST':
