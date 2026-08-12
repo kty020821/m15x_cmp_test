@@ -133,7 +133,8 @@ def context(oper_id, lot_cd=None):
            'numeric', 'real', 'double precision'}
     meta = {'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
             'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
-            'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY'}
+            'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
+            'REWORK_N', 'MEAS_N'}
 
     with _conn().cursor() as cur:
         if not _exists(cur, table):
@@ -530,7 +531,8 @@ def _numeric_params(cur, table):
            'numeric', 'real', 'double precision'}
     meta = {'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
             'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
-            'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY'}
+            'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
+            'REWORK_N', 'MEAS_N'}
     cur.execute("""
         SELECT column_name, data_type FROM information_schema.columns
         WHERE table_name = %s ORDER BY ordinal_position
