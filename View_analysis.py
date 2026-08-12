@@ -85,6 +85,7 @@ META_COLS = {
     'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
     'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
     'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
+    'REWORK_N', 'MEAS_N',          # rework 지표 — 파라미터가 아니다
 }
 
 # PG 숫자 타입 (정확 일치로 판정 — 부분문자열 매칭은 오탐이 난다)
@@ -582,11 +583,25 @@ def analysis_options(request):
             oper_id = body.get('oper_id')
             table = _an_table(oper_id)
             if not _table_exists(table):
-                return JsonResponse({'options': [],
-                                     'note': '적재된 데이터가 없습니다'})
+                return JsonResponse({
+                    'options': [],
+                    'note': f'{oper_id} 의 적재 테이블({table})이 없습니다 — '
+                            f'모니터링 화면의 DB 만들기로 먼저 적재하세요'})
 
             cols = _fetch_numeric_cols(table)      # 테이블에 실제로 있는 것
             reg  = _cfg_params(oper_id)            # 기준정보에 등록된 것
+
+            # ★ 목록이 비는 원인을 화면에서 바로 알 수 있게 남긴다.
+            #   숫자 컬럼이 하나도 없으면 적재는 됐지만 값이 전부 비었거나
+            #   타입이 VARCHAR 로 굳은 것이다(repair_numeric_columns 대상).
+            print(f'[analysis] param 옵션 {oper_id}: '
+                  f'숫자컬럼 {len(cols)}개 · 기준정보 {len(reg)}개')
+
+            if not cols:
+                return JsonResponse({
+                    'options': [], 'source': '적재컬럼',
+                    'note': f'{table} 에 숫자 파라미터 컬럼이 없습니다 — '
+                            f'값이 비었거나 컬럼 타입이 문자로 저장됐습니다'})
 
             if not reg:
                 return JsonResponse({'options': cols, 'source': '적재컬럼'})
