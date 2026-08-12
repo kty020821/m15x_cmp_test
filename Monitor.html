@@ -195,6 +195,12 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
     <button class="btn-clear" id="btn-diag" onclick="runDiag()">상태 진단</button>
     <span style="width:1px;height:20px;background:var(--bd);"></span>
     <button class="btn-clear" id="btn-load" onclick="openLoad()">DB 만들기</button>
+    <span style="width:1px;height:20px;background:var(--bd);"></span>
+    <button class="btn-clear" onclick="openReport(false)">리포트 보기</button>
+    <button class="btn-clear" onclick="openReport(true)">리포트 저장</button>
+    <label class="msg" style="color:var(--tx-2);font-weight:700;">
+      <input type="checkbox" id="rep-all" style="vertical-align:middle;">
+      정상 항목까지 포함</label>
     <div class="prog" id="prog"><i id="prog-bar"></i></div>
     <span class="run-info" id="run-info">이전 점검 결과를 불러오는 중...</span>
   </div>
@@ -295,6 +301,7 @@ const API_DIAG    = "{% url 'monitor-diag' %}";
 const API_LOAD_ST  = "{% url 'load-status' %}";
 const API_LOAD_RUN = "{% url 'load-run' %}";
 const API_LOAD_RST = "{% url 'load-reset' %}";
+const URL_REPORT   = "{% url 'monitor-report' %}";
 const API_DETAIL  = "{% url 'monitor-detail' %}";
 
 const MN_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', 'Noto Sans KR', sans-serif";
@@ -392,6 +399,27 @@ async function clearResults() {
   } finally {
     btn.disabled = false;
   }
+}
+
+/* ── 리포트 ───────────────────────────────────
+   화면에서 본 점검 결과를 그대로 문서로 옮긴다.
+   ★ 새 탭으로 여는 이유 — 그 상태로 Ctrl+P 하면 PDF 가 된다.
+     서버에 PDF 라이브러리를 깔 필요가 없고, 차트를 SVG 로 직접
+     그리므로 사내망에서도 외부 스크립트 없이 열린다.
+   ★ 화면 필터가 걸려 있으면 그 공정만 담는다 — 보던 것과
+     리포트가 어긋나지 않게. */
+function openReport(download) {
+  const q = new URLSearchParams({
+    only_issue: document.getElementById('rep-all').checked ? '0' : '1',
+    title: '인라인 점검 리포트',
+  });
+  const oper = document.getElementById('f-oper');
+  if (oper && oper.value) q.set('oper_id', oper.value);
+  if (download) q.set('download', '1');
+
+  const url = URL_REPORT + '?' + q.toString();
+  if (download) location.href = url;
+  else window.open(url, '_blank');
 }
 
 /* ══════════════════════════════════════════════════
