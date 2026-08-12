@@ -550,11 +550,13 @@ def analysis_options(request):
             options, src = _cfg_lots(oper_id), '기준정보'
 
             if options:
-                # 등록됐지만 아직 적재 안 된 device 는 뒤로 보내되 지우진 않는다
-                #   (적재 전에도 무엇이 등록됐는지 보이는 편이 낫다)
+                # ★ 기준정보는 순서만 정하고, 적재된 device 는 빠뜨리지 않는다.
+                #   기준정보가 실제 데이터와 어긋났을 때(도입 전 적재분 등)
+                #   목록에서 실제 조회 가능한 device 가 사라지면 안 된다.
                 ready = [lc for lc in options if lc in have]
                 pending = [lc for lc in options if lc not in have]
-                options = ready + pending
+                extra = sorted(lc for lc in have if lc not in set(options))
+                options = ready + extra + pending
             else:
                 # 기준정보가 없으면 tech_map, 그것도 없으면 적재 데이터
                 mapped = tech_map.lots_of_tech(body.get('tech'))
@@ -589,22 +591,23 @@ def analysis_options(request):
             if not reg:
                 return JsonResponse({'options': cols, 'source': '적재컬럼'})
 
-            # ★ 기준정보 순서를 따르되, 테이블에 없는 건 제외한다.
-            #   등록만 하고 아직 적재 안 된 파라미터를 고르면
-            #   조회가 빈 결과로 끝나 사용자가 원인을 못 찾는다.
+            # ★ 기준정보는 '순서' 만 정하고, 목록은 적재된 컬럼 전체다.
+            #   등록 여부로 걸러내면 기준정보가 실제 테이블과 어긋났을 때
+            #   목록이 통째로 비어 아무것도 고를 수 없게 된다.
+            #   (기준정보 도입 전에 적재된 테이블은 이름이 안 맞을 수 있다)
             have = set(cols)
-            options = [p for p in reg if p in have]
-            missing = [p for p in reg if p not in have]
-            extra   = [c for c in cols if c not in set(reg)]
+            ordered = [p for p in reg if p in have]          # 등록 + 적재됨
+            rest    = [c for c in cols if c not in set(reg)]  # 적재만 됨
+            missing = [p for p in reg if p not in have]       # 등록만 됨
 
             note = ''
             if missing:
-                note = (f'기준정보에 있으나 적재되지 않은 파라미터 '
-                        f'{len(missing)}개는 제외했습니다 '
-                        f'(DB 만들기로 다시 적재하세요)')
-            return JsonResponse({'options': options, 'source': '기준정보',
-                                 'missing': missing, 'extra': extra,
-                                 'note': note})
+                note = (f'기준정보에 있으나 아직 적재되지 않은 파라미터 '
+                        f'{len(missing)}개가 있습니다 '
+                        f'(모니터링 화면의 DB 만들기로 다시 적재하세요)')
+            return JsonResponse({'options': ordered + rest,
+                                 'source': '기준정보 우선',
+                                 'missing': missing, 'note': note})
 
         return JsonResponse({'options': []})
     except Exception as e:
