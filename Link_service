@@ -1,0 +1,309 @@
+"""
+equipment/link_service.py
+════════════════════════════════════════════════════════════
+연계 공정 조회 · 병합 (기준정보 v2 기반)
+
+  config2 에 등록한 연계 공정을 타입별 쿼리로 조회해
+  본공정 병합 테이블에 컬럼으로 붙인다.
+
+────────────────────────────────────────────────────────────
+타입별 조회 대상
+
+  SRC  tas_src_wf_metr_inf   다른 공정의 측정값
+  REP  tas_rep_wf_metr_inf   Response 계측
+  DEF  tas_dft_wf_inf        Defect 계측
+
+★ 세 쿼리 모두 alias_lot_id 와 wf_id 를 돌려준다.
+  그 둘로 만든 키(alias_lot_id + '.' + 0패딩 wf_id)가 조인 키다.
+  alias_lot_id 는 최초 lot_id 라 층이 바뀌어도 불변이다.
+
+★ wf_id 는 1~9 가 '01'~'09' 로 0 이 붙는다.
+  중간에 정수로 바뀌면 'TA1234A.1' 이 되어 'TA1234A.01' 과 안 붙고,
+  에러 없이 값이 전부 NULL 로만 나온다. 양쪽 모두 wafer_key() 로 만든다.
+
+★ mt 는 언제나 between 이다. 청크로 쪼개지 않는다 —
+  청크마다 mt 범위가 달라져 기간 끝쪽 월이 빠지는 사고가 있었다.
+
+★ 기존 analysis_service 는 건드리지 않는다.
+  운영 중인 경로이므로 여기서 따로 붙이고, 검증이 끝나면 합친다.
+════════════════════════════════════════════════════════════
+"""
+
+from datetime import date, timedelta
+
+import pandas as pd
+
+from . import config2_service as cfg2
+
+VERBOSE = True
+
+# ── 조회 SQL ──────────────────────────────────────────────
+#   ★ 조건절 컬럼 이름은 손대지 않는다. 채우는 자리는
+#     mt_s / mt_e / lot_cd / link_id / params 뿐이다.
+SQL_SRC = """
+select alias_lot_id, wf_id, param_nm, meas_val, end_tm,
+       RANK() over(partition by lot_id, wf_id, param_nm
+                   order by end_tm ASC) r
+from lake_catalog.tas.tas_src_wf_metr_inf
+where mt between '{mt_s}' and '{mt_e}'
+  and lot_cd = '{lot_cd}'
+  and oper_id = '{link_id}'
+  and param_nm in ({params})
+"""
+
+SQL_REP = """
+select alias_lot_id, wf_id, param_nm, meas_val, end_tm
+from lake_catalog.tas.tas_rep_wf_metr_inf
+where mt between '{mt_s}' and '{mt_e}'
+  and lot_cd = '{lot_cd}'
+  and oper_id = '{link_id}'
+  and param_nm in ({params})
+"""
+
+SQL_DEF = """
+select alias_lot_id, wf_id, defect_class_nm, meas_defect_cnt, end_tm
+from lake_catalog.tas.tas_dft_wf_inf
+where mt between '{mt_s}' and '{mt_e}'
+  and lot_cd = '{lot_cd}'
+  and step_id = '{link_id}'
+  and defect_class_nm in ({params})
+"""
+
+SQL = {'SRC': SQL_SRC, 'REP': SQL_REP, 'DEF': SQL_DEF}
+
+# 조회 후 컬럼 이름 통일 — 뒤 단계를 하나로 쓰기 위한 것
+RENAME = {
+    'SRC': {'param_nm': 'param', 'meas_val': 'value'},
+    'REP': {'param_nm': 'param', 'meas_val': 'value'},
+    'DEF': {'defect_class_nm': 'param', 'meas_defect_cnt': 'value'},
+}
+
+# SRC 연계는 rework 전 값을 쓴다 (본공정과 같은 기준)
+SRC_PICK_FIRST = True
+
+
+def _month_range(days=30, date_from=None, date_to=None):
+    """조회 기간을 덮는 mt(YYYYMM) 시작·끝"""
+    if date_from or date_to:
+        d2 = pd.to_datetime(date_to).date() if date_to else date.today()
+        d1 = (pd.to_datetime(date_from).date() if date_from
+              else d2 - timedelta(days=days))
+        if d1 > d2:
+            d1, d2 = d2, d1
+    else:
+        d2 = date.today()
+        d1 = d2 - timedelta(days=days)
+    return d1.strftime('%Y%m'), d2.strftime('%Y%m')
+
+
+def _quote_list(vals):
+    return ", ".join("'" + str(v).replace("'", "''") + "'" for v in vals)
+
+
+def preview_sql(oper_id, scope=None, days=30, date_from=None, date_to=None,
+                lot_cds=None):
+    """
+    실행하지 않고 던질 쿼리만 만든다 (Lake 에 붙여넣어 확인용).
+    """
+    mt_s, mt_e = _month_range(days, date_from, date_to)
+    lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
+    if not lots:
+        lots = ['<LOT_CD>']
+
+    out = []
+    for lk in cfg2.links_of(oper_id, scope):
+        params = [p for p in lk['params'] if p]
+        if not params:
+            continue
+        for lot_cd in lots:
+            out.append({
+                'kind': lk['kind'], 'alias': lk['alias'],
+                'link_id': lk['link_id'], 'lot_cd': lot_cd,
+                'query': SQL[lk['kind']].format(
+                    mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
+                    link_id=lk['link_id'],
+                    params=_quote_list(params)).strip(),
+            })
+    return out
+
+
+# ══════════════════════════════════════════════════════════
+# 조회
+# ══════════════════════════════════════════════════════════
+def fetch_link(lake, link, lot_cds, mt_s, mt_e, run_query, on_progress=None):
+    """
+    연계 공정 1건 조회 (long).
+
+    반환 컬럼: wkey, param, value, end_tm
+    등록 파라미터가 없으면 빈 DataFrame.
+    """
+    kind = link['kind']
+    params = [p for p in link['params'] if p]
+    if not params:
+        if VERBOSE:
+            print(f"  [{kind}:{link['alias']}] 관리 PARAM 없음 — 조회 생략")
+        return pd.DataFrame()
+
+    sql = SQL[kind]
+    p_in = _quote_list(params)
+    dfs, done = [], 0
+    total = max(1, len(lot_cds))
+
+    for lot_cd in lot_cds:
+        query = sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
+                           link_id=link['link_id'], params=p_in)
+        if done == 0 and VERBOSE:
+            print(f"\n─── [{kind}:{link['alias']}] 실행 쿼리 " + '─' * 30)
+            print(query.strip())
+            print('─' * 58)
+        try:
+            d = run_query(lake, query)
+        except Exception:
+            print(f"\n[{kind}:{link['alias']}] 조회 실패 — 아래 쿼리를 확인하세요")
+            print(query.strip())
+            raise
+
+        if d is not None and not d.empty:
+            dfs.append(d)
+
+        done += 1
+        n = sum(len(x) for x in dfs)
+        if on_progress:
+            on_progress(done, total,
+                        f"{kind}:{link['alias']} {lot_cd} · {n:,}행")
+        if VERBOSE:
+            print(f"  [{kind}:{link['alias']}] {done}/{total} {lot_cd} "
+                  f"mt {mt_s}~{mt_e} 누적 {n:,}행")
+
+    if not dfs:
+        return pd.DataFrame()
+
+    out = pd.concat(dfs, ignore_index=True)
+    out.columns = out.columns.str.lower()
+    out = out.rename(columns=RENAME[kind])
+
+    # SRC 는 같은 웨이퍼·파라미터에 측정이 여러 번 쌓인다 (rework)
+    #   본공정과 같은 기준으로 첫 측정만 남긴다
+    if kind == 'SRC' and 'r' in out.columns and SRC_PICK_FIRST:
+        out = out[out['r'] == 1].drop(columns=['r'])
+    elif 'r' in out.columns:
+        out = out.drop(columns=['r'])
+
+    out['wkey'] = [cfg2.wafer_key(a, w)
+                   for a, w in zip(out['alias_lot_id'], out['wf_id'])]
+    return out.drop_duplicates(subset=['wkey', 'param'], keep='first')
+
+
+def pivot_link(df, link):
+    """
+    long → wide.
+      값 컬럼 : <KIND>_<별칭>_<PARAM>
+      시각    : <KIND>_<별칭>_DATE (웨이퍼별 마지막 계측 시각)
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    d = df.copy()
+    d['__col'] = [cfg2.link_column(link['kind'], link['alias'], p)
+                  for p in d['param']]
+    d = d[d['__col'] != '']
+    if d.empty:
+        return pd.DataFrame()
+
+    d['value'] = pd.to_numeric(d['value'], errors='coerce')
+    wide = d.pivot_table(index='wkey', columns='__col', values='value',
+                         aggfunc='last').reset_index()
+    wide.columns.name = None
+
+    if 'end_tm' in d.columns:
+        tcol = f"{link['kind']}_{cfg2.slug(link['alias'])}_DATE"
+        tm = (d.groupby('wkey', as_index=False)['end_tm'].max()
+                .rename(columns={'end_tm': tcol}))
+        wide = wide.merge(tm, on='wkey', how='left')
+    return wide
+
+
+def _base_key(base):
+    """
+    본공정 테이블에 조인 키를 만든다.
+
+    ★ SUBSTRATE_ID 가 이미 'alias_lot_id.wf_id' 형태지만, 그 wf_id 의
+      0 패딩이 유지됐다는 보장이 없다. 여기서 다시 정규화해
+      연계 쪽 키와 형태를 맞춘다.
+    """
+    cols = {c.upper(): c for c in base.columns}
+
+    if 'SUBSTRATE_ID' in cols:
+        sid = base[cols['SUBSTRATE_ID']].astype(str)
+        lot = sid.str.rsplit('.', n=1).str[0]
+        wf = sid.str.rsplit('.', n=1).str[-1]
+        return [cfg2.wafer_key(a, w) for a, w in zip(lot, wf)]
+
+    if 'LOT_ID' in cols and 'WF_ID' in cols:
+        return [cfg2.wafer_key(a, w)
+                for a, w in zip(base[cols['LOT_ID']], base[cols['WF_ID']])]
+    return None
+
+
+def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
+                date_from=None, date_to=None, lot_cds=None, on_progress=None):
+    """
+    본공정 병합 테이블에 연계 공정 컬럼을 붙인다.
+
+    ★ 항상 left join — 연계 계측은 표본이라 값이 없는 웨이퍼가 정상이다.
+      inner 로 붙이면 그 웨이퍼가 통째로 사라진다.
+    ★ 등록이 없으면 base 를 그대로 돌려준다.
+    """
+    if base is None or base.empty:
+        return base
+
+    links = cfg2.links_of(oper_id, scope)
+    if not links:
+        if VERBOSE:
+            print(f'  [link] {oper_id}: 등록된 연계 공정 없음 — 건너뜀')
+        return base
+
+    key = _base_key(base)
+    if key is None:
+        print('[link] SUBSTRATE_ID / LOT_ID+WF_ID 가 없어 연계를 붙이지 '
+              f'못했습니다 — base 컬럼: {list(base.columns)[:12]}')
+        return base
+
+    out = base.copy()
+    out['__wkey'] = key
+
+    mt_s, mt_e = _month_range(days, date_from, date_to)
+    lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
+    if not lots:
+        lots = _lots_of_base(base)
+
+    for lk in links:
+        df = fetch_link(lake, lk, lots, mt_s, mt_e, run_query,
+                        on_progress=on_progress)
+        wide = pivot_link(df, lk)
+        if wide is None or wide.empty:
+            if VERBOSE:
+                print(f"  [{lk['kind']}:{lk['alias']}] 결과 없음")
+            continue
+
+        wide = wide.rename(columns={'wkey': '__wkey'})
+        before = set(out.columns)
+        out = out.merge(wide, on='__wkey', how='left')
+        added = [c for c in out.columns if c not in before]
+        if VERBOSE and added:
+            hit = int(out[added[0]].notna().sum())
+            print(f"  [{lk['kind']}:{lk['alias']}] 컬럼 {len(added)}개 추가 · "
+                  f"값 있는 웨이퍼 {hit:,}장")
+            if hit == 0:
+                print('    값이 하나도 안 붙었습니다 — 조인 키(wf_id 0 패딩)를 '
+                      '확인하세요')
+
+    return out.drop(columns=['__wkey'])
+
+
+def _lots_of_base(base):
+    """base 에 들어 있는 LOT_CD 목록"""
+    cols = {c.upper(): c for c in base.columns}
+    if 'LOT_CD' not in cols:
+        return []
+    return sorted({str(v).upper() for v in base[cols['LOT_CD']].dropna()})
