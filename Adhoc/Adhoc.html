@@ -1089,6 +1089,38 @@ function setColF(k, v) {
   renderScan(izScan, izScanTotal);
 }
 
+/* ★ 텍스트 검색은 표를 다시 그리지 않는다.
+   innerHTML 로 다시 그리면 입력칸이 새로 만들어져 포커스가 날아가고,
+   글자를 하나 칠 때마다 다시 클릭해야 하는 상태가 된다.
+   행을 숨기는 방식이면 입력칸이 그대로 살아 있어 연속 입력이 된다. */
+function setColFText(k, v) {
+  colF[k] = v;
+  applyRowFilter();
+}
+
+function applyRowFilter() {
+  const tbody = document.querySelector('table.sc tbody');
+  if (!tbody || !izScan) return;
+  const items = izScan.items || [];
+
+  let shown = 0;
+  tbody.querySelectorAll('tr[data-i]').forEach(tr => {
+    const it = items[Number(tr.dataset.i)];
+    const ok = it ? passFilter(it) : true;
+    tr.style.display = ok ? '' : 'none';
+    if (ok) shown++;
+    // 펼쳐진 상세 행도 함께 숨긴다
+    const det = tr.nextElementSibling;
+    if (det && det.classList.contains('sc-detail')) {
+      det.style.display = ok ? '' : 'none';
+    }
+  });
+
+  const cnt = document.getElementById('scan-shown');
+  if (cnt) cnt.textContent = (scanFilter || hasColF())
+    ? `${shown} / ${items.length}개 표시` : '';
+}
+
 function clearColF() {
   Object.keys(colF).forEach(k => { colF[k] = ''; });
   izPick = null;
@@ -1136,6 +1168,8 @@ function renderScan(j, total) {
   const oldWrap = document.querySelector('.sc-wrap');
   const keepIn  = oldWrap ? oldWrap.scrollTop : 0;
   const keepWin = window.scrollY;
+  const hadParamFocus = document.activeElement &&
+                        document.activeElement.id === 'fx-param';
 
   const items = j.items || [];
   const partial = total && j.n_param < total;
@@ -1192,7 +1226,8 @@ function renderScan(j, total) {
       요약 카드를 누르면 해당 항목만 걸러집니다 (다시 누르면 해제).
       행을 누르면 그 자리에서 상세가 펼쳐지고, 다시 누르면 닫힙니다.
       ${scanFilter ? `<b style="color:var(--tx-1);"> · 지금 «${esc(scanFilter === 'cp' ? '구간 내 변곡' : scanFilter)}» 만 보는 중</b>` : ''}
-      ${(scanFilter || hasColF()) ? ` · <b style="color:var(--tx-1);">${shown.length} / ${items.length}개 표시</b>` : ''}
+      · <b style="color:var(--tx-1);" id="scan-shown">${(scanFilter || hasColF())
+          ? `${shown.length} / ${items.length}개 표시` : ''}</b>
       ${hasColF() ? ` <button class="btn sm" style="padding:2px 9px;"
           onclick="clearColF()">컬럼 필터 해제</button>` : ''}
     </div>
@@ -1201,7 +1236,7 @@ function renderScan(j, total) {
         <thead><tr>
           <th>파라미터
             <input class="fx" id="fx-param" placeholder="포함 문자 검색"
-                   oninput="setColF('param', this.value)"></th>
+                   oninput="setColFText('param', this.value)"></th>
           <th>타입
             <select class="fx" id="fx-ptype" onchange="setColF('ptype', this.value)">
               ${opt('', colF.ptype, '전체')}
@@ -1229,8 +1264,16 @@ function renderScan(j, total) {
     </div>`;
 
   // 필터 입력값 되살리기 (표를 통째로 다시 그렸으므로)
+  //   ★ 다시 그리기 전에 파라미터 칸에 커서가 있었다면 포커스도 되돌린다.
   const pf = document.getElementById('fx-param');
-  if (pf) pf.value = colF.param;
+  if (pf) {
+    pf.value = colF.param;
+    if (hadParamFocus) {
+      pf.focus();
+      const n = pf.value.length;
+      try { pf.setSelectionRange(n, n); } catch (e) {}
+    }
+  }
 
   // 스크롤 되돌리기 — 다시 그리기 전 위치 그대로
   //   ★ 표 안 스크롤과 페이지 스크롤을 모두 되돌린다. 상세를 펼치면
@@ -1247,6 +1290,8 @@ function renderScan(j, total) {
     });
   }
   if (izPick === null) lastScrolledPick = null;
+
+  applyRowFilter();      // 텍스트 필터 상태를 새로 그린 행에도 반영
 
   if (izPick !== null && izDetail && izDetailFor === izPick) drawIssuePlot(izDetail);
 }
