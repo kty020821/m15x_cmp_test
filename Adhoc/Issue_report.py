@@ -287,8 +287,16 @@ table.idx a { color:var(--tx); text-decoration:none; font-weight:700; }
 """
 
 
+def _downsample(series, cap):
+    """긴 시계열을 균등 간격으로 줄인다 (issue_service 와 같은 규칙)"""
+    if cap <= 0 or len(series) <= cap:
+        return series
+    step = len(series) / cap
+    return [series[int(i * step)] for i in range(cap)]
+
+
 def build_report(oper_id, lot_cd, sel, unit=None, params=None,
-                 only_issue=True, title='', points=None):
+                 only_issue=True, title='', points=None, max_detail=80):
     """
     이슈 스캔 결과를 HTML 문자열로 만든다.
 
@@ -323,6 +331,32 @@ def build_report(oper_id, lot_cd, sel, unit=None, params=None,
     if only_issue:
         items = [i for i in items
                  if i['status'] in ('이상', '주의') or i.get('cp_in_sel')]
+
+    # ── 화면 상세와 같은 데이터로 맞춘다 ─────────────────
+    #   ★ scan_all 의 시계열은 전 파라미터를 한 번에 읽어 만든 것이라
+    #     그 파라미터 측정이 없는 랏·웨이퍼도 섞인다. 반면 화면 상세는
+    #     analyze() 로 그 파라미터만 조회한다(NULL 행 제외).
+    #     같은 파라미터인데 리포트와 화면의 점이 달라 보이던 원인이다.
+    #   ★ 그래서 리포트에 실을 항목만 analyze() 로 다시 받아 교체한다.
+    #     수록 항목만 대상이라 조회 수는 보통 수십 건이다.
+    for it in items[:max_detail]:
+        try:
+            d = iss.analyze(oper_id, lot_cd, it['param'], sel, unit=unit)
+        except Exception as e:
+            print(f"[report] {it['param']} 상세 조회 실패 — 스캔 결과로 대체: "
+                  f"{e.__class__.__name__}: {e}")
+            continue
+        if d.get('status') in ('데이터없음', '기준없음'):
+            continue
+        # 화면 상세가 보여주는 값으로 통일
+        it['series'] = _downsample(d.get('series') or [], pts_cap)
+        it['n_raw'] = len(d.get('series') or [])
+        it['cps'] = d.get('change_points') or []
+        it['cp_note'] = d.get('cp_note') or it.get('cp_note') or ''
+        for k in ('sel', 'base', 'sigma', 'spread', 'out_cnt', 'reasons',
+                  'checks', 'status'):
+            if d.get(k) is not None:
+                it[k] = d[k]
 
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
     head = title or f'{oper_id} 이슈 구간 분석'
@@ -405,8 +439,11 @@ def build_report(oper_id, lot_cd, sel, unit=None, params=None,
         if it.get('spread'):
             spread_html = f"<span>산포비 <b>{it['spread']}배</b></span>"
         cps_html = ''
-        if cp_html:
-            cps_html = f'<div class="cps">{cp_html}</div>'
+        note = str(it.get('cp_note') or '').strip()
+        note_html = f'<div class="cps"><b>{_e(note)}</b></div>' if note else ''
+        if cp_html or note_html:
+            cps_html = note_html + (f'<div class="cps">{cp_html}</div>'
+                                    if cp_html else '')
         reason_html = '<br>'.join('· ' + _e(x) for x in (it.get('reasons') or []))
         # ★ 차트마다 실제로 몇 점을 무슨 단위로 그렸는지 적는다.
         #   메타를 못 보고 지나쳐도 여기서 바로 확인된다.
