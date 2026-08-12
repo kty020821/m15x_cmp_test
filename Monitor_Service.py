@@ -106,7 +106,7 @@ MONITOR_ALL_NUMERIC = True
 META_COLS = {
     'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
     'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
-    'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
+    'WF_ID', 'IDLE', 'REWORK_N', 'MEAS_N', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
 }
 
 # 파생/보조 컬럼 — 점검해도 의미가 약하고 결과만 부풀린다
