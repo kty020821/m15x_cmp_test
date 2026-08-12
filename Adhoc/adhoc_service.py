@@ -515,6 +515,20 @@ def run_job(job_id, lake=None, claimed=False):
                                 f'파라미터 이름을 확인하세요')
             return {'ok': True, 'rows': 0}
 
+        # ── 연계 공정 (1회성은 분석용까지 전부) ──────────
+        #   scope 를 주지 않으면 모니터링·분석·둘다 모두 붙는다.
+        try:
+            from . import link_service as lks
+            t = mark('연계 공정 조회')
+            df = lks.merge_links(df, lake, c['oper_id'], svc.run_query,
+                                 scope=None, date_from=d1, date_to=d2,
+                                 lot_cds=c['lot_cds'], on_progress=prog)
+            took['연계'] = (datetime.now() - t).seconds
+        except Exception as e:
+            traceback.print_exc()
+            print(f'[adhoc] 연계 공정 병합 실패 — 본공정만 저장합니다: '
+                  f'{e.__class__.__name__}: {e}')
+
         # ★ 결과는 1회성 테이블에. 정기 적재 테이블은 건드리지 않는다.
         _set_status(job_id, '실행중', message=f'{len(df):,}행 저장 중')
         svc.save_analysis_df(df, adhoc_oper_id(job_id))
