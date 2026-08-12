@@ -33,7 +33,7 @@
 }
 .ah-page, .ah-page input, .ah-page select, .ah-page button,
 .ah-page textarea, .ah-page table { font-family: var(--ah-font); }
-.ah-page { padding: 26px 30px 80px; }
+.ah-page { padding: 26px 30px 80px; max-width: 1800px; margin: 0 auto; }
 .ah-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
   letter-spacing: -.02em; }
 .ah-sub { font-size: 13px; font-weight: 600; color: var(--tx-2);
@@ -152,7 +152,7 @@ table.jl td { font-size: 12px; font-weight: 600; color: var(--tx-1);
 .kv { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px;
   font-weight: 700; color: var(--tx-2); margin: 10px 0; }
 .kv b { color: var(--tx-1); font-family: var(--ah-mono); }
-.iz-plot { width: 100%; height: 340px; margin-top: 6px; }
+.iz-plot { width: 100%; height: 300px; margin-top: 6px; }
 .cp-list { display: flex; flex-direction: column; gap: 6px; }
 .cp-item { font-size: 12px; font-weight: 700; color: var(--tx-1);
   padding: 8px 11px; border: 1px solid var(--bd); border-radius: var(--r-sm);
@@ -181,8 +181,15 @@ table.sc td { font-size: 12px; font-weight: 600; padding: 8px 9px;
 table.sc tbody tr { cursor: pointer; }
 table.sc tbody tr:hover { background: var(--bg-2); }
 table.sc tbody tr.on { background: var(--bg-2); }
-.sc-wrap { max-height: 460px; overflow-y: auto; border: 1px solid var(--bd);
+/* ★ 표 안에 스크롤을 두면 상세를 펼쳤을 때 표 스크롤과 페이지 스크롤이
+   겹쳐 조작이 어렵다. 평소엔 목록이 길어 스크롤이 필요하지만,
+   행을 펼친 순간에는 스크롤을 풀어 페이지 하나만 움직이게 한다. */
+.sc-wrap { max-height: 62vh; overflow-y: auto; border: 1px solid var(--bd);
   border-radius: var(--r-md); margin-top: 4px; }
+.sc-wrap.open { max-height: none; overflow: visible; }
+
+/* 상세를 펼치면 그 행이 눈에 띄게 */
+tr.sc-detail > td { border-left: 3px solid var(--accent); }
 .cp-mark { color: #7c3aed; font-weight: 800; }
 .spark { vertical-align: middle; }
 .caret { display: inline-block; width: 12px; color: var(--tx-muted);
@@ -1117,6 +1124,7 @@ function passFilter(it) {
 }
 
 let izScanTotal = 0, izDetail = null, izDetailFor = null;
+let lastScrolledPick = null;   // 같은 행을 다시 그릴 때 스크롤이 튀지 않게
 
 function renderScan(j, total) {
   if (!j) return;
@@ -1188,7 +1196,7 @@ function renderScan(j, total) {
       ${hasColF() ? ` <button class="btn sm" style="padding:2px 9px;"
           onclick="clearColF()">컬럼 필터 해제</button>` : ''}
     </div>
-    <div class="sc-wrap">
+    <div class="sc-wrap ${izPick !== null ? 'open' : ''}">
       <table class="sc">
         <thead><tr>
           <th>파라미터
@@ -1225,9 +1233,20 @@ function renderScan(j, total) {
   if (pf) pf.value = colF.param;
 
   // 스크롤 되돌리기 — 다시 그리기 전 위치 그대로
+  //   ★ 표 안 스크롤과 페이지 스크롤을 모두 되돌린다. 상세를 펼치면
+  //     표 스크롤이 풀리므로(.open) 그때는 고른 행을 화면에 맞춘다.
   const newWrap = document.querySelector('.sc-wrap');
-  if (newWrap) newWrap.scrollTop = keepIn;
+  if (newWrap && !newWrap.classList.contains('open')) newWrap.scrollTop = keepIn;
   window.scrollTo(0, keepWin);
+
+  if (izPick !== null && izPick !== lastScrolledPick) {
+    lastScrolledPick = izPick;
+    requestAnimationFrame(() => {
+      const tr = document.querySelector(`table.sc tbody tr[data-i="${izPick}"]`);
+      if (tr) tr.scrollIntoView({behavior: 'smooth', block: 'start'});
+    });
+  }
+  if (izPick === null) lastScrolledPick = null;
 
   if (izPick !== null && izDetail && izDetailFor === izPick) drawIssuePlot(izDetail);
 }
@@ -1411,7 +1430,7 @@ function drawSvgChart(div, r) {
   const pts = (r.series || []).filter(p => p.v !== null && p.v !== undefined);
   if (!pts.length) { div.innerHTML = ''; return; }
 
-  const W = 900, H = 300, L = 58, R = 18, T = 26, B = 38;
+  const W = 900, H = 230, L = 52, R = 16, T = 22, B = 32;
   const b = r.base || {};
   const vals = pts.map(p => p.v);
   let lo = Math.min(...vals, b.min == null ? Infinity : b.min);
@@ -1545,7 +1564,7 @@ function drawIssuePlot(r) {
   Plotly.newPlot(div, traces, {
     paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
     font:{family:AH_FONT, color:'#555', size:11},
-    margin:{l:58, r:18, t:26, b:44},
+    margin:{l:52, r:16, t:22, b:36},
     xaxis:{tickfont:{family:AH_FONT, size:10},
            gridcolor:'rgba(0,0,0,.06)', zeroline:false},
     yaxis:{title:{text:r.param, font:{family:AH_FONT, size:11}},
