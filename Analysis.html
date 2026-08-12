@@ -491,6 +491,15 @@ const FACTOR_MAX = 8;
 
 let trendData    = [];
 let corrParams   = [];
+
+/* 파라미터 합치기 상태.
+   ★ let 은 선언 전에 접근하면 ReferenceError 가 난다(TDZ).
+     onOperChange 가 이 값들을 읽으므로 반드시 그 함수보다 위에 있어야 한다.
+     아래쪽에 두었다가 페이지 로드 중 호출되어 파라미터 목록이
+     통째로 안 채워지는 문제가 있었다. */
+let overlayPick  = new Set();     // 적용된 것
+let overlayDraft = new Set();     // 패널에서 고르는 중
+let overlayData  = [];            // 서버가 준 값
 let currentParam = '';
 let selectedIds  = null;
 
@@ -778,13 +787,23 @@ async function onLotChange(v) {
 }
 
 async function onOperChange(v) {
-  overlayPick = new Set(); overlayData = [];   // 공정이 바뀌면 겹치기 해제
-  updateOverlayBtn();
+  const noteEl = document.getElementById('opt-note');
+  if (noteEl) { noteEl.textContent = ''; noteEl.style.color = 'var(--warn)'; }
+
   ssParam.setOptions([]); ssCorrX.setOptions([]); ssCorrY.setOptions([]);
   btnRun.disabled = true;
-  const noteEl = document.getElementById('opt-note');
-  if (noteEl) noteEl.textContent = '';
   if (!v) return;
+
+  /* ★ 부가 기능(합치기 초기화)이 실패해도 파라미터 목록은 채워져야 한다.
+     예전에 여기서 예외가 나 목록이 통째로 비었다. */
+  try {
+    overlayPick = new Set(); overlayData = [];
+    updateOverlayBtn();
+  } catch (e) {
+    console.warn('합치기 상태 초기화 실패(무시):', e);
+  }
+
+  try {
   const {options, error, note, missing, source} =
     await postJSON(API_OPTIONS, {level: 'param', oper_id: v});
 
@@ -795,12 +814,29 @@ async function onOperChange(v) {
       ((missing || []).length ? ` — ${missing.slice(0, 6).join(', ')}` +
         (missing.length > 6 ? ` 외 ${missing.length - 6}개` : '') : '');
   }
-  if (error) { console.warn('파라미터 목록 조회 실패:', error); return; }
+  if (error) {
+    console.warn('파라미터 목록 조회 실패:', error);
+    if (noteEl) { noteEl.style.color = 'var(--bad)'; noteEl.textContent = error; }
+    return;
+  }
+
   corrParams = options || [];
+  if (!corrParams.length && noteEl && !note) {
+    noteEl.style.color = 'var(--bad)';
+    noteEl.textContent = '파라미터 목록이 비어 있습니다 — 적재 여부를 확인하세요';
+  }
   const opts = corrParams.map(o => ({value: o, label: o}));
   ssParam.setOptions(opts);
   ssCorrX.setOptions(opts);
   ssCorrY.setOptions(opts);
+  } catch (e) {
+    // 여기서 조용히 죽으면 '파라미터가 안 뜬다' 로만 보인다
+    console.error('파라미터 목록 처리 중 오류:', e);
+    if (noteEl) {
+      noteEl.style.color = 'var(--bad)';
+      noteEl.textContent = `파라미터 목록 오류: ${e.message}`;
+    }
+  }
 }
 
 function onParamChange(v) { btnRun.disabled = !v; }
@@ -982,10 +1018,6 @@ function paramNames() {
    ★ 주 파라미터(currentParam)는 왼쪽 축, 겹친 것들은 오른쪽 축.
      단위가 다른 값을 한 축에 그리면 작은 쪽이 바닥에 깔려 안 보인다.
    ══════════════════════════════════════════════════ */
-let overlayPick = new Set();      // 적용된 것
-let overlayDraft = new Set();     // 패널에서 고르는 중
-let overlayData = [];             // 서버가 준 시계열
-
 function toggleOverlayBox(force) {
   const box = document.getElementById('ovbox');
   const on = (force === undefined) ? box.style.display === 'none' : !!force;
