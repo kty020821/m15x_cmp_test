@@ -423,10 +423,78 @@ def _oper_options_names():
         return {}
 
 
-def _lots_with_data():
-    """적재된 테이블들에 실제 존재하는 LOT_CD (문자열로 통일)"""
+def _cfg_lots(oper_id=None):
+    """
+    기준정보에 등록된 LOT_CD.
+    oper_id 를 주면 그 공정 것만, 없으면 전체.
+
+    ★ 기준정보를 못 읽어도 빈 목록만 돌려준다 —
+      옵션 하나 때문에 페이지가 멈추면 안 된다.
+    """
+    try:
+        from . import config_service as cfg
+        df = cfg.build_config_df()
+        if df is None or df.empty:
+            return []
+        if oper_id:
+            df = df[df['OPER_ID'] == str(oper_id).upper()]
+        return sorted({str(v).upper() for v in df['LOT_CD'] if str(v).strip()})
+    except Exception as e:
+        print(f'[analysis] 기준정보 device 조회 생략: '
+              f'{e.__class__.__name__}: {e}')
+        return []
+
+
+def _cfg_params(oper_id):
+    """
+    기준정보에 등록된 파라미터 — 공정 파라미터 + Response·Defect 계측 컬럼.
+
+    ★ 셋업 페이지에 항목을 추가하면 분석 화면에도 바로 나와야 한다.
+      Response·Defect 는 cmp_cfg_param 이 아니라 별도 표에 등록되므로
+      step_column 으로 컬럼 이름을 만들어 함께 넣는다.
+    """
+    out = []
+    try:
+        from . import config_service as cfg
+        df = cfg.build_config_df()
+        if df is not None and not df.empty:
+            sub = df[df['OPER_ID'] == str(oper_id).upper()]
+            for v in sub['PARAM']:
+                v = str(v).upper().strip()
+                if v and v not in out:
+                    out.append(v)
+
+        for builder in (cfg.build_response_config_df,
+                        cfg.build_defect_config_df):
+            d = builder()
+            if d is None or d.empty:
+                continue
+            sub = d[d['OPER_ID'] == str(oper_id).upper()]
+            for c in sub['COLUMN']:
+                c = str(c).strip()
+                if c and c not in out:
+                    out.append(c)
+    except Exception as e:
+        print(f'[analysis] 기준정보 파라미터 조회 생략: '
+              f'{e.__class__.__name__}: {e}')
+    return out
+
+
+def _lots_with_data(oper_id=None):
+    """
+    적재된 테이블에 실제 존재하는 LOT_CD (문자열로 통일).
+    oper_id 를 주면 그 공정 테이블만 본다.
+    """
     lots = set()
     with connections['analysis_db'].cursor() as cur:
+        if oper_id:
+            t = _an_table(oper_id)
+            try:
+                cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {t} '
+                            f'WHERE "LOT_CD" IS NOT NULL')
+                return {str(r[0]) for r in cur.fetchall()}
+            except Exception:
+                return set()
         cur.execute("""
             SELECT tablename FROM pg_tables
             WHERE tablename LIKE 'cmp_analysis_%'
@@ -443,6 +511,25 @@ def _lots_with_data():
 
 
 @csrf_exempt
+@csrf_exempt
+def analysis_refresh(request):
+    """
+    기준정보 캐시를 비운다.
+
+    ★ 공정명은 _OPER_CACHE 에 담아 두는데, 셋업 페이지에서 공정을
+      추가해도 캐시 때문에 분석 화면에 안 나타난다.
+      셋업 저장 후 이 API 를 부르면 즉시 반영된다.
+    """
+    global _OPER_CACHE, _OPER_ERROR
+    _OPER_CACHE, _OPER_ERROR = {}, None
+    try:
+        names = _oper_names()
+        return JsonResponse({'ok': True, 'opers': len(names)})
+    except Exception as e:
+        return _api_fail(f'갱신 실패: {e}', {'opers': 0}, exc=e)
+
+
+@csrf_exempt
 def analysis_options(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
@@ -455,14 +542,30 @@ def analysis_options(request):
 
     try:
         if level == 'lot_cd':
-            # 매핑에 등록됐고 실제 데이터도 있는 것만
-            mapped  = tech_map.lots_of_tech(body.get('tech'))
-            have    = _lots_with_data()
-            options = [lc for lc in mapped if lc in have]
+            # ★ 기준정보(cmp_cfg_lot)가 1순위다.
+            #   셋업 페이지에 device 를 추가하면 여기에도 바로 나와야 한다.
+            #   공정을 고른 뒤라면 그 공정에 등록된 device 만 보여준다.
+            oper_id = body.get('oper_id')
+            have = _lots_with_data(oper_id)
+            options, src = _cfg_lots(oper_id), '기준정보'
 
-            # 데이터에는 있는데 tech_map 에 없는 = 미등록 device
-            unmapped = sorted(lc for lc in have if tech_map.tech_of_lot(lc) is None)
-            return JsonResponse({'options': options, 'unmapped': unmapped})
+            if options:
+                # 등록됐지만 아직 적재 안 된 device 는 뒤로 보내되 지우진 않는다
+                #   (적재 전에도 무엇이 등록됐는지 보이는 편이 낫다)
+                ready = [lc for lc in options if lc in have]
+                pending = [lc for lc in options if lc not in have]
+                options = ready + pending
+            else:
+                # 기준정보가 없으면 tech_map, 그것도 없으면 적재 데이터
+                mapped = tech_map.lots_of_tech(body.get('tech'))
+                options = [lc for lc in mapped if lc in have] or sorted(have)
+                src = 'tech_map' if mapped else '적재데이터'
+
+            # 데이터에는 있는데 기준정보에 없는 = 미등록 device
+            reg = set(_cfg_lots(None))
+            unmapped = sorted(lc for lc in have if lc not in reg) if reg else []
+            return JsonResponse({'options': options, 'unmapped': unmapped,
+                                 'source': src})
 
         if level == 'oper':
             opts = _oper_options()
@@ -474,11 +577,34 @@ def analysis_options(request):
             return JsonResponse(out)
 
         if level == 'param':
-            table = _an_table(body.get('oper_id'))
+            oper_id = body.get('oper_id')
+            table = _an_table(oper_id)
             if not _table_exists(table):
                 return JsonResponse({'options': [],
                                      'note': '적재된 데이터가 없습니다'})
-            return JsonResponse({'options': _fetch_numeric_cols(table)})
+
+            cols = _fetch_numeric_cols(table)      # 테이블에 실제로 있는 것
+            reg  = _cfg_params(oper_id)            # 기준정보에 등록된 것
+
+            if not reg:
+                return JsonResponse({'options': cols, 'source': '적재컬럼'})
+
+            # ★ 기준정보 순서를 따르되, 테이블에 없는 건 제외한다.
+            #   등록만 하고 아직 적재 안 된 파라미터를 고르면
+            #   조회가 빈 결과로 끝나 사용자가 원인을 못 찾는다.
+            have = set(cols)
+            options = [p for p in reg if p in have]
+            missing = [p for p in reg if p not in have]
+            extra   = [c for c in cols if c not in set(reg)]
+
+            note = ''
+            if missing:
+                note = (f'기준정보에 있으나 적재되지 않은 파라미터 '
+                        f'{len(missing)}개는 제외했습니다 '
+                        f'(DB 만들기로 다시 적재하세요)')
+            return JsonResponse({'options': options, 'source': '기준정보',
+                                 'missing': missing, 'extra': extra,
+                                 'note': note})
 
         return JsonResponse({'options': []})
     except Exception as e:
