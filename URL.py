@@ -30,6 +30,7 @@ urlpatterns = [
 
     # 산포 분석 (기존)
     path('analysis/',             va.analysis_page,    name='analysis'),
+    path('api/analysis/refresh/', va.analysis_refresh, name='analysis-refresh'),
     path('api/analysis/options/', va.analysis_options, name='analysis-options'),
     path('api/analysis/trend/',   va.analysis_trend,   name='analysis-trend'),
     path('api/analysis/corr/',    va.analysis_corr,    name='analysis-corr'),
@@ -64,5 +65,6 @@ urlpatterns = [
     path('api/monitor/results/', vm.monitor_results, name='monitor-results'),
     path('api/monitor/clear/',   vm.monitor_clear,   name='monitor-clear'),
     path('api/monitor/diag/',    vm.monitor_diag,    name='monitor-diag'),
+    path('monitor/report/',      vm.monitor_report,  name='monitor-report'),
     path('api/monitor/detail/',  vm.monitor_detail,  name='monitor-detail'),
 ]
