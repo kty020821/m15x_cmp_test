@@ -107,6 +107,25 @@ def _date_chunks(days=30, freq='30D', date_from=None, date_to=None):
     ]
 
 
+def _month_range(days=30, date_from=None, date_to=None):
+    """
+    조회 기간을 덮는 mt(YYYYMM) 시작·끝.
+
+    ★ 청크별 mt 를 쓰면 첫 청크가 '202606~202607' 이 되어 8월 데이터가
+      빠진다. mt 로만 기간을 좁히는 rep/def 는 전체 기간을 한 번에 줘야 한다.
+    """
+    if date_from or date_to:
+        d2 = pd.to_datetime(date_to).date() if date_to else date.today()
+        d1 = (pd.to_datetime(date_from).date() if date_from
+              else d2 - timedelta(days=days))
+        if d1 > d2:
+            d1, d2 = d2, d1
+    else:
+        d2 = date.today()
+        d1 = d2 - timedelta(days=days)
+    return d1.strftime('%Y%m'), d2.strftime('%Y%m')
+
+
 def _recipe_cond(recipe_list, col='recipe_id'):
     """recipe 1개면 =, 여러 개면 IN"""
     rl = [r for r in recipe_list if r]
@@ -771,10 +790,14 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
 
     sql  = STEP_SQL[kind]
     lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
-    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
 
-    total = sum(len(st.get('lot_cds') or lots_all) * len(chunks)
-                for st in steps) or 1
+    # ★ rep/def 는 dt 필터가 없고 mt 로만 기간을 좁힌다.
+    #   그래서 청크로 쪼갤 이유가 없다 — 오히려 청크마다 mt 범위가
+    #   달라져 첫 청크가 202606~202607 이면 8월 데이터가 빠진다.
+    #   전체 기간의 시작·끝 월을 한 번에 준다.
+    mt_s, mt_e = _month_range(days, date_from=date_from, date_to=date_to)
+
+    total = sum(len(st.get('lot_cds') or lots_all) for st in steps) or 1
     done, dfs = 0, []
 
     for st in steps:
@@ -786,37 +809,36 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
         p_in = ", ".join("'" + str(p).replace("'", "''") + "'" for p in params)
 
         for lot_cd in lots:
-            for dt_s, dt_e, mt_s, mt_e in chunks:
-                query = sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
-                                   step=st['step_id'], params=p_in)
+            query = sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
+                               step=st['step_id'], params=p_in)
 
-                # 첫 쿼리는 전문을 남긴다 — 조건이 의도대로 들어갔는지 확인용
-                if done == 0 and VERBOSE:
-                    print(f'\n─── [{label}] 실행 쿼리 ' + '─' * 40)
-                    print(query.strip())
-                    print('─' * 58)
+            # 첫 쿼리는 전문을 남긴다 — 조건이 의도대로 들어갔는지 확인용
+            if done == 0 and VERBOSE:
+                print(f'\n─── [{label}] 실행 쿼리 ' + '─' * 40)
+                print(query.strip())
+                print('─' * 58)
 
-                try:
-                    d = run_query(lake, query)
-                except Exception as e:
-                    _log_query(label, query, error=e)
-                    # 실패하면 쿼리를 그대로 보여준다 (Lake 에 붙여 넣어 확인)
-                    print(f'\n[{label}] 조회 실패 — 아래 쿼리를 확인하세요')
-                    print(query.strip())
-                    raise
+            try:
+                d = run_query(lake, query)
+            except Exception as e:
+                _log_query(label, query, error=e)
+                # 실패하면 쿼리를 그대로 보여준다 (Lake 에 붙여 넣어 확인)
+                print(f'\n[{label}] 조회 실패 — 아래 쿼리를 확인하세요')
+                print(query.strip())
+                raise
 
-                _log_query(label, query, rows=(0 if d is None else len(d)))
-                if d is not None and not d.empty:
-                    dfs.append(d)
+            _log_query(label, query, rows=(0 if d is None else len(d)))
+            if d is not None and not d.empty:
+                dfs.append(d)
 
-                done += 1
-                n = sum(len(x) for x in dfs)
-                if on_progress:
-                    on_progress(done, total,
-                                f"{label} {st['step_id']} {lot_cd} · {n:,}행")
-                if VERBOSE:
-                    print(f"  [{label}] {done}/{total} {st['step_id']} "
-                          f"{lot_cd} {dt_s} 누적 {n:,}행")
+            done += 1
+            n = sum(len(x) for x in dfs)
+            if on_progress:
+                on_progress(done, total,
+                            f"{label} {st['step_id']} {lot_cd} · {n:,}행")
+            if VERBOSE:
+                print(f"  [{label}] {done}/{total} {st['step_id']} "
+                      f"{lot_cd} mt {mt_s}~{mt_e} 누적 {n:,}행")
 
     if not dfs:
         return pd.DataFrame()
@@ -857,7 +879,7 @@ def preview_step_sql(df_info, oper_id, kind, days=30,
 
     sql = STEP_SQL[kind]
     lots_all = [str(v).upper() for v in (cond.get('lot_cd_list') or []) if v]
-    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    mt_s, mt_e = _month_range(days, date_from=date_from, date_to=date_to)
 
     out = []
     for st in steps:
@@ -867,16 +889,15 @@ def preview_step_sql(df_info, oper_id, kind, days=30,
             continue
         p_in = ", ".join("'" + str(p).replace("'", "''") + "'" for p in params)
         for lot_cd in lots:
-            for dt_s, dt_e, mt_s, mt_e in chunks:
-                out.append({
-                    'label': label, 'step_id': st['step_id'],
-                    'lot_cd': lot_cd, 'mt': f"between '{mt_s}' and '{mt_e}'",
-                    'query': sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
-                                        step=st['step_id'],
-                                        params=p_in).strip(),
-                })
-                if len(out) >= limit:
-                    return out
+            out.append({
+                'label': label, 'step_id': st['step_id'],
+                'lot_cd': lot_cd, 'mt': f"between '{mt_s}' and '{mt_e}'",
+                'query': sql.format(mt_s=mt_s, mt_e=mt_e, lot_cd=lot_cd,
+                                    step=st['step_id'],
+                                    params=p_in).strip(),
+            })
+            if len(out) >= limit:
+                return out
     return out
 
 
