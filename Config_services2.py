@@ -1,0 +1,587 @@
+"""
+equipment/config2_service.py
+════════════════════════════════════════════════════════════
+기준정보 v2 — 연계 공정 다중 등록
+
+  기존 config_service 는 그대로 둔다. 운영 중이므로 건드리지 않고
+  새 테이블(cmp_cfg2_*)로 따로 쌓는다. 검증이 끝나면 그때 전환한다.
+
+────────────────────────────────────────────────────────────
+무엇이 달라졌나
+
+  · 연계 공정을 최대 3개까지 등록한다 (기존은 사전공정 1개)
+  · 연계 공정마다 타입을 지정한다 — SRC / REP / DEF
+    타입이 곧 조회 쿼리를 정한다
+  · 연계 공정마다 용도를 지정한다 — 모니터링 / 분석 / 둘 다
+    정기 적재는 무거워지면 안 되므로 '모니터링·둘다' 만 매일 붙이고,
+    '분석' 은 1회성 조회에서만 붙인다
+  · 별칭(alias)으로 컬럼 이름을 짧게 유지한다
+
+★ 컬럼 이름: <KIND>_<별칭>_<PARAM>
+  예) SRC_M1CU_CU_THK_AVG · REP_ADICD_THK · DEF_AEI_SCRATCH
+  OPER_ID 를 그대로 쓰면 SRC_V5071000B_CU_THK_AVG 처럼 길어져
+  차트 범례와 LLM 프롬프트가 지저분해진다.
+
+★ 조인 키: alias_lot_id + '.' + wf_id
+  alias_lot_id 는 최초 lot_id 라 층이 바뀌어도 불변이다.
+  wf_id 는 1~9 가 '01'~'09' 로 0 이 붙으므로 반드시 문자열로 다뤄야 한다 —
+  정수로 바뀌면 'TA1234A.1' 이 되어 'TA1234A.01' 과 조용히 안 붙는다.
+════════════════════════════════════════════════════════════
+"""
+
+import re
+
+import pandas as pd
+from django.db import connections
+
+from . import param_types as pt
+
+T_OPER  = 'cmp_cfg2_oper'
+T_LOT   = 'cmp_cfg2_lot'
+T_PARAM = 'cmp_cfg2_param'
+T_LINK  = 'cmp_cfg2_link'
+
+# 연계 공정 최대 개수 (별칭 기준)
+MAX_LINKS = 3
+
+KINDS  = ['SRC', 'REP', 'DEF']
+SCOPES = ['both', 'mon', 'ana']
+
+KIND_LABEL = {'SRC': 'SRC (측정값)', 'REP': 'REP (Response)',
+              'DEF': 'DEF (Defect)'}
+SCOPE_LABEL = {'both': '둘 다', 'mon': '모니터링', 'ana': '분석'}
+
+# 웨이퍼 번호 자릿수 — '01'~'09' 로 0 이 붙는다
+WF_PAD = 2
+
+
+def _conn():
+    return connections['analysis_db']
+
+
+def _s(v):
+    return str(v or '').strip()
+
+
+def _up(v):
+    return _s(v).upper()
+
+
+def slug(v):
+    """컬럼명에 쓸 수 있게 — 영숫자·_ 만 남기고 대문자로"""
+    out = re.sub(r'[^0-9A-Za-z_]+', '_', _s(v).upper())
+    return re.sub(r'_+', '_', out).strip('_')
+
+
+def wafer_key(alias_lot_id, wf_id):
+    """
+    병합 키. wf_id 는 반드시 0 패딩된 문자열로 만든다.
+
+    ★ Lake 가 '01' 로 주더라도 중간에 정수로 바뀌면 '1' 이 되어
+      다른 데이터와 안 붙는다. 여기서 형태를 고정한다.
+    """
+    w = _s(wf_id)
+    if w.isdigit():
+        w = w.zfill(WF_PAD)
+    return f'{_s(alias_lot_id)}.{w}'
+
+
+def link_column(kind, alias, param):
+    """
+    연계 공정 값이 들어갈 컬럼 이름.
+    예) link_column('SRC', 'M1CU', 'CU_THK_AVG') -> 'SRC_M1CU_CU_THK_AVG'
+
+    ★ 규칙의 단일 소재지다. 적재·화면 미리보기·점검이 모두 이 함수를
+      거쳐야 이름이 갈리지 않는다.
+    """
+    k = _up(kind) if _up(kind) in KINDS else 'SRC'
+    a, p = slug(alias), slug(param)
+    if not p:
+        return ''
+    return f'{k}_{a}_{p}' if a else f'{k}_{p}'
+
+
+# ══════════════════════════════════════════════════════════
+# 테이블
+# ══════════════════════════════════════════════════════════
+def ensure_tables():
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {T_OPER} (
+              oper_id   VARCHAR(100) PRIMARY KEY,
+              oper_desc VARCHAR(200),
+              fab       VARCHAR(50),
+              eq_model  VARCHAR(50),
+              use_yn    VARCHAR(1) DEFAULT 'Y',
+              updated_by VARCHAR(100),
+              updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {T_LOT} (
+              id BIGSERIAL PRIMARY KEY,
+              oper_id   VARCHAR(100),
+              lot_cd    VARCHAR(50),
+              recipe_id VARCHAR(200),
+              use_yn    VARCHAR(1) DEFAULT 'Y'
+            )
+        ''')
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {T_PARAM} (
+              id BIGSERIAL PRIMARY KEY,
+              oper_id    VARCHAR(100),
+              param      VARCHAR(100),
+              param_type VARCHAR(20),
+              use_yn     VARCHAR(1) DEFAULT 'Y'
+            )
+        ''')
+        # 연계 공정 — 파라미터 1개당 1행
+        #   같은 별칭이 여러 행에 반복되지만, 그래야 붙여넣기와 행 복제가
+        #   자연스럽고 파라미터마다 사용 여부를 따로 끌 수 있다.
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {T_LINK} (
+              id BIGSERIAL PRIMARY KEY,
+              oper_id  VARCHAR(100),
+              seq      INTEGER DEFAULT 1,
+              kind     VARCHAR(10),
+              alias    VARCHAR(50),
+              link_id  VARCHAR(100),
+              param    VARCHAR(100),
+              scope    VARCHAR(10) DEFAULT 'both',
+              use_yn   VARCHAR(1) DEFAULT 'Y'
+            )
+        ''')
+        for t in (T_LOT, T_PARAM, T_LINK):
+            cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{t}_oper '
+                        f'ON {t} (oper_id)')
+
+
+# ══════════════════════════════════════════════════════════
+# 조회
+# ══════════════════════════════════════════════════════════
+def list_opers():
+    ensure_tables()
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT o.oper_id, o.oper_desc, o.fab, o.eq_model, o.use_yn,
+                   (SELECT COUNT(*) FROM {T_LOT}   l WHERE l.oper_id = o.oper_id),
+                   (SELECT COUNT(*) FROM {T_PARAM} p WHERE p.oper_id = o.oper_id),
+                   (SELECT COUNT(DISTINCT alias) FROM {T_LINK} k
+                     WHERE k.oper_id = o.oper_id),
+                   (SELECT COUNT(*) FROM {T_LINK} k WHERE k.oper_id = o.oper_id)
+            FROM {T_OPER} o
+            ORDER BY o.oper_desc NULLS LAST, o.oper_id
+        ''')
+        return [{'oper_id': r[0], 'oper_desc': r[1] or '', 'fab': r[2] or '',
+                 'eq_model': r[3] or '', 'use_yn': r[4] or 'Y',
+                 'n_lot': r[5], 'n_param': r[6],
+                 'n_link': r[7], 'n_link_param': r[8]}
+                for r in cur.fetchall()]
+
+
+def get_oper(oper_id):
+    ensure_tables()
+    oper_id = _up(oper_id)
+    with _conn().cursor() as cur:
+        cur.execute(f'SELECT oper_id, oper_desc, fab, eq_model, use_yn '
+                    f'FROM {T_OPER} WHERE oper_id = %s', [oper_id])
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        cur.execute(f'SELECT lot_cd, recipe_id, use_yn FROM {T_LOT} '
+                    f'WHERE oper_id = %s ORDER BY lot_cd, recipe_id', [oper_id])
+        lots = [{'lot_cd': r[0] or '', 'recipe_id': r[1] or '',
+                 'use_yn': r[2] or 'Y'} for r in cur.fetchall()]
+
+        cur.execute(f'SELECT param, param_type, use_yn FROM {T_PARAM} '
+                    f'WHERE oper_id = %s ORDER BY param', [oper_id])
+        params = [{'param': r[0] or '', 'param_type': r[1] or '',
+                   'use_yn': r[2] or 'Y'} for r in cur.fetchall()]
+
+        cur.execute(f'''
+            SELECT seq, kind, alias, link_id, param, scope, use_yn
+            FROM {T_LINK} WHERE oper_id = %s
+            ORDER BY seq, alias, param
+        ''', [oper_id])
+        links = [{'seq': r[0] or 1, 'kind': r[1] or 'SRC', 'alias': r[2] or '',
+                  'link_id': r[3] or '', 'param': r[4] or '',
+                  'scope': r[5] or 'both', 'use_yn': r[6] or 'Y'}
+                 for r in cur.fetchall()]
+
+    return {'oper_id': row[0], 'oper_desc': row[1] or '', 'fab': row[2] or '',
+            'eq_model': row[3] or '', 'use_yn': row[4] or 'Y',
+            'lots': lots, 'params': params, 'links': links}
+
+
+# ══════════════════════════════════════════════════════════
+# 저장
+# ══════════════════════════════════════════════════════════
+def save_oper(d, user=''):
+    """
+    공정 1건 저장 (전체 교체).
+
+    ★ 저장 전 검증에서 걸린 것은 저장하지 않는다 —
+      기존 v1 에서 화면이 payload 를 빠뜨려 '지우기만 하고 안 넣는'
+      사고가 있었다. 여기서는 빈 목록도 명시적으로 확인한다.
+    """
+    ensure_tables()
+    oper_id = _up(d.get('oper_id'))
+    if not oper_id:
+        raise ValueError('OPER_ID 를 입력하세요')
+    if not re.match(r'^[0-9A-Za-z_\-]+$', oper_id):
+        raise ValueError('OPER_ID 에 사용할 수 없는 문자가 있습니다')
+
+    lots, lseen = [], set()
+    for it in d.get('lots') or []:
+        lot = _up(it.get('lot_cd'))
+        if not lot:
+            continue
+        key = (lot, _up(it.get('recipe_id')))
+        if key in lseen:
+            continue
+        lseen.add(key)
+        lots.append((lot, _s(it.get('recipe_id')),
+                     'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
+
+    params, pseen = [], set()
+    for it in d.get('params') or []:
+        p = _up(it.get('param'))
+        if not p or p in pseen:
+            continue
+        pseen.add(p)
+        ptype = _up(it.get('param_type'))
+        params.append((p, ptype if ptype in pt.TYPES else '',
+                       'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
+
+    links, kseen, aliases = [], set(), []
+    for it in d.get('links') or []:
+        kind = _up(it.get('kind'))
+        if kind not in KINDS:
+            kind = 'SRC'
+        alias = slug(it.get('alias'))
+        link_id = _up(it.get('link_id'))
+        prm = _up(it.get('param'))
+        if not alias or not link_id:
+            continue                     # 별칭·공정ID 는 필수
+        if alias not in aliases:
+            aliases.append(alias)
+        key = (kind, alias, prm)
+        if key in kseen:
+            continue
+        kseen.add(key)
+        scope = _s(it.get('scope')).lower()
+        links.append((aliases.index(alias) + 1, kind, alias, link_id, prm,
+                      scope if scope in SCOPES else 'both',
+                      'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
+
+    if len(aliases) > MAX_LINKS:
+        raise ValueError(f'연계 공정은 최대 {MAX_LINKS}개입니다 '
+                         f'(현재 {len(aliases)}개: {", ".join(aliases)})')
+
+    # 같은 별칭에 타입이 둘이면 컬럼 규칙이 흔들린다
+    by_alias = {}
+    for _, kind, alias, link_id, _p, _sc, _u in links:
+        prev = by_alias.setdefault(alias, (kind, link_id))
+        if prev != (kind, link_id):
+            raise ValueError(f'별칭 {alias} 에 타입·공정ID 가 두 가지입니다 — '
+                             f'{prev[0]}/{prev[1]} vs {kind}/{link_id}')
+
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            INSERT INTO {T_OPER} (oper_id, oper_desc, fab, eq_model, use_yn,
+                                  updated_by, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT (oper_id) DO UPDATE SET
+              oper_desc=EXCLUDED.oper_desc, fab=EXCLUDED.fab,
+              eq_model=EXCLUDED.eq_model, use_yn=EXCLUDED.use_yn,
+              updated_by=EXCLUDED.updated_by, updated_at=NOW()
+        ''', [oper_id, _s(d.get('oper_desc')), _s(d.get('fab')).lower(),
+              _up(d.get('eq_model')),
+              'N' if _up(d.get('use_yn')) == 'N' else 'Y', str(user)[:100]])
+
+        for t in (T_LOT, T_PARAM, T_LINK):
+            cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
+
+        for lot, rcp, use in lots:
+            cur.execute(f'INSERT INTO {T_LOT} (oper_id, lot_cd, recipe_id, '
+                        f'use_yn) VALUES (%s,%s,%s,%s)',
+                        [oper_id, lot, rcp, use])
+        for p, ptype, use in params:
+            cur.execute(f'INSERT INTO {T_PARAM} (oper_id, param, param_type, '
+                        f'use_yn) VALUES (%s,%s,%s,%s)',
+                        [oper_id, p, ptype, use])
+        for seq, kind, alias, link_id, prm, scope, use in links:
+            cur.execute(f'INSERT INTO {T_LINK} (oper_id, seq, kind, alias, '
+                        f'link_id, param, scope, use_yn) '
+                        f'VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
+                        [oper_id, seq, kind, alias, link_id, prm, scope, use])
+
+    return {'oper_id': oper_id, 'lots': len(lots), 'params': len(params),
+            'links': len(aliases), 'link_params': len(links)}
+
+
+def delete_oper(oper_id):
+    ensure_tables()
+    oper_id = _up(oper_id)
+    with _conn().cursor() as cur:
+        for t in (T_LOT, T_PARAM, T_LINK, T_OPER):
+            cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
+    return True
+
+
+# ══════════════════════════════════════════════════════════
+# 적재 파이프라인이 쓰는 형태
+# ══════════════════════════════════════════════════════════
+def links_of(oper_id, scope=None):
+    """
+    연계 공정을 별칭 단위로 묶어 돌려준다.
+
+      scope='mon'  모니터링 적재용 (mon + both)
+      scope='ana'  분석용 (ana + both)
+      None         전부
+
+    반환: [{'kind','alias','link_id','scope','params':[...], 'columns':[...]}]
+    """
+    ensure_tables()
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT seq, kind, alias, link_id, param, scope
+            FROM {T_LINK}
+            WHERE oper_id = %s AND COALESCE(use_yn,'Y') <> 'N'
+            ORDER BY seq, alias, param
+        ''', [_up(oper_id)])
+        rows = cur.fetchall()
+
+    out = {}
+    for seq, kind, alias, link_id, prm, sc in rows:
+        if scope and sc not in (scope, 'both'):
+            continue
+        o = out.setdefault(alias, {'seq': seq, 'kind': kind, 'alias': alias,
+                                   'link_id': link_id, 'scope': sc,
+                                   'params': [], 'columns': []})
+        if prm and prm not in o['params']:
+            o['params'].append(prm)
+            o['columns'].append(link_column(kind, alias, prm))
+    return sorted(out.values(), key=lambda x: x['seq'])
+
+
+def build_config_df(include_unused=False):
+    """
+    본공정 기준정보를 평면 DF 로 (기존 파이프라인과 같은 형태).
+    컬럼: FAB, LOT_CD, OPER_ID, OPER_DESC, EQ_MODEL, RECIPE_ID, PARAM, PARAM_TYPE
+    """
+    ensure_tables()
+    cond = "" if include_unused else "WHERE COALESCE(use_yn,'Y') <> 'N'"
+    with _conn().cursor() as cur:
+        cur.execute(f"SELECT oper_id, oper_desc, fab, eq_model FROM {T_OPER} "
+                    f"{cond}")
+        opers = {r[0]: r for r in cur.fetchall()}
+        cur.execute(f"SELECT oper_id, lot_cd, recipe_id FROM {T_LOT} {cond}")
+        lots = cur.fetchall()
+        cur.execute(f"SELECT oper_id, param, param_type FROM {T_PARAM} {cond}")
+        params = cur.fetchall()
+
+    rows = []
+    for oid, lot_cd, recipe in lots:
+        o = opers.get(oid)
+        if not o:
+            continue
+        for poid, prm, ptype in params:
+            if poid != oid:
+                continue
+            rows.append({
+                'FAB': o[2] or '', 'LOT_CD': lot_cd or '', 'OPER_ID': oid,
+                'OPER_DESC': o[1] or '', 'EQ_MODEL': o[3] or '',
+                'RECIPE_ID': recipe or '', 'PARAM': prm or '',
+                'PARAM_TYPE': pt.resolve(prm, ptype),
+            })
+    return pd.DataFrame(rows, columns=[
+        'FAB', 'LOT_CD', 'OPER_ID', 'OPER_DESC', 'EQ_MODEL', 'RECIPE_ID',
+        'PARAM', 'PARAM_TYPE'])
+
+
+def all_columns(oper_id, scope=None):
+    """그 공정에서 만들어질 연계 컬럼 이름 전부 (점검·분석 대상 선정용)"""
+    out = []
+    for lk in links_of(oper_id, scope):
+        for c in lk['columns']:
+            if c and c not in out:
+                out.append(c)
+    return out
+
+
+# ══════════════════════════════════════════════════════════
+# 가져오기 / 검증
+# ══════════════════════════════════════════════════════════
+def import_from_v1(oper_id=None, overwrite=False):
+    """
+    기존 기준정보(cmp_cfg_*)를 v2 로 복사한다.
+
+    ★ 사전공정 1개와 Response·Defect 스텝이 연계 공정으로 옮겨진다.
+      기존 데이터는 건드리지 않는다 — 읽기만 한다.
+    """
+    ensure_tables()
+    from . import config_service as v1
+
+    done, skipped = [], []
+    for o in v1.list_opers():
+        oid = o['oper_id']
+        if oper_id and oid != _up(oper_id):
+            continue
+        if not overwrite and get_oper(oid):
+            skipped.append(oid)
+            continue
+
+        src = v1.get_oper(oid)
+        if not src:
+            continue
+
+        links = []
+        # 사전공정 → SRC
+        if _s(src.get('pre_oper_id')):
+            links.append({
+                'kind': 'SRC',
+                'alias': slug(src.get('pre_oper_desc') or src['pre_oper_id'])[:20],
+                'link_id': src['pre_oper_id'],
+                'param': _up(src.get('pre_oper_param')),
+                'scope': 'both',
+            })
+        # Response → REP, Defect → DEF
+        for key, kind in (('resps', 'REP'), ('defects', 'DEF')):
+            for r in src.get(key) or []:
+                if not _s(r.get('step_id')):
+                    continue
+                links.append({
+                    'kind': kind,
+                    'alias': slug(r.get('step_desc') or r.get('step_id'))[:20],
+                    'link_id': _up(r.get('step_id')),
+                    'param': _up(r.get('param')),
+                    'scope': 'both',
+                    'use_yn': r.get('use_yn', 'Y'),
+                })
+
+        save_oper({**src, 'links': links}, user='import_v1')
+        done.append(oid)
+
+    return {'imported': done, 'skipped': skipped}
+
+
+def overview():
+    """
+    전체 셋업 현황 — 공정별 구성과 만들어질 컬럼을 한눈에.
+
+    ★ 공정을 하나씩 열어 보면 전체가 어떻게 구성됐는지 알 수 없다.
+      어떤 공정에 연계가 빠졌는지, 어떤 별칭이 여러 공정에 쓰였는지,
+      모니터링 적재가 얼마나 무거워질지를 이 표로 판단한다.
+    """
+    ensure_tables()
+    rows, alias_use, kind_cnt = [], {}, {'SRC': 0, 'REP': 0, 'DEF': 0}
+    tot_mon = tot_ana = 0
+
+    for o in list_opers():
+        oid = o['oper_id']
+        links = links_of(oid)
+        mon = [c for lk in links_of(oid, 'mon') for c in lk['columns'] if c]
+        ana = [c for lk in links_of(oid, 'ana') for c in lk['columns'] if c]
+        tot_mon += len(mon)
+        tot_ana += len(ana)
+
+        items = []
+        for lk in links:
+            kind_cnt[lk['kind']] = kind_cnt.get(lk['kind'], 0) + 1
+            alias_use.setdefault(lk['alias'], []).append(oid)
+            items.append({
+                'kind': lk['kind'], 'alias': lk['alias'],
+                'link_id': lk['link_id'], 'scope': lk['scope'],
+                'n_param': len(lk['params']),
+                'columns': lk['columns'][:6],
+                'more': max(0, len(lk['columns']) - 6),
+            })
+
+        # 한눈에 문제를 알 수 있게 짧은 경고만 남긴다 (자세한 건 validate)
+        warn = []
+        if not o['n_lot']:
+            warn.append('device 없음')
+        if not o['n_param']:
+            warn.append('파라미터 없음')
+        if not links:
+            warn.append('연계 공정 없음')
+        if len(items) > MAX_LINKS:
+            warn.append(f'연계 {len(items)}개 (상한 {MAX_LINKS})')
+
+        rows.append({
+            'oper_id': oid, 'oper_desc': o['oper_desc'],
+            'fab': o['fab'], 'use_yn': o['use_yn'],
+            'n_lot': o['n_lot'], 'n_param': o['n_param'],
+            'links': items,
+            'n_mon_col': len(mon), 'n_ana_col': len(ana),
+            'warn': warn,
+        })
+
+    # 여러 공정이 같은 별칭을 쓰면 컬럼 이름이 겹칠 수 있다(테이블은 달라도
+    # 나중에 합쳐 볼 때 헷갈린다) — 알려만 준다
+    shared = {a: v for a, v in alias_use.items() if len(set(v)) > 1}
+
+    return {
+        'rows': rows,
+        'n_oper': len(rows),
+        'n_mon_col': tot_mon, 'n_ana_col': tot_ana,
+        'kind_cnt': kind_cnt,
+        'shared_alias': {a: sorted(set(v)) for a, v in shared.items()},
+    }
+
+
+def validate(oper_id=None):
+    """저장된 기준정보의 문제를 찾는다"""
+    ensure_tables()
+    out = []
+    for o in list_opers():
+        oid = o['oper_id']
+        if oper_id and oid != _up(oper_id):
+            continue
+        d = get_oper(oid)
+        issues = []
+
+        if not d['lots']:
+            issues.append('등록된 device(LOT_CD)가 없습니다')
+        if not d['params']:
+            issues.append('본공정 파라미터가 없습니다')
+        if not _s(d['fab']):
+            issues.append('FAB 이 비어 있습니다')
+
+        aliases = {}
+        for lk in d['links']:
+            a = lk['alias']
+            if not a:
+                issues.append(f"별칭이 빈 연계 공정이 있습니다 ({lk['link_id']})")
+                continue
+            aliases.setdefault(a, set()).add((lk['kind'], lk['link_id']))
+            if not lk['param']:
+                issues.append(f'{a}: 관리 PARAM 이 없어 조회되지 않습니다')
+            elif not link_column(lk['kind'], a, lk['param']):
+                issues.append(f"{a}: 컬럼 이름을 만들 수 없습니다 "
+                              f"(PARAM={lk['param']})")
+
+        if len(aliases) > MAX_LINKS:
+            issues.append(f'연계 공정이 {len(aliases)}개로 상한'
+                          f'({MAX_LINKS})을 넘었습니다')
+        for a, kinds in aliases.items():
+            if len(kinds) > 1:
+                issues.append(f'별칭 {a} 에 타입·공정ID 가 둘 이상입니다')
+
+        # 컬럼 이름 충돌
+        cols = {}
+        for lk in d['links']:
+            c = link_column(lk['kind'], lk['alias'], lk['param'])
+            if c:
+                cols.setdefault(c, 0)
+                cols[c] += 1
+        dup = [c for c, n in cols.items() if n > 1]
+        if dup:
+            issues.append(f'컬럼 이름이 겹칩니다: {", ".join(dup[:5])}')
+
+        if issues:
+            out.append({'oper_id': oid, 'oper_desc': o['oper_desc'],
+                        'issues': issues})
+    return out
