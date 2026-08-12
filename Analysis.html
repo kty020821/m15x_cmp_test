@@ -325,6 +325,12 @@
           <div class="ss" id="ss-param"></div>
         </div>
         <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
+        <span class="msg" id="opt-note" style="font-size:11px;font-weight:600;
+              color:var(--warn);max-width:520px;"></span>
+        <button class="btn-run" onclick="refreshOpts()"
+                style="background:transparent;color:var(--tx-2);
+                       border:1px solid var(--bd);"
+                title="기준정보에 추가한 공정·device·파라미터를 다시 읽습니다">기준정보 새로고침</button>
         <button class="btn-run" id="btn-mkdb" onclick="openMkdb()"
                 style="background:transparent;color:var(--tx-2);
                        border:1px solid var(--bd);"
@@ -467,6 +473,7 @@ const API_OPTIONS   = "{% url 'analysis-options' %}";
 const API_TREND     = "{% url 'analysis-trend' %}";
 const API_LOAD_ST   = "{% url 'load-status' %}";
 const API_LOAD_RUN  = "{% url 'load-run' %}";
+const API_REFRESH   = "{% url 'analysis-refresh' %}";
 const API_CORR      = "{% url 'analysis-corr' %}";
 const API_STATS     = "{% url 'analysis-stats' %}";
 const API_INSIGHT   = "{% url 'analysis-insight' %}";
@@ -746,6 +753,21 @@ const legendOpts = optsFromSelect('raw-legend');
 ssLegend.setOptions(legendOpts);
 if (legendOpts.length) ssLegend.setValue(legendOpts[0].value, legendOpts[0].label);
 
+/* 셋업 페이지에서 기준정보를 바꾼 뒤 눌러 즉시 반영시킨다.
+   ★ 공정명은 서버가 캐시하므로 그냥 두면 새 공정이 안 보인다. */
+async function refreshOpts() {
+  const j = await postJSON(API_REFRESH, {});
+  if (!j.ok) { alert(j.error || '갱신 실패'); return; }
+  const keepOper = ssOper.value, keepLot = ssLot.value;
+  await onTechChange();                 // 목록을 처음부터 다시 채운다
+  if (keepOper) {
+    ssOper.setValue(keepOper, keepOper);
+    await onOperChange();
+    if (keepLot) ssLot.setValue(keepLot, keepLot);
+  }
+  alert(`기준정보를 다시 읽었습니다 (공정 ${j.opers}개)`);
+}
+
 /* ══════════════════════════════════════════════════
    DB 만들기 — 지금 고른 공정을 원하는 기간으로 다시 적재
 
@@ -846,8 +868,19 @@ async function onLotChange(v) {
 async function onOperChange(v) {
   ssParam.setOptions([]); ssCorrX.setOptions([]); ssCorrY.setOptions([]);
   btnRun.disabled = true;
+  const noteEl = document.getElementById('opt-note');
+  if (noteEl) noteEl.textContent = '';
   if (!v) return;
-  const {options, error} = await postJSON(API_OPTIONS, {level: 'param', oper_id: v});
+  const {options, error, note, missing, source} =
+    await postJSON(API_OPTIONS, {level: 'param', oper_id: v});
+
+  /* 기준정보에 등록했는데 적재가 안 된 파라미터는 목록에서 빠진다.
+     그대로 두면 '왜 안 보이지' 로 헤매게 되므로 이유를 알려 준다. */
+  if (noteEl && note) {
+    noteEl.textContent = note +
+      ((missing || []).length ? ` — ${missing.slice(0, 6).join(', ')}` +
+        (missing.length > 6 ? ` 외 ${missing.length - 6}개` : '') : '');
+  }
   if (error) { console.warn('파라미터 목록 조회 실패:', error); return; }
   corrParams = options || [];
   const opts = corrParams.map(o => ({value: o, label: o}));
