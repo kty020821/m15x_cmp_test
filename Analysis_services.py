@@ -441,6 +441,9 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
            CAST(NULL as TIMESTAMP) as pre_oper_time,"""
                 pre_join = ""
 
+            # rework 전(ASC) / 후(DESC) — SRC_PICK 으로 정한다
+            src_order = 'ASC' if str(SRC_PICK).lower() == 'first' else 'DESC'
+
             query = f"""
 WITH src AS (
     select a.lot_id, a.wf_id,
@@ -448,7 +451,8 @@ WITH src AS (
            a.main_eqp_id, a.param_nm, a.oper_id, a.oper_det_desc,
            a.meas_val as thk_value, a.end_tm,
            {pre_cols}
-           RANK() over(partition by a.lot_id, a.wf_id, a.param_nm order by a.end_tm DESC) r2r_rank
+           RANK() over(partition by a.lot_id, a.wf_id, a.param_nm order by a.end_tm {src_order}) r2r_rank,
+           COUNT(*) over(partition by a.lot_id, a.wf_id, a.param_nm) meas_n
     from lake_catalog.tas.tas_src_wf_metr_inf a
 {pre_join}    left join (
         select distinct d.lot_id, d.eqp_recipe_id, d.recipe_rank
@@ -645,6 +649,21 @@ where dt between '{dt_s}' and '{dt_e}'
     if not out:
         return pd.DataFrame()
     return pd.concat(out, ignore_index=True)
+
+
+# ── SRC 측정값 선택 기준 ──────────────────────────────────
+#   같은 lot_id·wf_id·param_nm 에 측정이 여러 번 쌓이는 경우가 있다.
+#   rework(재연마 후 재측정)를 해도 lot_id·wf_id 는 바뀌지 않으므로
+#   같은 키에 2건 이상이면 rework 이 있었다는 뜻이다.
+#
+#     'first'  가장 먼저 측정한 값 = rework 전  ← 기본
+#     'last'   가장 나중 측정한 값 = rework 후
+#
+#   ★ 분석에는 rework 전 값이 맞다. rework 후 값만 보면
+#     '문제가 있어서 재작업한 사실' 이 지워져 공정이 늘 정상으로 보인다.
+#   ★ APC 는 반대다. 한 번 공정에 R2R 계산 요청이 2~3번 있으므로
+#     마지막 요청이 실제 적용 조건이다 (그대로 DESC 유지).
+SRC_PICK = 'first'
 
 
 # ══════════════════════════════════════════════════════════
@@ -977,6 +996,15 @@ def pivot_src(df_src):
     meta = (df.sort_values('end_tm')
               .groupby('substrate_id', as_index=False)[meta_cols]
               .first())
+
+    # ── rework 지표 ──────────────────────────────────────
+    #   같은 lot_id·wf_id·param_nm 에 측정이 2건 이상이면 재작업이 있었다.
+    #   ★ 값은 rework 전(SRC_PICK='first')을 쓰되, '재작업이 있었다' 는
+    #     사실은 남긴다. 그걸 버리면 재작업이 늘어나는 신호를 못 본다.
+    if 'meas_n' in df.columns:
+        rw = (df.groupby('substrate_id', as_index=False)['meas_n'].max()
+                .rename(columns={'meas_n': 'rework_n'}))
+        meta = meta.merge(rw, on='substrate_id', how='left')
 
     return meta.merge(wide, on='substrate_id', how='left')
 
