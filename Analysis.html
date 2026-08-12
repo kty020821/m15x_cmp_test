@@ -327,7 +327,7 @@
                   style="background:transparent;color:var(--tx-2);
                          border:1px solid var(--bd);padding:6px 12px;
                          font-size:11px;margin-left:6px;"
-                  title="같은 X축에 다른 파라미터를 겹쳐 그립니다">+ 겹쳐 보기</button>
+                  title="여러 파라미터를 한 덩어리로 합쳐 그립니다 (구분은 범례)">+ 파라미터 합치기</button>
         </div>
         <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
         <span class="msg" id="opt-note" style="font-size:11px;font-weight:600;
@@ -336,10 +336,7 @@
                 style="background:transparent;color:var(--tx-2);
                        border:1px solid var(--bd);"
                 title="기준정보에 추가한 공정·device·파라미터를 다시 읽습니다">기준정보 새로고침</button>
-        <button class="btn-run" id="btn-mkdb" onclick="openMkdb()"
-                style="background:transparent;color:var(--tx-2);
-                       border:1px solid var(--bd);"
-                title="선택한 공정의 데이터를 원하는 기간으로 다시 적재합니다">DB 만들기</button>
+
       </div>
     </div>
   </section>
@@ -429,11 +426,11 @@
      width:380px;max-height:70vh;background:var(--bg-3);
      border:1px solid var(--bd);border-radius:16px;padding:16px 18px;z-index:60;
      box-shadow:0 8px 28px rgba(0,0,0,.18);display:none;flex-direction:column;">
-  <div style="font-size:13px;font-weight:800;color:var(--tx-1);">겹쳐 보기</div>
+  <div style="font-size:13px;font-weight:800;color:var(--tx-1);">파라미터 합치기</div>
   <div style="font-size:11px;font-weight:600;color:var(--tx-muted);
        margin:4px 0 10px;line-height:1.5;">
-    같은 X축(DATE)에 다른 파라미터를 함께 그립니다.
-    단위가 다르면 오른쪽 축을 씁니다. 최대 8개.</div>
+    같은 X축에 다른 파라미터를 함께 그립니다 (트렌드·상관 모두).
+    선택한 파라미터를 한 덩어리로 합쳐 그리고, 구분은 범례가 합니다.</div>
 
   <input id="ov-search" placeholder="파라미터 검색"
          oninput="renderOverlayList()"
@@ -463,60 +460,11 @@
   </div>
 </div>
 
-<div id="mkdb" style="display:none;position:fixed;right:24px;bottom:24px;
-     width:390px;background:var(--bg-3);border:1px solid var(--bd);
-     border-radius:16px;padding:16px 18px;z-index:60;
-     box-shadow:0 8px 28px rgba(0,0,0,.18);">
-  <div style="font-size:13px;font-weight:800;color:var(--tx-1);
-       margin-bottom:4px;">DB 만들기</div>
-  <div style="font-size:11px;font-weight:600;color:var(--tx-muted);
-       margin-bottom:12px;" id="mkdb-target"></div>
-
-  <div style="display:flex;flex-direction:column;gap:8px;">
-    <label style="font-size:11px;font-weight:800;color:var(--tx-muted);">
-      기간 선택</label>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;" id="mkdb-presets">
-      <button class="btn-run" onclick="setMkdbDays(30)"
-              style="padding:5px 12px;font-size:11px;">30일</button>
-      <button class="btn-run" onclick="setMkdbDays(45)"
-              style="padding:5px 12px;font-size:11px;">45일</button>
-      <button class="btn-run" onclick="setMkdbDays(90)"
-              style="padding:5px 12px;font-size:11px;">90일</button>
-      <button class="btn-run" onclick="setMkdbDays(180)"
-              style="padding:5px 12px;font-size:11px;">180일</button>
-    </div>
-    <div style="display:flex;gap:6px;align-items:center;">
-      <input id="mkdb-from" type="date" style="flex:1;font-size:12px;
-             padding:6px 9px;border:1px solid var(--bd);border-radius:9px;
-             background:var(--bg-2);color:var(--tx-1);outline:none;">
-      <span style="color:var(--tx-muted);">~</span>
-      <input id="mkdb-to" type="date" style="flex:1;font-size:12px;
-             padding:6px 9px;border:1px solid var(--bd);border-radius:9px;
-             background:var(--bg-2);color:var(--tx-1);outline:none;">
-    </div>
-    <div style="font-size:10px;font-weight:600;color:var(--tx-muted);">
-      날짜를 지정하면 그 기간을, 비우면 위 버튼의 최근 N일을 조회합니다</div>
-  </div>
-
-  <div id="mkdb-state" style="font-size:11px;font-weight:700;
-       color:var(--tx-2);margin:12px 0;line-height:1.6;"></div>
-
-  <div style="display:flex;gap:6px;align-items:center;">
-    <button class="btn-run" id="mkdb-go" onclick="runMkdb()">적재 시작</button>
-    <button class="btn-run" onclick="closeMkdb()"
-            style="background:transparent;color:var(--tx-2);
-                   border:1px solid var(--bd);">닫기</button>
-    <span id="mkdb-msg" style="font-size:11px;font-weight:700;"></span>
-  </div>
-</div>
-
 <script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
 <script>
 /* API URL 은 반드시 Django url 태그로 생성 (프록시 경로 자동 부착) */
 const API_OPTIONS   = "{% url 'analysis-options' %}";
 const API_TREND     = "{% url 'analysis-trend' %}";
-const API_LOAD_ST   = "{% url 'load-status' %}";
-const API_LOAD_RUN  = "{% url 'load-run' %}";
 const API_REFRESH   = "{% url 'analysis-refresh' %}";
 const API_CORR      = "{% url 'analysis-corr' %}";
 const API_STATS     = "{% url 'analysis-stats' %}";
@@ -812,86 +760,6 @@ async function refreshOpts() {
   alert(`기준정보를 다시 읽었습니다 (공정 ${j.opers}개)`);
 }
 
-/* ══════════════════════════════════════════════════
-   DB 만들기 — 지금 고른 공정을 원하는 기간으로 다시 적재
-
-   ★ 모니터링 화면은 '전 공정 45일' 이 기본이고,
-     여기는 '지금 보고 있는 공정을 원하는 기간만큼' 이 목적이다.
-   ★ 잠금은 서버가 잡는다 — 다른 사람이 같은 공정을 적재 중이면 거절된다.
-   ══════════════════════════════════════════════════ */
-let mkdbDays = 45, mkdbTimer = null;
-
-function mkdbMsg(t, err) {
-  const el = document.getElementById('mkdb-msg');
-  el.textContent = t;
-  el.style.color = err ? 'var(--bad)' : 'var(--good)';
-}
-
-async function openMkdb() {
-  const oper = ssOper.value;
-  if (!oper) { alert('먼저 공정을 선택하세요.'); return; }
-  if (/^ADHOC_/i.test(oper)) {
-    alert('1회성 조회 결과는 다시 적재할 수 없습니다.\n' +
-          '1회성 조회 페이지에서 새로 요청하세요.');
-    return;
-  }
-  document.getElementById('mkdb-target').textContent =
-    `${ssOper.label || oper} (${oper})`;
-  document.getElementById('mkdb').style.display = 'block';
-  setMkdbDays(45);
-  await refreshMkdb();
-}
-
-function closeMkdb() {
-  document.getElementById('mkdb').style.display = 'none';
-  clearTimeout(mkdbTimer);
-}
-
-function setMkdbDays(d) {
-  mkdbDays = d;
-  document.querySelectorAll('#mkdb-presets button').forEach(b =>
-    b.style.opacity = (b.textContent === d + '일') ? '1' : '.5');
-}
-
-async function refreshMkdb() {
-  const oper = ssOper.value;
-  const j = await postJSON(API_LOAD_ST, {});
-  const o = (j.opers || []).find(x => x.oper_id === oper);
-  const el = document.getElementById('mkdb-state');
-  if (!o) { el.textContent = '기준정보에 등록되지 않은 공정입니다.'; return; }
-
-  const run = o.running;
-  el.innerHTML = run
-    ? `<span style="color:var(--warn);">적재 중 — ${esc(run.by || '')} ·
-        ${run.elapsed_min}분 경과<br>${esc(run.message || '')}</span>`
-    : `데이터 최신일 <b>${esc(o.data_max || '-')}</b> · ${(o.rows||0).toLocaleString()}행<br>
-       마지막 적재 ${esc(o.last_at || '-')} ${esc(o.last_by || '')}`;
-  document.getElementById('mkdb-go').disabled = !!run;
-
-  clearTimeout(mkdbTimer);
-  if (document.getElementById('mkdb').style.display !== 'none') {
-    mkdbTimer = setTimeout(refreshMkdb, run ? 5000 : 30000);
-  }
-}
-
-async function runMkdb() {
-  const oper = ssOper.value;
-  if (!oper) return;
-  const df = document.getElementById('mkdb-from').value;
-  const dt = document.getElementById('mkdb-to').value;
-  const span = (df && dt) ? `${df} ~ ${dt}` : `최근 ${mkdbDays}일`;
-  if (!confirm(`${oper} 을 ${span} 로 적재할까요?\n` +
-               `기존 데이터는 새로 조회한 것으로 교체됩니다.`)) return;
-
-  const j = await postJSON(API_LOAD_RUN, {
-    opers: [oper], days: mkdbDays,
-    date_from: df || null, date_to: dt || null,
-  });
-  if (!j.ok) { mkdbMsg(j.error || '실행 실패', true); refreshMkdb(); return; }
-  mkdbMsg(`적재 시작 — ${span}`);
-  refreshMkdb();
-}
-
 openFromUrl();      // ?oper=... 로 들어온 1회성 조회 결과 처리
 
 /* ── 종속 드롭박스 ─────────────────────────────── */
@@ -1057,9 +925,13 @@ function bindChartEvents(div, otherId) {
 
 /* ── Trend ─────────────────────────────────────── */
 function drawTrend() {
-  if (!trendData.length) return;
+  /* ★ 겹친 파라미터를 '따로 그리는' 게 아니라 주 데이터에 합친다.
+     Defect 처럼 스텝마다 몇 점씩 흩어진 항목은 한 덩어리로 봐야
+     판단이 되고, 구분은 파라미터 이름이 아니라 범례(장비 등)가 한다. */
+  const merged = mergedTrend();
+  if (!merged.length) return;
   const legendCol = ssLegend.value;
-  const groups = groupByLegend(trendData, legendCol, 'date', 'val');
+  const groups = groupByLegend(merged, legendCol, 'date', 'val');
 
   const traces = orderedLegendKeys(legendCol, groups).map(name => {
     const t = markerTrace(name, groups[name]);
@@ -1067,48 +939,39 @@ function drawTrend() {
     return t;
   });
 
-  const title  = `${ssTech.value} · ${ssLot.value} · ${currentParam}`;
-  const layout = baseLayout('DATE', currentParam, title);
-  addSpecShapes(layout, trendData.map(d => d.val));
-
-  /* ── 겹쳐 그리기 ─────────────────────────────
-     ★ 오른쪽 축(y2)을 쓴다. 단위가 다른 값을 한 축에 그리면
-       작은 쪽이 바닥에 깔려 안 보인다.
-     ★ 점만 찍지 않고 선으로 잇는다 — Defect 처럼 점이 드문드문한
-       항목은 선이 있어야 흐름이 보인다. */
-  const OV_COLORS = ['#7c3aed', '#0ea5e9', '#f59e0b', '#16a34a',
-                     '#dc2626', '#db2777', '#0891b2', '#65a30d'];
-  (overlayData || []).forEach((ov, i) => {
-    if (!ov.data || !ov.data.length) return;
-    const col = OV_COLORS[i % OV_COLORS.length];
-    traces.push({
-      x: ov.data.map(d => d.date), y: ov.data.map(d => d.val),
-      name: `${ov.param} (${ov.n})`, yaxis: 'y2',
-      mode: 'lines+markers', type: 'scattergl',
-      line: {color: col, width: 1.2},
-      marker: {size: 6, color: col, opacity: .85,
-               symbol: 'diamond',
-               line: {width: .5, color: 'rgba(0,0,0,.25)'}},
-      hovertemplate: `${ov.param}<br>%{x}<br><b>%{y:.4g}</b><extra></extra>`,
-    });
-  });
-
-  if ((overlayData || []).some(o => o.data && o.data.length)) {
-    layout.yaxis2 = {
-      overlaying: 'y', side: 'right',
-      title: {text: '겹친 파라미터', font: {family: AN_FONT, size: 11}},
-      tickfont: {family: AN_FONT, size: 10},
-      showgrid: false, zeroline: false,
-    };
-    layout.margin = Object.assign({}, layout.margin, {r: 62});
-    layout.showlegend = true;
-  }
+  const names  = paramNames();
+  const title  = `${ssTech.value} · ${ssLot.value} · ${names.title}`;
+  const layout = baseLayout('DATE', names.axis, title);
+  addSpecShapes(layout, merged.map(d => d.val));
 
   const div = document.getElementById('js-trend');
   Plotly.newPlot(div, traces, layout,
     {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d','autoScale2d']});
 
   bindChartEvents(div, 'js-corr');
+}
+
+/* 주 파라미터 + 함께 볼 파라미터를 한 배열로 합친다.
+   ★ 합친 뒤에는 어느 파라미터에서 왔는지 구분하지 않는다 —
+     범례(장비·챔버 등)로만 나뉜다. hover 로는 확인할 수 있게
+     _p 에 이름만 남겨 둔다. */
+function mergedTrend() {
+  const out = (trendData || []).map(d => Object.assign({_p: currentParam}, d));
+  (overlayData || []).forEach(ov =>
+    (ov.data || []).forEach(d => out.push(Object.assign({_p: ov.param}, d))));
+  out.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return out;
+}
+
+/* 차트 제목·축 이름 — 합쳐진 파라미터를 함께 보여준다 */
+function paramNames() {
+  const extra = (overlayData || []).filter(o => o.data && o.data.length)
+                                   .map(o => o.param);
+  if (!extra.length) return {title: currentParam, axis: currentParam};
+  return {
+    title: `${currentParam} + ${extra.length}개 합침`,
+    axis: `${currentParam} 외 ${extra.length}개`,
+  };
 }
 
 /* ══════════════════════════════════════════════════
@@ -1144,7 +1007,7 @@ function renderOverlayList() {
   const list = overlayCandidates().filter(p => !q || p.toUpperCase().includes(q));
 
   document.getElementById('ov-count').textContent =
-    `${overlayDraft.size} / 8 선택`;
+    `${overlayDraft.size}개 선택`;
 
   document.getElementById('ov-list').innerHTML = list.map(p => `
     <label style="display:flex;align-items:center;gap:7px;padding:4px 6px;
@@ -1158,22 +1021,12 @@ function renderOverlayList() {
 }
 
 function toggleOverlayPick(p, on) {
-  if (on) {
-    if (overlayDraft.size >= 8) {
-      alert('겹쳐 보기는 최대 8개까지입니다.');
-      renderOverlayList();
-      return;
-    }
-    overlayDraft.add(p);
-  } else {
-    overlayDraft.delete(p);
-  }
+  if (on) overlayDraft.add(p); else overlayDraft.delete(p);
   renderOverlayList();
 }
 
 function pickOverlayGroup(prefix) {
   overlayCandidates().filter(p => p.startsWith(prefix))
-    .slice(0, 8 - overlayDraft.size)
     .forEach(p => overlayDraft.add(p));
   renderOverlayList();
 }
@@ -1184,13 +1037,14 @@ async function applyOverlay() {
   overlayPick = new Set(overlayDraft);
   toggleOverlayBox(false);
   updateOverlayBtn();
-  await runQuery();                 // 겹칠 데이터를 함께 받아 다시 그린다
+  await runQuery();          // 트렌드를 합쳐 다시 그린다
+  if (ssCorrX.value && ssCorrY.value) await drawCorr();   // 상관도 함께
 }
 
 function updateOverlayBtn() {
   const b = document.getElementById('btn-overlay');
   if (b) b.textContent = overlayPick.size
-    ? `+ 겹쳐 보기 (${overlayPick.size})` : '+ 겹쳐 보기';
+    ? `+ 파라미터 합치기 (${overlayPick.size})` : '+ 파라미터 합치기';
 }
 
 /* ── Correlation ───────────────────────────────── */
@@ -1198,29 +1052,40 @@ async function drawCorr() {
   const xc = ssCorrX.value, yc = ssCorrY.value;
   if (!xc || !yc || !ssOper.value || !ssLot.value) return;
 
-  const {data, r2, trend, error} = await postJSON(API_CORR, {
+  const {data, r2, trend, error, overlays} = await postJSON(API_CORR, {
     oper_id: ssOper.value, lot_cd: ssLot.value, x_col: xc, y_col: yc,
+    overlay: [...overlayPick],
   });
   if (error) { console.warn('상관 조회 실패:', error); return; }
 
-  document.getElementById('js-corr-r2').textContent =
-    (r2 !== null && r2 !== undefined) ? `R² = ${fmt3(r2)}` : '';
+  /* ★ 합친 파라미터도 같은 X 축에 함께 그린다.
+     트렌드와 마찬가지로 파라미터별로 나누지 않고 한 덩어리로 합쳐
+     범례(장비 등)로만 구분한다. */
+  const merged = (data || []).map(d => Object.assign({_p: yc}, d));
+  (overlays || []).forEach(ov =>
+    (ov.data || []).forEach(d => merged.push(Object.assign({_p: ov.param}, d))));
 
-  if (!data || !data.length) {
+  const nExtra = (overlays || []).filter(o => o.data && o.data.length).length;
+  document.getElementById('js-corr-r2').textContent =
+    (r2 !== null && r2 !== undefined)
+      ? `R² = ${fmt3(r2)}` + (nExtra ? ` (${yc} 기준)` : '') : '';
+
+  if (!merged.length) {
     document.getElementById('js-corr').innerHTML = '';
     return;
   }
 
   const legendCol = ssLegend.value;
-  const groups = groupByLegend(data, legendCol, 'x', 'y');
+  const groups = groupByLegend(merged, legendCol, 'x', 'y');
 
   const traces = orderedLegendKeys(legendCol, groups).map(name => {
     const t = markerTrace(name, groups[name]);
-    t.hovertemplate = `%{text}<br>${xc}: %{x:.2f}<br>${yc}: %{y:.2f}<extra></extra>`;
+    t.hovertemplate = `%{text}<br>${xc}: %{x:.2f}<br>%{y:.2f}<extra></extra>`;
     return t;
   });
 
-  const layout = baseLayout(xc, yc, `${xc} vs ${yc}`);
+  const yLabel = nExtra ? `${yc} 외 ${nExtra}개` : yc;
+  const layout = baseLayout(xc, yLabel, `${xc} vs ${yLabel}`);
 
   if (trend) {
     // SVG scatter 는 WebGL 산점도보다 위 레이어에 그려진다
