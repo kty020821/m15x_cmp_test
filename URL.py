@@ -8,6 +8,7 @@ from django.urls import path
 from . import views_analysis as va
 from . import views_monitor as vm
 from . import views_config as vc
+from . import views_config2 as v2
 from . import views_adhoc as vh
 from . import views_load as vl
 
@@ -37,6 +38,18 @@ urlpatterns = [
     path('api/analysis/stats/',   va.analysis_stats,   name='analysis-stats'),
     path('api/analysis/insight/', va.analysis_insight, name='analysis-insight'),
     path('api/analysis/chat/',    va.analysis_chat,    name='analysis-chat'),
+
+    # 기준정보 v2 — 연계 공정 다중 등록 (기존 config 와 병행)
+    path('config2/',              v2.config2_page,     name='config2'),
+    path('api/config2/opers/',    v2.config2_opers,    name='config2-opers'),
+    path('api/config2/oper/',     v2.config2_oper,     name='config2-oper'),
+    path('api/config2/save/',     v2.config2_save,     name='config2-save'),
+    path('api/config2/delete/',   v2.config2_delete,   name='config2-delete'),
+    path('api/config2/overview/', v2.config2_overview, name='config2-overview'),
+    path('api/config2/validate/', v2.config2_validate, name='config2-validate'),
+    path('api/config2/import/',   v2.config2_import,   name='config2-import'),
+    path('api/config2/classify/', v2.config2_classify, name='config2-classify'),
+    path('api/config2/suggest/',  v2.config2_suggest,  name='config2-suggest'),
 
     # 1회성 임의 기간 조회 (신규) — 실행은 배치 run_adhoc.py
     path('adhoc/',             vh.adhoc_page,    name='adhoc'),
