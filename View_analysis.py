@@ -694,10 +694,10 @@ def analysis_trend(request):
         #   ★ Defect 처럼 스텝마다 몇 점씩 흩어진 항목은 합쳐 봐야
         #     판단이 되므로 이 기능이 필요하다.
         overlay = [p for p in (body.get('overlay') or [])
-                   if _safe_name(p) and p.upper() != param.upper()][:8]
+                   if _safe_name(p) and p.upper() != param.upper()]
         if overlay:
             out['overlays'] = _fetch_overlays(table, lot_cd, overlay,
-                                              num_cols, have)
+                                              num_cols, legend_cols, extra_cols)
         return JsonResponse(out)
     except Exception as e:
         return _api_fail(f'트렌드 조회 실패: {e}', empty, exc=e)
@@ -707,13 +707,16 @@ def analysis_trend(request):
 # 6. 상관 산점도 + R² + 추세선
 #    범례로 항목을 걸러내면 화면에서 다시 계산한다 (analysis.html)
 # ══════════════════════════════════════════════════════════
-def _fetch_overlays(table, lot_cd, params, num_cols, have):
+def _fetch_overlays(table, lot_cd, params, num_cols, legend_cols, extra_cols):
     """
-    겹쳐 그릴 파라미터들의 (시각, 값) 목록.
+    함께 그릴 파라미터들의 값 — 주 파라미터와 같은 형태로.
 
-    ★ 한 쿼리로 함께 읽는다 — 파라미터마다 왕복하면 8개면 8번이다.
-      다만 각 파라미터는 NULL 인 행이 제각각이라, 읽은 뒤 파라미터별로
-      NULL 을 걸러 낸다. (Defect 은 측정된 웨이퍼가 드문드문하다)
+    ★ 범례 컬럼(EQP_ID 등)을 함께 읽는다.
+      파라미터 이름으로 나누는 게 아니라 여러 파라미터를 한 덩어리로
+      합쳐 범례로만 구분하기 위한 것이다. Defect 처럼 스텝마다 몇 점씩
+      흩어진 항목은 합쳐야 장비·조건별 차이가 보인다.
+    ★ 한 쿼리로 함께 읽되, 파라미터마다 NULL 인 행이 제각각이라
+      읽은 뒤 각각 걸러 낸다.
     """
     cols = [p for p in params if p.upper() in num_cols]
     if not cols:
@@ -722,7 +725,7 @@ def _fetch_overlays(table, lot_cd, params, num_cols, have):
     sel = ", ".join(f'"{c}"' for c in cols)
     where_any = " OR ".join(f'"{c}" IS NOT NULL' for c in cols)
     sql = f'''
-        SELECT id, "DATE", {sel}
+        SELECT id, "DATE", {sel}{_sel_list(legend_cols)}{_sel_list(extra_cols)}
         FROM {table}
         WHERE "LOT_CD" = %s AND ({where_any})
         ORDER BY "DATE"
@@ -731,6 +734,7 @@ def _fetch_overlays(table, lot_cd, params, num_cols, have):
         cur.execute(sql, [lot_cd])
         rows = cur.fetchall()
 
+    base = 2 + len(cols)          # id, DATE, 값들 다음이 범례
     out = []
     for i, c in enumerate(cols):
         pts = []
@@ -738,9 +742,14 @@ def _fetch_overlays(table, lot_cd, params, num_cols, have):
             v = r[2 + i]
             if v is None:
                 continue
-            pts.append({'id': r[0],
-                        'date': r[1].strftime('%Y-%m-%d %H:%M:%S') if r[1] else None,
-                        'val': float(v)})
+            item = {'id': r[0],
+                    'date': r[1].strftime('%Y-%m-%d %H:%M:%S') if r[1] else None,
+                    'val': float(v)}
+            for j, lc in enumerate(legend_cols):
+                item[lc] = r[base + j]
+            for k, ec in enumerate(extra_cols):
+                item[ec] = r[base + len(legend_cols) + k]
+            pts.append(item)
         out.append({'param': c, 'n': len(pts), 'data': pts})
     return out
 
@@ -836,10 +845,63 @@ def analysis_corr(request):
                 item[c] = r[3 + n + j]
             data.append(item)
 
-        return JsonResponse({'data': data, 'x_col': x_col, 'y_col': y_col,
-                             'r2': r2, 'trend': trend})
+        out = {'data': data, 'x_col': x_col, 'y_col': y_col,
+               'r2': r2, 'trend': trend}
+
+        # ── 함께 볼 파라미터 ─────────────────────────────
+        #   ★ Y 축을 여러 파라미터로 늘린다. 같은 X 에 대해
+        #     Defect 여러 스텝을 한 번에 보려는 것.
+        #   ★ 파라미터별로 나누지 않고 한 덩어리로 합쳐 돌려준다 —
+        #     구분은 범례(장비 등)가 한다.
+        overlay = [p for p in (body.get('overlay') or [])
+                   if _safe_name(p) and p.upper() != y_col.upper()]
+        if overlay:
+            out['overlays'] = _fetch_corr_overlays(
+                table, lot_cd, x_col, overlay, num_cols,
+                legend_cols, extra_cols)
+        return JsonResponse(out)
     except Exception as e:
         return _api_fail(f'상관 조회 실패: {e}', empty, exc=e)
+
+
+def _fetch_corr_overlays(table, lot_cd, x_col, params, num_cols,
+                         legend_cols, extra_cols):
+    """
+    같은 X 축에 대해 추가 파라미터를 Y 로 읽는다.
+    반환 형태는 주 데이터와 같다 (id, x, y, 범례…) — 화면에서 그대로 합친다.
+    """
+    cols = [p for p in params if p.upper() in num_cols]
+    if not cols:
+        return []
+
+    sel = ", ".join(f'"{c}"' for c in cols)
+    where_any = " OR ".join(f'"{c}" IS NOT NULL' for c in cols)
+    sql = f'''
+        SELECT id, "{x_col}", {sel}{_sel_list(legend_cols)}{_sel_list(extra_cols)}
+        FROM {table}
+        WHERE "LOT_CD" = %s AND "{x_col}" IS NOT NULL AND ({where_any})
+        ORDER BY "DATE"
+    '''
+    with connections['analysis_db'].cursor() as cur:
+        cur.execute(sql, [lot_cd])
+        rows = cur.fetchall()
+
+    base = 2 + len(cols)
+    out = []
+    for i, c in enumerate(cols):
+        pts = []
+        for r in rows:
+            v = r[2 + i]
+            if v is None:
+                continue
+            item = {'id': r[0], 'x': float(r[1]), 'y': float(v)}
+            for j, lc in enumerate(legend_cols):
+                item[lc] = r[base + j]
+            for k, ec in enumerate(extra_cols):
+                item[ec] = r[base + len(legend_cols) + k]
+            pts.append(item)
+        out.append({'param': c, 'n': len(pts), 'data': pts})
+    return out
 
 
 # ══════════════════════════════════════════════════════════
