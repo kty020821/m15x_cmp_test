@@ -280,6 +280,22 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
             finish(job_id, '완료', 0, '조회 결과가 없습니다')
             return {'ok': True, 'rows': 0}
 
+        # ── 연계 공정 (기준정보 v2 에 등록된 것만) ──────
+        #   ★ 정기 적재는 '모니터링·둘다' 만 붙인다.
+        #     분석 전용까지 매일 붙이면 적재가 무거워진다.
+        #   ★ 등록이 없으면 그대로 통과한다 — 연계 없이도
+        #     기존 병합 테이블은 완성돼야 한다.
+        try:
+            from . import link_service as lks
+            progress(job_id, '연계 공정 조회 중')
+            df = lks.merge_links(df, lake, oper_id, svc.run_query,
+                                 scope='mon', days=int(days),
+                                 date_from=date_from, date_to=date_to)
+        except Exception as e:
+            traceback.print_exc()
+            print(f'[load] {oper_id} 연계 공정 병합 실패 — 본공정만 저장합니다: '
+                  f'{e.__class__.__name__}: {e}')
+
         progress(job_id, f'{len(df):,}행 저장 중')
         svc.save_analysis_df(df, oper_id)
 
