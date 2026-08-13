@@ -44,11 +44,11 @@ T_LINK  = 'cmp_cfg2_link'
 # 연계 공정 최대 개수 (별칭 기준)
 MAX_LINKS = 3
 
-KINDS  = ['SRC', 'REP', 'DEF']
+KINDS  = ['SRC', 'REP', 'DEF', 'CHM']
 SCOPES = ['both', 'mon', 'ana']
 
 KIND_LABEL = {'SRC': 'SRC (측정값)', 'REP': 'REP (Response)',
-              'DEF': 'DEF (Defect)'}
+              'DEF': 'DEF (Defect)', 'CHM': 'CHM (장비·챔버)'}
 SCOPE_LABEL = {'both': '둘 다', 'mon': '모니터링', 'ana': '분석'}
 
 # 웨이퍼 번호 자릿수 — '01'~'09' 로 0 이 붙는다
@@ -93,9 +93,13 @@ def link_column(kind, alias, param):
 
     ★ 규칙의 단일 소재지다. 적재·화면 미리보기·점검이 모두 이 함수를
       거쳐야 이름이 갈리지 않는다.
+    ★ CHM(장비·챔버)은 값이 아니라 라벨이라 <별칭>_EQP / <별칭>_CH 로
+      짧게 만든다. 차트 범례·그룹 기준으로 쓰이는 값이다.
     """
     k = _up(kind) if _up(kind) in KINDS else 'SRC'
     a, p = slug(alias), slug(param)
+    if k == 'CHM':
+        return [f'{a}_EQP', f'{a}_CH'] if a else []
     if not p:
         return ''
     return f'{k}_{a}_{p}' if a else f'{k}_{p}'
@@ -146,11 +150,16 @@ def ensure_tables():
               kind     VARCHAR(10),
               alias    VARCHAR(50),
               link_id  VARCHAR(100),
+              lot_cd   VARCHAR(50),
               param    VARCHAR(100),
               scope    VARCHAR(10) DEFAULT 'both',
               use_yn   VARCHAR(1) DEFAULT 'Y'
             )
         ''')
+        # 이미 만들어진 테이블에는 lot_cd 가 없다 — 있으면 두고 없으면 추가
+        cur.execute(f'ALTER TABLE {T_LINK} '
+                    f'ADD COLUMN IF NOT EXISTS lot_cd VARCHAR(50)')
+
         for t in (T_LOT, T_PARAM, T_LINK):
             cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{t}_oper '
                         f'ON {t} (oper_id)')
@@ -200,13 +209,14 @@ def get_oper(oper_id):
                    'use_yn': r[2] or 'Y'} for r in cur.fetchall()]
 
         cur.execute(f'''
-            SELECT seq, kind, alias, link_id, param, scope, use_yn
+            SELECT seq, kind, alias, link_id, lot_cd, param, scope, use_yn
             FROM {T_LINK} WHERE oper_id = %s
             ORDER BY seq, alias, param
         ''', [oper_id])
         links = [{'seq': r[0] or 1, 'kind': r[1] or 'SRC', 'alias': r[2] or '',
-                  'link_id': r[3] or '', 'param': r[4] or '',
-                  'scope': r[5] or 'both', 'use_yn': r[6] or 'Y'}
+                  'link_id': r[3] or '', 'lot_cd': r[4] or '',
+                  'param': r[5] or '', 'scope': r[6] or 'both',
+                  'use_yn': r[7] or 'Y'}
                  for r in cur.fetchall()]
 
     return {'oper_id': row[0], 'oper_desc': row[1] or '', 'fab': row[2] or '',
@@ -262,17 +272,20 @@ def save_oper(d, user=''):
         alias = slug(it.get('alias'))
         link_id = _up(it.get('link_id'))
         prm = _up(it.get('param'))
+        # 연계 공정은 본공정과 device 코드가 다를 수 있다.
+        #   비워 두면 본공정의 LOT_CD 를 그대로 쓴다.
+        lot_cd = _up(it.get('lot_cd'))
         if not alias or not link_id:
             continue                     # 별칭·공정ID 는 필수
         if alias not in aliases:
             aliases.append(alias)
-        key = (kind, alias, prm)
+        key = (kind, alias, lot_cd, prm)
         if key in kseen:
             continue
         kseen.add(key)
         scope = _s(it.get('scope')).lower()
-        links.append((aliases.index(alias) + 1, kind, alias, link_id, prm,
-                      scope if scope in SCOPES else 'both',
+        links.append((aliases.index(alias) + 1, kind, alias, link_id, lot_cd,
+                      prm, scope if scope in SCOPES else 'both',
                       'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
 
     if len(aliases) > MAX_LINKS:
@@ -281,7 +294,7 @@ def save_oper(d, user=''):
 
     # 같은 별칭에 타입이 둘이면 컬럼 규칙이 흔들린다
     by_alias = {}
-    for _, kind, alias, link_id, _p, _sc, _u in links:
+    for _, kind, alias, link_id, _lc, _p, _sc, _u in links:
         prev = by_alias.setdefault(alias, (kind, link_id))
         if prev != (kind, link_id):
             raise ValueError(f'별칭 {alias} 에 타입·공정ID 가 두 가지입니다 — '
@@ -311,11 +324,12 @@ def save_oper(d, user=''):
             cur.execute(f'INSERT INTO {T_PARAM} (oper_id, param, param_type, '
                         f'use_yn) VALUES (%s,%s,%s,%s)',
                         [oper_id, p, ptype, use])
-        for seq, kind, alias, link_id, prm, scope, use in links:
+        for seq, kind, alias, link_id, lot_cd, prm, scope, use in links:
             cur.execute(f'INSERT INTO {T_LINK} (oper_id, seq, kind, alias, '
-                        f'link_id, param, scope, use_yn) '
-                        f'VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
-                        [oper_id, seq, kind, alias, link_id, prm, scope, use])
+                        f'link_id, lot_cd, param, scope, use_yn) '
+                        f'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                        [oper_id, seq, kind, alias, link_id, lot_cd, prm,
+                         scope, use])
 
     return {'oper_id': oper_id, 'lots': len(lots), 'params': len(params),
             'links': len(aliases), 'link_params': len(links)}
@@ -346,7 +360,7 @@ def links_of(oper_id, scope=None):
     ensure_tables()
     with _conn().cursor() as cur:
         cur.execute(f'''
-            SELECT seq, kind, alias, link_id, param, scope
+            SELECT seq, kind, alias, link_id, lot_cd, param, scope
             FROM {T_LINK}
             WHERE oper_id = %s AND COALESCE(use_yn,'Y') <> 'N'
             ORDER BY seq, alias, param
@@ -354,13 +368,19 @@ def links_of(oper_id, scope=None):
         rows = cur.fetchall()
 
     out = {}
-    for seq, kind, alias, link_id, prm, sc in rows:
+    for seq, kind, alias, link_id, lot_cd, prm, sc in rows:
         if scope and sc not in (scope, 'both'):
             continue
         o = out.setdefault(alias, {'seq': seq, 'kind': kind, 'alias': alias,
                                    'link_id': link_id, 'scope': sc,
-                                   'params': [], 'columns': []})
-        if prm and prm not in o['params']:
+                                   'lot_cds': [], 'params': [], 'columns': []})
+        # 지정된 LOT_CD 만 모은다. 하나도 없으면 본공정 것을 쓴다는 뜻
+        if lot_cd and lot_cd not in o['lot_cds']:
+            o['lot_cds'].append(lot_cd)
+        if kind == 'CHM':
+            if not o['columns']:
+                o['columns'] = list(link_column(kind, alias, ''))
+        elif prm and prm not in o['params']:
             o['params'].append(prm)
             o['columns'].append(link_column(kind, alias, prm))
     return sorted(out.values(), key=lambda x: x['seq'])
@@ -456,6 +476,7 @@ def import_from_v1(oper_id=None, overwrite=False):
                     'kind': kind,
                     'alias': slug(r.get('step_desc') or r.get('step_id'))[:20],
                     'link_id': _up(r.get('step_id')),
+                    'lot_cd': _up(r.get('lot_cd')),
                     'param': _up(r.get('param')),
                     'scope': 'both',
                     'use_yn': r.get('use_yn', 'Y'),
@@ -557,6 +578,8 @@ def validate(oper_id=None):
                 issues.append(f"별칭이 빈 연계 공정이 있습니다 ({lk['link_id']})")
                 continue
             aliases.setdefault(a, set()).add((lk['kind'], lk['link_id']))
+            if lk['kind'] == 'CHM':
+                continue      # 장비·챔버는 PARAM 이 필요 없다
             if not lk['param']:
                 issues.append(f'{a}: 관리 PARAM 이 없어 조회되지 않습니다')
             elif not link_column(lk['kind'], a, lk['param']):
