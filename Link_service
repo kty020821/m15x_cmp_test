@@ -69,10 +69,68 @@ where mt between '{mt_s}' and '{mt_e}'
   and defect_class_nm in ({params})
 """
 
+# ── CHM: 장비·챔버 이력 ───────────────────────────────────
+#   ★ chamber 정보는 SRC(측정값) 테이블에 없다.
+#     기존 SRC 쿼리가 left join 하던 wafer-history 에서 온다.
+#   ★ 이 apc_sk_wafer_hst_r2r_all_* 은 R2R 계산 이력을 담는
+#     기존 APC 테이블(apc_sk_r2r_*)과 전혀 다른 테이블이다. 혼동 금지.
+#   ★ fab 별로 테이블이 나뉘어 있어 UNION 해야 한다.
+#   ★ dt 로 파티션을 좁힌다 — 여기만 mt 가 아니라 dt(YYYYMMDD)다.
+#   ★ resource_type='INDEPENDENT' 는 반드시 있어야 한다.
+#     빼면 같은 웨이퍼가 여러 행으로 늘어나 조인 시 행이 뻥튀기된다.
+CHM_UNITS = ('m10', 'm11', 'm14', 'm15')
+
+SQL_CHM_UNIT = """        select lot_id, wf_id, eqp_id, module_id,
+               MAX(last_update_dtts) as last_update_dtts
+        from lake_catalog.apc.apc_sk_wafer_hst_r2r_all_{unit}
+        where dt between '{dt_s}' and '{dt_e}'
+          and operation_id like '{oper_pfx}%'
+          and resource_type = 'INDEPENDENT'
+        group by lot_id, wf_id, eqp_id, module_id"""
+
+# 공정별 module_id 제한 (기존 SRC 쿼리에서 그대로 가져옴)
+#   챔버 번호 체계가 공정마다 달라, 해당하는 것만 남긴다.
+CHM_MODULE_FILTER = {
+    'V5071000B': ('2', '3'),
+    'X106100B':  ('2', '3'),
+    'T5515000C': ('2', '3'),
+    'T5515000M': ('2', '3', '5'),
+    'T5515000A': ('2', '3', '5'),
+}
+
+
+def build_chm_sql(link_id, dt_s, dt_e):
+    """
+    장비·챔버 이력 조회 SQL.
+
+    ★ operation_id 는 like 접두 매칭이다 — 기존 SRC 쿼리가
+      pre_oper[:-1] 로 마지막 한 글자를 떼고 like 를 걸었다.
+      끝자리가 리비전이라 그것까지 맞추면 안 잡힌다.
+    """
+    pfx = str(link_id or '')[:-1] if link_id else ''
+    body = "\n        union\n".join(
+        SQL_CHM_UNIT.format(unit=u, dt_s=dt_s, dt_e=dt_e, oper_pfx=pfx)
+        for u in CHM_UNITS)
+
+    mods = CHM_MODULE_FILTER.get(str(link_id or '').upper())
+    where = ''
+    if mods:
+        cond = " or ".join(f"h.module_id = '{m}'" for m in mods)
+        where = f"\nwhere ( {cond} )"
+
+    return f"""
+select h.lot_id, h.wf_id, h.eqp_id, h.module_id, h.last_update_dtts
+from (
+{body}
+) h{where}
+"""
+
+
 SQL = {'SRC': SQL_SRC, 'REP': SQL_REP, 'DEF': SQL_DEF}
 
 # 조회 후 컬럼 이름 통일 — 뒤 단계를 하나로 쓰기 위한 것
 RENAME = {
+    'CHM': {},          # 장비·챔버는 값이 아니라 라벨이라 따로 다룬다
     'SRC': {'param_nm': 'param', 'meas_val': 'value'},
     'REP': {'param_nm': 'param', 'meas_val': 'value'},
     'DEF': {'defect_class_nm': 'param', 'meas_defect_cnt': 'value'},
@@ -96,6 +154,20 @@ def _month_range(days=30, date_from=None, date_to=None):
     return d1.strftime('%Y%m'), d2.strftime('%Y%m')
 
 
+def _day_range(days=30, date_from=None, date_to=None):
+    """dt 파티션용 시작·끝 (YYYYMMDD) — 챔버 이력은 mt 가 아니라 dt 로 자른다"""
+    if date_from or date_to:
+        d2 = pd.to_datetime(date_to).date() if date_to else date.today()
+        d1 = (pd.to_datetime(date_from).date() if date_from
+              else d2 - timedelta(days=days))
+        if d1 > d2:
+            d1, d2 = d2, d1
+    else:
+        d2 = date.today()
+        d1 = d2 - timedelta(days=days)
+    return d1.strftime('%Y%m%d'), d2.strftime('%Y%m%d')
+
+
 def _quote_list(vals):
     return ", ".join("'" + str(v).replace("'", "''") + "'" for v in vals)
 
@@ -106,12 +178,24 @@ def preview_sql(oper_id, scope=None, days=30, date_from=None, date_to=None,
     실행하지 않고 던질 쿼리만 만든다 (Lake 에 붙여넣어 확인용).
     """
     mt_s, mt_e = _month_range(days, date_from, date_to)
-    lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
-    if not lots:
-        lots = ['<LOT_CD>']
+    dt_s, dt_e = _day_range(days, date_from, date_to)
+    base_lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
+    if not base_lots:
+        base_lots = ['<LOT_CD>']
 
     out = []
     for lk in cfg2.links_of(oper_id, scope):
+        lots = [str(v).upper() for v in (lk.get('lot_cds') or []) if v] \
+               or base_lots
+
+        if lk['kind'] == 'CHM':
+            out.append({
+                'kind': 'CHM', 'alias': lk['alias'],
+                'link_id': lk['link_id'], 'lot_cd': '(해당 없음)',
+                'query': build_chm_sql(lk['link_id'], dt_s, dt_e).strip(),
+            })
+            continue
+
         params = [p for p in lk['params'] if p]
         if not params:
             continue
@@ -194,6 +278,63 @@ def fetch_link(lake, link, lot_cds, mt_s, mt_e, run_query, on_progress=None):
     return out.drop_duplicates(subset=['wkey', 'param'], keep='first')
 
 
+def fetch_chm(lake, link, dt_s, dt_e, run_query, on_progress=None):
+    """
+    연계 공정의 장비·챔버 이력 조회.
+
+    반환 컬럼: wkey, eqp_id, module_id
+    ★ SRC 와 달리 lot_cd 로 거르지 않는다 — 이 테이블에는 lot_cd 가 없고
+      operation_id 접두와 dt 로만 좁힌다.
+    """
+    query = build_chm_sql(link['link_id'], dt_s, dt_e)
+    if VERBOSE:
+        print(f"\n─── [CHM:{link['alias']}] 실행 쿼리 " + '─' * 30)
+        print(query.strip())
+        print('─' * 58)
+    try:
+        d = run_query(lake, query)
+    except Exception:
+        print(f"\n[CHM:{link['alias']}] 조회 실패 — 아래 쿼리를 확인하세요")
+        print(query.strip())
+        raise
+
+    if d is None or d.empty:
+        return pd.DataFrame()
+
+    d = d.copy()
+    d.columns = d.columns.str.lower()
+
+    # 같은 웨이퍼에 이력이 여러 건이면 가장 나중 것만 (마지막 처리 장비)
+    if 'last_update_dtts' in d.columns:
+        d = (d.sort_values('last_update_dtts')
+               .drop_duplicates(subset=['lot_id', 'wf_id'], keep='last'))
+
+    d['wkey'] = [cfg2.wafer_key(a, w)
+                 for a, w in zip(d['lot_id'], d['wf_id'])]
+    if on_progress:
+        on_progress(1, 1, f"CHM:{link['alias']} · {len(d):,}행")
+    if VERBOSE:
+        print(f"  [CHM:{link['alias']}] {len(d):,}행")
+    return d[['wkey', 'eqp_id', 'module_id']]
+
+
+def pivot_chm(df, link):
+    """
+    장비·챔버를 컬럼으로.
+      <별칭>_EQP  장비
+      <별칭>_CH   챔버(module_id)
+
+    ★ 값이 아니라 라벨이므로 <KIND>_ 접두어를 붙이지 않는다.
+      차트 범례·그룹 기준으로 쓰이는 값이라 이름이 짧은 편이 낫다.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    a = cfg2.slug(link['alias'])
+    return (df.rename(columns={'eqp_id': f'{a}_EQP',
+                               'module_id': f'{a}_CH'})
+              .drop_duplicates(subset=['wkey'], keep='last'))
+
+
 def pivot_link(df, link):
     """
     long → wide.
@@ -273,14 +414,26 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
     out['__wkey'] = key
 
     mt_s, mt_e = _month_range(days, date_from, date_to)
-    lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
-    if not lots:
-        lots = _lots_of_base(base)
+    dt_s, dt_e = _day_range(days, date_from, date_to)
+    base_lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
+    if not base_lots:
+        base_lots = _lots_of_base(base)
 
     for lk in links:
-        df = fetch_link(lake, lk, lots, mt_s, mt_e, run_query,
-                        on_progress=on_progress)
-        wide = pivot_link(df, lk)
+        # ★ 연계 공정은 본공정과 device 코드가 다를 수 있다.
+        #   기준정보에 LOT_CD 를 적었으면 그것만, 비웠으면 본공정 것을 쓴다.
+        lots = [str(v).upper() for v in (lk.get('lot_cds') or []) if v] \
+               or base_lots
+
+        if lk['kind'] == 'CHM':
+            # 장비·챔버는 값이 아니라 라벨이라 조회·정리 경로가 다르다
+            df = fetch_chm(lake, lk, dt_s, dt_e, run_query,
+                           on_progress=on_progress)
+            wide = pivot_chm(df, lk)
+        else:
+            df = fetch_link(lake, lk, lots, mt_s, mt_e, run_query,
+                            on_progress=on_progress)
+            wide = pivot_link(df, lk)
         if wide is None or wide.empty:
             if VERBOSE:
                 print(f"  [{lk['kind']}:{lk['alias']}] 결과 없음")
