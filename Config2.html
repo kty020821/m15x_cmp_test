@@ -1,610 +1,735 @@
-"""
-equipment/config2_service.py
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}기준정보 v2{% endblock %}
+
+{#
 ════════════════════════════════════════════════════════════
-기준정보 v2 — 연계 공정 다중 등록
+  기준정보 v2 — 연계 공정 다중 등록
 
-  기존 config_service 는 그대로 둔다. 운영 중이므로 건드리지 않고
-  새 테이블(cmp_cfg2_*)로 따로 쌓는다. 검증이 끝나면 그때 전환한다.
+  기존 config 페이지는 그대로 두고 별도로 둔다.
+  검증이 끝나면 그때 전환한다.
 
-────────────────────────────────────────────────────────────
-무엇이 달라졌나
-
-  · 연계 공정을 최대 3개까지 등록한다 (기존은 사전공정 1개)
-  · 연계 공정마다 타입을 지정한다 — SRC / REP / DEF
-    타입이 곧 조회 쿼리를 정한다
-  · 연계 공정마다 용도를 지정한다 — 모니터링 / 분석 / 둘 다
-    정기 적재는 무거워지면 안 되므로 '모니터링·둘다' 만 매일 붙이고,
-    '분석' 은 1회성 조회에서만 붙인다
-  · 별칭(alias)으로 컬럼 이름을 짧게 유지한다
-
-★ 컬럼 이름: <KIND>_<별칭>_<PARAM>
-  예) SRC_M1CU_CU_THK_AVG · REP_ADICD_THK · DEF_AEI_SCRATCH
-  OPER_ID 를 그대로 쓰면 SRC_V5071000B_CU_THK_AVG 처럼 길어져
-  차트 범례와 LLM 프롬프트가 지저분해진다.
-
-★ 조인 키: alias_lot_id + '.' + wf_id
-  alias_lot_id 는 최초 lot_id 라 층이 바뀌어도 불변이다.
-  wf_id 는 1~9 가 '01'~'09' 로 0 이 붙으므로 반드시 문자열로 다뤄야 한다 —
-  정수로 바뀌면 'TA1234A.1' 이 되어 'TA1234A.01' 과 조용히 안 붙는다.
+  ★ 표는 전부 같은 구조로 만든다 — 행 복제·붙여넣기·선택 삭제가
+    표마다 다르게 동작하면 쓰는 사람이 헷갈린다.
+  ★ 연계 공정은 '별칭' 이 컬럼 이름에 들어가므로, 저장 전에
+    생성될 컬럼을 그 자리에서 보여 준다.
 ════════════════════════════════════════════════════════════
-"""
-
-import re
-
-import pandas as pd
-from django.db import connections
-
-from . import param_types as pt
-
-T_OPER  = 'cmp_cfg2_oper'
-T_LOT   = 'cmp_cfg2_lot'
-T_PARAM = 'cmp_cfg2_param'
-T_LINK  = 'cmp_cfg2_link'
-
-# 연계 공정 최대 개수 (별칭 기준)
-MAX_LINKS = 3
-
-KINDS  = ['SRC', 'REP', 'DEF', 'CHM']
-SCOPES = ['both', 'mon', 'ana']
-
-KIND_LABEL = {'SRC': 'SRC (측정값)', 'REP': 'REP (Response)',
-              'DEF': 'DEF (Defect)', 'CHM': 'CHM (장비·챔버)'}
-SCOPE_LABEL = {'both': '둘 다', 'mon': '모니터링', 'ana': '분석'}
-
-# 웨이퍼 번호 자릿수 — '01'~'09' 로 0 이 붙는다
-WF_PAD = 2
-
-
-def _conn():
-    return connections['analysis_db']
-
-
-def _s(v):
-    return str(v or '').strip()
-
-
-def _up(v):
-    return _s(v).upper()
-
-
-def slug(v):
-    """컬럼명에 쓸 수 있게 — 영숫자·_ 만 남기고 대문자로"""
-    out = re.sub(r'[^0-9A-Za-z_]+', '_', _s(v).upper())
-    return re.sub(r'_+', '_', out).strip('_')
-
-
-def wafer_key(alias_lot_id, wf_id):
-    """
-    병합 키. wf_id 는 반드시 0 패딩된 문자열로 만든다.
-
-    ★ Lake 가 '01' 로 주더라도 중간에 정수로 바뀌면 '1' 이 되어
-      다른 데이터와 안 붙는다. 여기서 형태를 고정한다.
-    """
-    w = _s(wf_id)
-    if w.isdigit():
-        w = w.zfill(WF_PAD)
-    return f'{_s(alias_lot_id)}.{w}'
-
-
-def link_column(kind, alias, param):
-    """
-    연계 공정 값이 들어갈 컬럼 이름.
-    예) link_column('SRC', 'M1CU', 'CU_THK_AVG') -> 'SRC_M1CU_CU_THK_AVG'
-
-    ★ 규칙의 단일 소재지다. 적재·화면 미리보기·점검이 모두 이 함수를
-      거쳐야 이름이 갈리지 않는다.
-    ★ CHM(장비·챔버)은 값이 아니라 라벨이라 <별칭>_EQP / <별칭>_CH 로
-      짧게 만든다. 차트 범례·그룹 기준으로 쓰이는 값이다.
-    """
-    k = _up(kind) if _up(kind) in KINDS else 'SRC'
-    a, p = slug(alias), slug(param)
-    if k == 'CHM':
-        return [f'{a}_EQP', f'{a}_CH'] if a else []
-    if not p:
-        return ''
-    return f'{k}_{a}_{p}' if a else f'{k}_{p}'
-
-
-# ══════════════════════════════════════════════════════════
-# 테이블
-# ══════════════════════════════════════════════════════════
-def ensure_tables():
-    with _conn().cursor() as cur:
-        cur.execute(f'''
-            CREATE TABLE IF NOT EXISTS {T_OPER} (
-              oper_id   VARCHAR(100) PRIMARY KEY,
-              oper_desc VARCHAR(200),
-              fab       VARCHAR(50),
-              eq_model  VARCHAR(50),
-              use_yn    VARCHAR(1) DEFAULT 'Y',
-              updated_by VARCHAR(100),
-              updated_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-        cur.execute(f'''
-            CREATE TABLE IF NOT EXISTS {T_LOT} (
-              id BIGSERIAL PRIMARY KEY,
-              oper_id   VARCHAR(100),
-              lot_cd    VARCHAR(50),
-              recipe_id VARCHAR(200),
-              use_yn    VARCHAR(1) DEFAULT 'Y'
-            )
-        ''')
-        cur.execute(f'''
-            CREATE TABLE IF NOT EXISTS {T_PARAM} (
-              id BIGSERIAL PRIMARY KEY,
-              oper_id    VARCHAR(100),
-              param      VARCHAR(100),
-              param_type VARCHAR(20),
-              use_yn     VARCHAR(1) DEFAULT 'Y'
-            )
-        ''')
-        # 연계 공정 — 파라미터 1개당 1행
-        #   같은 별칭이 여러 행에 반복되지만, 그래야 붙여넣기와 행 복제가
-        #   자연스럽고 파라미터마다 사용 여부를 따로 끌 수 있다.
-        cur.execute(f'''
-            CREATE TABLE IF NOT EXISTS {T_LINK} (
-              id BIGSERIAL PRIMARY KEY,
-              oper_id  VARCHAR(100),
-              seq      INTEGER DEFAULT 1,
-              kind     VARCHAR(10),
-              alias    VARCHAR(50),
-              link_id  VARCHAR(100),
-              lot_cd   VARCHAR(50),
-              param    VARCHAR(100),
-              scope    VARCHAR(10) DEFAULT 'both',
-              use_yn   VARCHAR(1) DEFAULT 'Y'
-            )
-        ''')
-        # 이미 만들어진 테이블에는 lot_cd 가 없다 — 있으면 두고 없으면 추가
-        cur.execute(f'ALTER TABLE {T_LINK} '
-                    f'ADD COLUMN IF NOT EXISTS lot_cd VARCHAR(50)')
-
-        for t in (T_LOT, T_PARAM, T_LINK):
-            cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{t}_oper '
-                        f'ON {t} (oper_id)')
-
-
-# ══════════════════════════════════════════════════════════
-# 조회
-# ══════════════════════════════════════════════════════════
-def list_opers():
-    ensure_tables()
-    with _conn().cursor() as cur:
-        cur.execute(f'''
-            SELECT o.oper_id, o.oper_desc, o.fab, o.eq_model, o.use_yn,
-                   (SELECT COUNT(*) FROM {T_LOT}   l WHERE l.oper_id = o.oper_id),
-                   (SELECT COUNT(*) FROM {T_PARAM} p WHERE p.oper_id = o.oper_id),
-                   (SELECT COUNT(DISTINCT alias) FROM {T_LINK} k
-                     WHERE k.oper_id = o.oper_id),
-                   (SELECT COUNT(*) FROM {T_LINK} k WHERE k.oper_id = o.oper_id)
-            FROM {T_OPER} o
-            ORDER BY o.oper_desc NULLS LAST, o.oper_id
-        ''')
-        return [{'oper_id': r[0], 'oper_desc': r[1] or '', 'fab': r[2] or '',
-                 'eq_model': r[3] or '', 'use_yn': r[4] or 'Y',
-                 'n_lot': r[5], 'n_param': r[6],
-                 'n_link': r[7], 'n_link_param': r[8]}
-                for r in cur.fetchall()]
-
-
-def get_oper(oper_id):
-    ensure_tables()
-    oper_id = _up(oper_id)
-    with _conn().cursor() as cur:
-        cur.execute(f'SELECT oper_id, oper_desc, fab, eq_model, use_yn '
-                    f'FROM {T_OPER} WHERE oper_id = %s', [oper_id])
-        row = cur.fetchone()
-        if not row:
-            return None
-
-        cur.execute(f'SELECT lot_cd, recipe_id, use_yn FROM {T_LOT} '
-                    f'WHERE oper_id = %s ORDER BY lot_cd, recipe_id', [oper_id])
-        lots = [{'lot_cd': r[0] or '', 'recipe_id': r[1] or '',
-                 'use_yn': r[2] or 'Y'} for r in cur.fetchall()]
-
-        cur.execute(f'SELECT param, param_type, use_yn FROM {T_PARAM} '
-                    f'WHERE oper_id = %s ORDER BY param', [oper_id])
-        params = [{'param': r[0] or '', 'param_type': r[1] or '',
-                   'use_yn': r[2] or 'Y'} for r in cur.fetchall()]
-
-        cur.execute(f'''
-            SELECT seq, kind, alias, link_id, lot_cd, param, scope, use_yn
-            FROM {T_LINK} WHERE oper_id = %s
-            ORDER BY seq, alias, param
-        ''', [oper_id])
-        links = [{'seq': r[0] or 1, 'kind': r[1] or 'SRC', 'alias': r[2] or '',
-                  'link_id': r[3] or '', 'lot_cd': r[4] or '',
-                  'param': r[5] or '', 'scope': r[6] or 'both',
-                  'use_yn': r[7] or 'Y'}
-                 for r in cur.fetchall()]
-
-    return {'oper_id': row[0], 'oper_desc': row[1] or '', 'fab': row[2] or '',
-            'eq_model': row[3] or '', 'use_yn': row[4] or 'Y',
-            'lots': lots, 'params': params, 'links': links}
-
-
-# ══════════════════════════════════════════════════════════
-# 저장
-# ══════════════════════════════════════════════════════════
-def save_oper(d, user=''):
-    """
-    공정 1건 저장 (전체 교체).
-
-    ★ 저장 전 검증에서 걸린 것은 저장하지 않는다 —
-      기존 v1 에서 화면이 payload 를 빠뜨려 '지우기만 하고 안 넣는'
-      사고가 있었다. 여기서는 빈 목록도 명시적으로 확인한다.
-    """
-    ensure_tables()
-    oper_id = _up(d.get('oper_id'))
-    if not oper_id:
-        raise ValueError('OPER_ID 를 입력하세요')
-    if not re.match(r'^[0-9A-Za-z_\-]+$', oper_id):
-        raise ValueError('OPER_ID 에 사용할 수 없는 문자가 있습니다')
-
-    lots, lseen = [], set()
-    for it in d.get('lots') or []:
-        lot = _up(it.get('lot_cd'))
-        if not lot:
-            continue
-        key = (lot, _up(it.get('recipe_id')))
-        if key in lseen:
-            continue
-        lseen.add(key)
-        lots.append((lot, _s(it.get('recipe_id')),
-                     'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
-
-    params, pseen = [], set()
-    for it in d.get('params') or []:
-        p = _up(it.get('param'))
-        if not p or p in pseen:
-            continue
-        pseen.add(p)
-        ptype = _up(it.get('param_type'))
-        params.append((p, ptype if ptype in pt.TYPES else '',
-                       'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
-
-    links, kseen, aliases = [], set(), []
-    for it in d.get('links') or []:
-        kind = _up(it.get('kind'))
-        if kind not in KINDS:
-            kind = 'SRC'
-        alias = slug(it.get('alias'))
-        link_id = _up(it.get('link_id'))
-        prm = _up(it.get('param'))
-        # 연계 공정은 본공정과 device 코드가 다를 수 있다.
-        #   비워 두면 본공정의 LOT_CD 를 그대로 쓴다.
-        lot_cd = _up(it.get('lot_cd'))
-        if not alias or not link_id:
-            continue                     # 별칭·공정ID 는 필수
-        if alias not in aliases:
-            aliases.append(alias)
-        key = (kind, alias, lot_cd, prm)
-        if key in kseen:
-            continue
-        kseen.add(key)
-        scope = _s(it.get('scope')).lower()
-        links.append((aliases.index(alias) + 1, kind, alias, link_id, lot_cd,
-                      prm, scope if scope in SCOPES else 'both',
-                      'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
-
-    if len(aliases) > MAX_LINKS:
-        raise ValueError(f'연계 공정은 최대 {MAX_LINKS}개입니다 '
-                         f'(현재 {len(aliases)}개: {", ".join(aliases)})')
-
-    # 같은 별칭에 타입이 둘이면 컬럼 규칙이 흔들린다
-    by_alias = {}
-    for _, kind, alias, link_id, _lc, _p, _sc, _u in links:
-        prev = by_alias.setdefault(alias, (kind, link_id))
-        if prev != (kind, link_id):
-            raise ValueError(f'별칭 {alias} 에 타입·공정ID 가 두 가지입니다 — '
-                             f'{prev[0]}/{prev[1]} vs {kind}/{link_id}')
-
-    with _conn().cursor() as cur:
-        cur.execute(f'''
-            INSERT INTO {T_OPER} (oper_id, oper_desc, fab, eq_model, use_yn,
-                                  updated_by, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,NOW())
-            ON CONFLICT (oper_id) DO UPDATE SET
-              oper_desc=EXCLUDED.oper_desc, fab=EXCLUDED.fab,
-              eq_model=EXCLUDED.eq_model, use_yn=EXCLUDED.use_yn,
-              updated_by=EXCLUDED.updated_by, updated_at=NOW()
-        ''', [oper_id, _s(d.get('oper_desc')), _s(d.get('fab')).lower(),
-              _up(d.get('eq_model')),
-              'N' if _up(d.get('use_yn')) == 'N' else 'Y', str(user)[:100]])
-
-        for t in (T_LOT, T_PARAM, T_LINK):
-            cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
-
-        for lot, rcp, use in lots:
-            cur.execute(f'INSERT INTO {T_LOT} (oper_id, lot_cd, recipe_id, '
-                        f'use_yn) VALUES (%s,%s,%s,%s)',
-                        [oper_id, lot, rcp, use])
-        for p, ptype, use in params:
-            cur.execute(f'INSERT INTO {T_PARAM} (oper_id, param, param_type, '
-                        f'use_yn) VALUES (%s,%s,%s,%s)',
-                        [oper_id, p, ptype, use])
-        for seq, kind, alias, link_id, lot_cd, prm, scope, use in links:
-            cur.execute(f'INSERT INTO {T_LINK} (oper_id, seq, kind, alias, '
-                        f'link_id, lot_cd, param, scope, use_yn) '
-                        f'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)',
-                        [oper_id, seq, kind, alias, link_id, lot_cd, prm,
-                         scope, use])
-
-    return {'oper_id': oper_id, 'lots': len(lots), 'params': len(params),
-            'links': len(aliases), 'link_params': len(links)}
-
-
-def delete_oper(oper_id):
-    ensure_tables()
-    oper_id = _up(oper_id)
-    with _conn().cursor() as cur:
-        for t in (T_LOT, T_PARAM, T_LINK, T_OPER):
-            cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
-    return True
-
-
-# ══════════════════════════════════════════════════════════
-# 적재 파이프라인이 쓰는 형태
-# ══════════════════════════════════════════════════════════
-def links_of(oper_id, scope=None):
-    """
-    연계 공정을 별칭 단위로 묶어 돌려준다.
-
-      scope='mon'  모니터링 적재용 (mon + both)
-      scope='ana'  분석용 (ana + both)
-      None         전부
-
-    반환: [{'kind','alias','link_id','scope','params':[...], 'columns':[...]}]
-    """
-    ensure_tables()
-    with _conn().cursor() as cur:
-        cur.execute(f'''
-            SELECT seq, kind, alias, link_id, lot_cd, param, scope
-            FROM {T_LINK}
-            WHERE oper_id = %s AND COALESCE(use_yn,'Y') <> 'N'
-            ORDER BY seq, alias, param
-        ''', [_up(oper_id)])
-        rows = cur.fetchall()
-
-    out = {}
-    for seq, kind, alias, link_id, lot_cd, prm, sc in rows:
-        if scope and sc not in (scope, 'both'):
-            continue
-        o = out.setdefault(alias, {'seq': seq, 'kind': kind, 'alias': alias,
-                                   'link_id': link_id, 'scope': sc,
-                                   'lot_cds': [], 'params': [], 'columns': []})
-        # 지정된 LOT_CD 만 모은다. 하나도 없으면 본공정 것을 쓴다는 뜻
-        if lot_cd and lot_cd not in o['lot_cds']:
-            o['lot_cds'].append(lot_cd)
-        if kind == 'CHM':
-            if not o['columns']:
-                o['columns'] = list(link_column(kind, alias, ''))
-        elif prm and prm not in o['params']:
-            o['params'].append(prm)
-            o['columns'].append(link_column(kind, alias, prm))
-    return sorted(out.values(), key=lambda x: x['seq'])
-
-
-def build_config_df(include_unused=False):
-    """
-    본공정 기준정보를 평면 DF 로 (기존 파이프라인과 같은 형태).
-    컬럼: FAB, LOT_CD, OPER_ID, OPER_DESC, EQ_MODEL, RECIPE_ID, PARAM, PARAM_TYPE
-    """
-    ensure_tables()
-    cond = "" if include_unused else "WHERE COALESCE(use_yn,'Y') <> 'N'"
-    with _conn().cursor() as cur:
-        cur.execute(f"SELECT oper_id, oper_desc, fab, eq_model FROM {T_OPER} "
-                    f"{cond}")
-        opers = {r[0]: r for r in cur.fetchall()}
-        cur.execute(f"SELECT oper_id, lot_cd, recipe_id FROM {T_LOT} {cond}")
-        lots = cur.fetchall()
-        cur.execute(f"SELECT oper_id, param, param_type FROM {T_PARAM} {cond}")
-        params = cur.fetchall()
-
-    rows = []
-    for oid, lot_cd, recipe in lots:
-        o = opers.get(oid)
-        if not o:
-            continue
-        for poid, prm, ptype in params:
-            if poid != oid:
-                continue
-            rows.append({
-                'FAB': o[2] or '', 'LOT_CD': lot_cd or '', 'OPER_ID': oid,
-                'OPER_DESC': o[1] or '', 'EQ_MODEL': o[3] or '',
-                'RECIPE_ID': recipe or '', 'PARAM': prm or '',
-                'PARAM_TYPE': pt.resolve(prm, ptype),
-            })
-    return pd.DataFrame(rows, columns=[
-        'FAB', 'LOT_CD', 'OPER_ID', 'OPER_DESC', 'EQ_MODEL', 'RECIPE_ID',
-        'PARAM', 'PARAM_TYPE'])
-
-
-def all_columns(oper_id, scope=None):
-    """그 공정에서 만들어질 연계 컬럼 이름 전부 (점검·분석 대상 선정용)"""
-    out = []
-    for lk in links_of(oper_id, scope):
-        for c in lk['columns']:
-            if c and c not in out:
-                out.append(c)
-    return out
-
-
-# ══════════════════════════════════════════════════════════
-# 가져오기 / 검증
-# ══════════════════════════════════════════════════════════
-def import_from_v1(oper_id=None, overwrite=False):
-    """
-    기존 기준정보(cmp_cfg_*)를 v2 로 복사한다.
-
-    ★ 사전공정 1개와 Response·Defect 스텝이 연계 공정으로 옮겨진다.
-      기존 데이터는 건드리지 않는다 — 읽기만 한다.
-    """
-    ensure_tables()
-    from . import config_service as v1
-
-    done, skipped = [], []
-    for o in v1.list_opers():
-        oid = o['oper_id']
-        if oper_id and oid != _up(oper_id):
-            continue
-        if not overwrite and get_oper(oid):
-            skipped.append(oid)
-            continue
-
-        src = v1.get_oper(oid)
-        if not src:
-            continue
-
-        links = []
-        # 사전공정 → SRC
-        if _s(src.get('pre_oper_id')):
-            links.append({
-                'kind': 'SRC',
-                'alias': slug(src.get('pre_oper_desc') or src['pre_oper_id'])[:20],
-                'link_id': src['pre_oper_id'],
-                'param': _up(src.get('pre_oper_param')),
-                'scope': 'both',
-            })
-        # Response → REP, Defect → DEF
-        for key, kind in (('resps', 'REP'), ('defects', 'DEF')):
-            for r in src.get(key) or []:
-                if not _s(r.get('step_id')):
-                    continue
-                links.append({
-                    'kind': kind,
-                    'alias': slug(r.get('step_desc') or r.get('step_id'))[:20],
-                    'link_id': _up(r.get('step_id')),
-                    'lot_cd': _up(r.get('lot_cd')),
-                    'param': _up(r.get('param')),
-                    'scope': 'both',
-                    'use_yn': r.get('use_yn', 'Y'),
-                })
-
-        save_oper({**src, 'links': links}, user='import_v1')
-        done.append(oid)
-
-    return {'imported': done, 'skipped': skipped}
-
-
-def overview():
-    """
-    전체 셋업 현황 — 공정별 구성과 만들어질 컬럼을 한눈에.
-
-    ★ 공정을 하나씩 열어 보면 전체가 어떻게 구성됐는지 알 수 없다.
-      어떤 공정에 연계가 빠졌는지, 어떤 별칭이 여러 공정에 쓰였는지,
-      모니터링 적재가 얼마나 무거워질지를 이 표로 판단한다.
-    """
-    ensure_tables()
-    rows, alias_use, kind_cnt = [], {}, {'SRC': 0, 'REP': 0, 'DEF': 0}
-    tot_mon = tot_ana = 0
-
-    for o in list_opers():
-        oid = o['oper_id']
-        links = links_of(oid)
-        mon = [c for lk in links_of(oid, 'mon') for c in lk['columns'] if c]
-        ana = [c for lk in links_of(oid, 'ana') for c in lk['columns'] if c]
-        tot_mon += len(mon)
-        tot_ana += len(ana)
-
-        items = []
-        for lk in links:
-            kind_cnt[lk['kind']] = kind_cnt.get(lk['kind'], 0) + 1
-            alias_use.setdefault(lk['alias'], []).append(oid)
-            items.append({
-                'kind': lk['kind'], 'alias': lk['alias'],
-                'link_id': lk['link_id'], 'scope': lk['scope'],
-                'n_param': len(lk['params']),
-                'columns': lk['columns'][:6],
-                'more': max(0, len(lk['columns']) - 6),
-            })
-
-        # 한눈에 문제를 알 수 있게 짧은 경고만 남긴다 (자세한 건 validate)
-        warn = []
-        if not o['n_lot']:
-            warn.append('device 없음')
-        if not o['n_param']:
-            warn.append('파라미터 없음')
-        if not links:
-            warn.append('연계 공정 없음')
-        if len(items) > MAX_LINKS:
-            warn.append(f'연계 {len(items)}개 (상한 {MAX_LINKS})')
-
-        rows.append({
-            'oper_id': oid, 'oper_desc': o['oper_desc'],
-            'fab': o['fab'], 'use_yn': o['use_yn'],
-            'n_lot': o['n_lot'], 'n_param': o['n_param'],
-            'links': items,
-            'n_mon_col': len(mon), 'n_ana_col': len(ana),
-            'warn': warn,
-        })
-
-    # 여러 공정이 같은 별칭을 쓰면 컬럼 이름이 겹칠 수 있다(테이블은 달라도
-    # 나중에 합쳐 볼 때 헷갈린다) — 알려만 준다
-    shared = {a: v for a, v in alias_use.items() if len(set(v)) > 1}
-
-    return {
-        'rows': rows,
-        'n_oper': len(rows),
-        'n_mon_col': tot_mon, 'n_ana_col': tot_ana,
-        'kind_cnt': kind_cnt,
-        'shared_alias': {a: sorted(set(v)) for a, v in shared.items()},
-    }
-
-
-def validate(oper_id=None):
-    """저장된 기준정보의 문제를 찾는다"""
-    ensure_tables()
-    out = []
-    for o in list_opers():
-        oid = o['oper_id']
-        if oper_id and oid != _up(oper_id):
-            continue
-        d = get_oper(oid)
-        issues = []
-
-        if not d['lots']:
-            issues.append('등록된 device(LOT_CD)가 없습니다')
-        if not d['params']:
-            issues.append('본공정 파라미터가 없습니다')
-        if not _s(d['fab']):
-            issues.append('FAB 이 비어 있습니다')
-
-        aliases = {}
-        for lk in d['links']:
-            a = lk['alias']
-            if not a:
-                issues.append(f"별칭이 빈 연계 공정이 있습니다 ({lk['link_id']})")
-                continue
-            aliases.setdefault(a, set()).add((lk['kind'], lk['link_id']))
-            if lk['kind'] == 'CHM':
-                continue      # 장비·챔버는 PARAM 이 필요 없다
-            if not lk['param']:
-                issues.append(f'{a}: 관리 PARAM 이 없어 조회되지 않습니다')
-            elif not link_column(lk['kind'], a, lk['param']):
-                issues.append(f"{a}: 컬럼 이름을 만들 수 없습니다 "
-                              f"(PARAM={lk['param']})")
-
-        if len(aliases) > MAX_LINKS:
-            issues.append(f'연계 공정이 {len(aliases)}개로 상한'
-                          f'({MAX_LINKS})을 넘었습니다')
-        for a, kinds in aliases.items():
-            if len(kinds) > 1:
-                issues.append(f'별칭 {a} 에 타입·공정ID 가 둘 이상입니다')
-
-        # 컬럼 이름 충돌
-        cols = {}
-        for lk in d['links']:
-            c = link_column(lk['kind'], lk['alias'], lk['param'])
-            if c:
-                cols.setdefault(c, 0)
-                cols[c] += 1
-        dup = [c for c, n in cols.items() if n > 1]
-        if dup:
-            issues.append(f'컬럼 이름이 겹칩니다: {", ".join(dup[:5])}')
-
-        if issues:
-            out.append({'oper_id': oid, 'oper_desc': o['oper_desc'],
-                        'issues': issues})
-    return out
+#}
+
+{% block extra_css %}
+<style>
+:root {
+  --c2-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+             'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --c2-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
+  --r-sm: 9px; --r-md: 12px; --r-lg: 16px;
+  --bad: #dc2626; --warn: #f59e0b; --good: #16a34a;
+}
+.c2, .c2 input, .c2 select, .c2 button, .c2 table { font-family: var(--c2-font); }
+.c2 { padding: 24px 28px 80px; max-width: 1500px; margin: 0 auto; }
+.c2-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
+  letter-spacing: -.02em; }
+.c2-sub { font-size: 13px; font-weight: 600; color: var(--tx-2);
+  margin: 4px 0 18px; }
+
+.bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 16px; }
+.btn { padding: 8px 15px; border-radius: var(--r-md); font-size: 12px;
+  font-weight: 800; cursor: pointer; border: 1px solid var(--bd);
+  background: var(--bg-2); color: var(--tx-2); transition: all .15s; }
+.btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.btn.pri { background: var(--accent); color: #000; border-color: transparent; }
+.btn.sm { padding: 5px 11px; font-size: 11px; font-weight: 700; }
+.btn.danger { color: var(--bad); border-color: rgba(220,38,38,.35); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.msg { font-size: 12px; font-weight: 700; }
+.msg.ok { color: var(--good); } .msg.err { color: var(--bad); }
+
+.sec { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 16px 18px; margin-bottom: 12px; }
+.sec-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px; }
+.sec-h h3 { font-size: 13px; font-weight: 800; color: var(--tx-1); margin: 0; }
+.sec-h .sub { font-size: 11px; font-weight: 600; color: var(--tx-muted); }
+.sec-h .right { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr));
+  gap: 10px; }
+.fld { display: flex; flex-direction: column; gap: 5px; }
+.fld label { font-size: 11px; font-weight: 800; color: var(--tx-muted); }
+.fld input, .fld select { font-size: 12px; font-weight: 600; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-md); padding: 7px 11px; outline: none; }
+.fld input:focus, .fld select:focus { border-color: var(--accent); }
+
+table.et { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table.et th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
+  text-align: left; padding: 7px 6px; border-bottom: 1.5px solid var(--bd);
+  white-space: nowrap; letter-spacing: .03em;
+  position: sticky; top: 0; background: var(--bg-3); z-index: 2; }
+table.et td { padding: 3px 6px; border-bottom: 1px solid rgba(128,128,128,.1);
+  vertical-align: middle; }
+table.et td input, table.et td select {
+  width: 100%; box-sizing: border-box; font-size: 11px; font-weight: 600;
+  font-family: var(--c2-mono); color: var(--tx-1); background: transparent;
+  border: 1px solid transparent; border-radius: 7px; padding: 5px 7px;
+  outline: none; }
+table.et td input:hover, table.et td select:hover { border-color: var(--bd); }
+table.et td input:focus, table.et td select:focus {
+  border-color: var(--accent); background: var(--bg-2); }
+table.et td select { font-family: var(--c2-font); cursor: pointer; }
+.tbl-scroll { max-height: 340px; overflow-y: auto; }
+.ck { width: 30px; text-align: center; }
+.ck input { width: 14px; height: 14px; accent-color: var(--accent);
+  cursor: pointer; }
+tr.sel td { background: rgba(125,125,125,.06); }
+.rdel { color: var(--tx-muted); cursor: pointer; font-size: 14px;
+  padding: 0 4px; }
+.rdel:hover { color: var(--bad); }
+.none-row { text-align: center; color: var(--tx-muted); font-size: 12px;
+  font-weight: 600; padding: 22px; }
+.colprev { font-family: var(--c2-mono); font-size: 11px; font-weight: 700;
+  color: var(--tx-2); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.colprev.none { color: var(--warn); }
+.kind-tag { display: inline-block; font-size: 10px; font-weight: 800;
+  border-radius: 20px; padding: 2px 8px; }
+.k-SRC { color: #185fa5; background: rgba(24,95,165,.12); }
+.k-REP { color: #0f6e56; background: rgba(15,110,86,.12); }
+.k-DEF { color: #854f0b; background: rgba(133,79,11,.14); }
+.k-CHM { color: #5b21b6; background: rgba(91,33,182,.12); }
+
+.olist { display: flex; flex-direction: column; gap: 3px; max-height: 62vh;
+  overflow-y: auto; }
+.oitem { padding: 9px 11px; border-radius: var(--r-md); cursor: pointer;
+  border: 1px solid transparent; }
+.oitem:hover { background: var(--bg-2); }
+.oitem.on { border-color: var(--accent); background: var(--bg-2); }
+.oitem .n { font-size: 12px; font-weight: 800; color: var(--tx-1); }
+.oitem .m { font-size: 10px; font-weight: 600; color: var(--tx-muted);
+  font-family: var(--c2-mono); margin-top: 2px; }
+.layout { display: grid; grid-template-columns: 260px 1fr; gap: 14px;
+  align-items: start; }
+.vitem { border: 1px solid var(--bd); border-radius: var(--r-md);
+  padding: 11px 13px; margin-bottom: 8px; font-size: 12px; }
+.vitem.bad { border-color: rgba(220,38,38,.4); }
+.vitem .h { font-weight: 800; color: var(--tx-1); margin-bottom: 5px; }
+.vitem .i { color: var(--warn); font-weight: 700; line-height: 1.7; }
+.ovt { width: 100%; border-collapse: collapse; }
+.ovt th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
+  text-align: left; padding: 8px 8px; border-bottom: 1.5px solid var(--bd);
+  white-space: nowrap; }
+.ovt td { font-size: 12px; padding: 9px 8px; vertical-align: top;
+  border-bottom: 1px solid rgba(128,128,128,.1); }
+.ovt tr.warn td { background: rgba(245,158,11,.05); }
+.lk { display: inline-flex; align-items: center; gap: 5px; margin: 1px 0;
+  font-family: var(--c2-mono); font-size: 11px; font-weight: 700;
+  color: var(--tx-1); }
+.lk .sc { font-family: var(--c2-font); font-size: 10px; font-weight: 700;
+  color: var(--tx-muted); }
+.cols { font-family: var(--c2-mono); font-size: 10px; color: var(--tx-muted);
+  line-height: 1.6; margin-top: 1px; }
+.wtag { display: inline-block; font-size: 10px; font-weight: 800;
+  color: var(--warn); background: rgba(245,158,11,.12);
+  border-radius: 20px; padding: 2px 8px; margin-right: 4px; }
+.hint { font-size: 11px; font-weight: 600; color: var(--tx-muted);
+  line-height: 1.6; margin-top: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="c2">
+  <h1 class="c2-title">기준정보 v2</h1>
+  <p class="c2-sub">연계 공정을 최대 {{ max_links }}개까지 등록합니다 —
+    타입(SRC·REP·DEF)이 조회 쿼리를, 용도가 적재 시점을 정합니다</p>
+
+  <div class="bar">
+    <button class="btn pri" onclick="newOper()">+ 새 공정</button>
+    <button class="btn" onclick="showOverview()">전체 현황</button>
+    <button class="btn" onclick="runValidate()">전체 검증</button>
+    <button class="btn" onclick="importV1()">기존 기준정보에서 가져오기</button>
+    <span class="msg" id="bar-msg"></span>
+  </div>
+
+  <div class="layout">
+    <div class="sec">
+      <div class="sec-h"><h3>공정</h3>
+        <span class="sub" id="ocnt"></span></div>
+      <div class="olist" id="olist"></div>
+    </div>
+
+    <div id="editor"></div>
+  </div>
+
+  <div class="sec" id="ovpanel" style="display:none;">
+    <div class="sec-h"><h3>전체 셋업 현황</h3>
+      <span class="sub" id="ov-sum"></span>
+      <span class="right">
+        <button class="btn sm" onclick="showOverview()">새로고침</button>
+        <button class="btn sm"
+                onclick="document.getElementById('ovpanel').style.display='none'">닫기</button>
+      </span></div>
+    <div id="ov-body"></div>
+  </div>
+
+  <div class="sec" id="vpanel" style="display:none;">
+    <div class="sec-h"><h3>검증 결과</h3></div>
+    <div id="vlist"></div>
+  </div>
+</div>
+
+<script>
+const API = {
+  opers:    "{% url 'config2-opers' %}",
+  oper:     "{% url 'config2-oper' %}",
+  save:     "{% url 'config2-save' %}",
+  del:      "{% url 'config2-delete' %}",
+  overview: "{% url 'config2-overview' %}",
+  validate: "{% url 'config2-validate' %}",
+  imp:      "{% url 'config2-import' %}",
+  classify: "{% url 'config2-classify' %}",
+  suggest:  "{% url 'config2-suggest' %}",
+};
+const MAX_LINKS = {{ max_links }};
+const KINDS  = [{% for v, l in kinds %}["{{ v }}","{{ l }}"],{% endfor %}];
+const SCOPES = [{% for v, l in scopes %}["{{ v }}","{{ l }}"],{% endfor %}];
+const PTYPES = [{% for v, l in type_options %}["{{ v }}","{{ l }}"],{% endfor %}];
+
+let opers = [], cur = null;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"'`]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',
+      "'":'&#39;','`':'&#96;'}[c]));
+}
+function msg(t, err) {
+  const el = document.getElementById('bar-msg');
+  el.className = 'msg ' + (err ? 'err' : 'ok');
+  el.textContent = t;
+}
+
+async function postJSON(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { console.error(`API ${res.status}`, url, j.error || ''); return {}; }
+    return j;
+  } catch (e) { console.error('요청 실패', url, e); return {}; }
+}
+
+/* ══════════════════════════════════════════════════
+   컬럼 이름 규칙
+
+   ★ 서버 config2_service.link_column 과 같은 규칙이다.
+     저장 전에 결과를 보여주려면 화면에도 있어야 하는데,
+     규칙을 바꿀 때는 반드시 양쪽을 함께 고칠 것.
+   ══════════════════════════════════════════════════ */
+function slug(v) {
+  return String(v || '').trim().toUpperCase()
+    .replace(/[^0-9A-Z_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
+function linkColumn(r) {
+  const k = KINDS.some(x => x[0] === r.kind) ? r.kind : 'SRC';
+  const a = slug(r.alias), p = slug(r.param);
+  // CHM 은 값이 아니라 라벨이라 PARAM 없이 두 컬럼이 만들어진다
+  if (k === 'CHM') return a ? `${a}_EQP, ${a}_CH` : '';
+  if (!p) return '';
+  return a ? `${k}_${a}_${p}` : `${k}_${p}`;
+}
+
+/* ══════════════════════════════════════════════════
+   표 정의 — 세 표가 같은 방식으로 동작한다
+   ══════════════════════════════════════════════════ */
+const TBL = {
+  lots: {
+    label: 'Device', tbody: 'ltbody', count: 'lcnt',
+    blank: () => ({lot_cd: '', recipe_id: '', use_yn: 'Y'}),
+  },
+  params: {
+    label: '본공정 파라미터', tbody: 'ptbody', count: 'pcnt',
+    blank: () => ({param: '', param_type: '', use_yn: 'Y'}),
+  },
+  links: {
+    label: '연계 공정', tbody: 'ktbody', count: 'kcnt',
+    blank: () => ({kind: 'SRC', alias: '', link_id: '', lot_cd: '',
+                   param: '', scope: 'both', use_yn: 'Y'}),
+  },
+};
+
+/* ══════════════════════════════════════════════════
+   공정 목록
+   ══════════════════════════════════════════════════ */
+async function loadOpers() {
+  const j = await postJSON(API.opers, {});
+  opers = j.opers || [];
+  document.getElementById('ocnt').textContent = `${opers.length}개`;
+  document.getElementById('olist').innerHTML = opers.map(o => `
+    <div class="oitem ${cur && cur.oper_id === o.oper_id ? 'on' : ''}"
+         onclick="openOper('${esc(o.oper_id)}')">
+      <div class="n">${esc(o.oper_desc || o.oper_id)}</div>
+      <div class="m">${esc(o.oper_id)} · device ${o.n_lot} ·
+        param ${o.n_param} · 연계 ${o.n_link}</div>
+    </div>`).join('') ||
+    '<div class="none-row">등록된 공정이 없습니다.</div>';
+}
+
+async function openOper(id) {
+  const j = await postJSON(API.oper, {oper_id: id});
+  if (!j.ok) { msg(j.error || '조회 실패', true); return; }
+  cur = j.oper;
+  cur.links = cur.links || [];
+  renderEditor();
+  loadOpers();
+}
+
+function newOper() {
+  cur = {oper_id: '', oper_desc: '', fab: '', eq_model: '', use_yn: 'Y',
+         lots: [], params: [], links: [], _new: true};
+  renderEditor();
+  loadOpers();
+}
+
+/* ══════════════════════════════════════════════════
+   편집 화면
+   ══════════════════════════════════════════════════ */
+function renderEditor() {
+  if (!cur) { document.getElementById('editor').innerHTML = ''; return; }
+  const c = cur;
+
+  document.getElementById('editor').innerHTML = `
+    <div class="sec">
+      <div class="sec-h">
+        <h3>${esc(c.oper_desc || c.oper_id || '새 공정')}</h3>
+        <span class="sub">${esc(c.oper_id || '')}</span>
+        <span class="right">
+          <button class="btn pri sm" onclick="saveOper()">저장</button>
+          ${c._new ? '' :
+            `<button class="btn sm danger" onclick="delOper()">공정 삭제</button>`}
+        </span></div>
+      <div class="grid">
+        <div class="fld"><label>OPER_ID *</label>
+          <input id="f-oper_id" value="${esc(c.oper_id)}"
+                 ${c._new ? '' : 'readonly'} placeholder="V5071000B"></div>
+        <div class="fld"><label>공정명</label>
+          <input id="f-oper_desc" value="${esc(c.oper_desc)}"
+                 placeholder="M1 Cu CMP"></div>
+        <div class="fld"><label>FAB</label>
+          <input id="f-fab" value="${esc(c.fab)}" placeholder="m15x"></div>
+        <div class="fld"><label>EQ_MODEL</label>
+          <input id="f-eq_model" value="${esc(c.eq_model)}"
+                 placeholder="EBARA"></div>
+        <div class="fld"><label>사용</label>
+          <select id="f-use_yn">
+            <option value="Y" ${c.use_yn !== 'N' ? 'selected' : ''}>사용</option>
+            <option value="N" ${c.use_yn === 'N' ? 'selected' : ''}>제외</option>
+          </select></div>
+      </div>
+      <div class="msg" id="ed-msg" style="margin-top:10px;"></div>
+    </div>
+
+    ${section('links', '연계 공정',
+      `최대 ${MAX_LINKS}개 · 파라미터 1개당 1행`,
+      `<th style="width:70px;">타입</th>
+       <th style="width:84px;">별칭 *</th>
+       <th style="width:102px;">공정·스텝 *</th>
+       <th style="width:78px;">LOT_CD</th>
+       <th>관리 PARAM</th>
+       <th style="width:82px;">용도</th>
+       <th style="width:170px;">생성 컬럼</th>
+       <th style="width:60px;">사용</th><th style="width:24px;"></th>`,
+      'ktbody')}
+
+    ${section('lots', 'Device', 'LOT_CD 와 레시피',
+      `<th style="width:26%;">LOT_CD *</th>
+       <th>RECIPE_ID</th>
+       <th style="width:74px;">사용</th><th style="width:26px;"></th>`,
+      'ltbody')}
+
+    ${section('params', '본공정 파라미터', 'CMP 자체 측정 항목',
+      `<th style="width:52%;">PARAM *</th>
+       <th style="width:24%;">타입</th>
+       <th style="width:74px;">사용</th><th style="width:26px;"></th>`,
+      'ptbody')}
+  `;
+
+  renderLinks(); renderLots(); renderParams();
+}
+
+function section(key, title, sub, head, tbody) {
+  return `
+    <div class="sec">
+      <div class="sec-h"><h3>${title}</h3>
+        <span class="sub" id="${TBL[key].count}"></span>
+        <span class="sub">— ${sub}</span>
+        <span class="right">
+          <button class="btn sm" onclick="dupRows('${key}')">행 복제</button>
+          <button class="btn sm danger" onclick="delSel('${key}')">선택 삭제</button>
+          <button class="btn sm" onclick="openPaste('${key}')">붙여넣기</button>
+          <button class="btn sm" onclick="addRow('${key}')">+ 추가</button>
+        </span></div>
+      <div class="tbl-scroll">
+        <table class="et">
+          <thead><tr>
+            <th class="ck"><input type="checkbox"
+                onchange="selAll('${key}', this.checked)"></th>
+            ${head}</tr></thead>
+          <tbody id="${tbody}"></tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+/* ── 연계 공정 표 ─────────────────────────── */
+function renderLinks() {
+  const rows = cur.links || [];
+  document.getElementById('kcnt').textContent =
+    `${new Set(rows.map(r => slug(r.alias)).filter(Boolean)).size}개 공정 · ${rows.length}행`;
+
+  document.getElementById('ktbody').innerHTML = rows.map((r, i) => {
+    const col = linkColumn(r);
+    return `<tr class="${r._sel ? 'sel' : ''}">
+      <td class="ck"><input type="checkbox" ${r._sel ? 'checked' : ''}
+            onchange="cur.links[${i}]._sel=this.checked;renderLinks()"></td>
+      <td><select onchange="cur.links[${i}].kind=this.value;renderLinks()">
+        ${KINDS.map(([v, l]) => `<option value="${v}"
+          ${r.kind === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+      </select></td>
+      <td><input value="${esc(r.alias)}" placeholder="M1CU"
+                 oninput="cur.links[${i}].alias=this.value.toUpperCase();refreshCol(${i})"></td>
+      <td><input value="${esc(r.link_id)}" placeholder="T5515000C"
+                 oninput="cur.links[${i}].link_id=this.value.toUpperCase();refreshCol(${i})"></td>
+      <td><input value="${esc(r.lot_cd || '')}" placeholder="본공정과 같음"
+                 title="비우면 본공정의 LOT_CD 를 그대로 씁니다"
+                 oninput="cur.links[${i}].lot_cd=this.value.toUpperCase()"></td>
+      <td><input value="${esc(r.param)}" placeholder="${r.kind === 'CHM' ? '(불필요)' : 'CU_THK_AVG'}"
+                 ${r.kind === 'CHM' ? 'disabled' : ''}
+                 oninput="cur.links[${i}].param=this.value.toUpperCase();refreshCol(${i})"></td>
+      <td><select onchange="cur.links[${i}].scope=this.value">
+        ${SCOPES.map(([v, l]) => `<option value="${v}"
+          ${r.scope === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select></td>
+      <td class="colprev ${col ? '' : 'none'}" id="col-${i}"
+          title="병합 후 이 이름의 컬럼에 값이 들어갑니다">
+        ${col || (r.kind === 'CHM' ? '별칭 필요' : 'PARAM 필요')}</td>
+      <td><select onchange="cur.links[${i}].use_yn=this.value">
+        <option value="Y" ${r.use_yn !== 'N' ? 'selected' : ''}>사용</option>
+        <option value="N" ${r.use_yn === 'N' ? 'selected' : ''}>제외</option>
+      </select></td>
+      <td><span class="rdel" onclick="delRow('links',${i})">×</span></td>
+    </tr>`;
+  }).join('') ||
+    `<tr><td colspan="10" class="none-row">연계 공정이 없습니다.
+      추가하거나 기존 기준정보에서 가져오세요.</td></tr>`;
+}
+
+/* 이름을 칠 때마다 표 전체를 다시 그리면 포커스가 날아간다 —
+   생성 컬럼 칸만 갱신한다 */
+function refreshCol(i) {
+  const el = document.getElementById('col-' + i);
+  if (!el) return;
+  const col = linkColumn(cur.links[i]);
+  el.textContent = col ||
+    (cur.links[i].kind === 'CHM' ? '별칭 필요' : 'PARAM 필요');
+  el.className = 'colprev ' + (col ? '' : 'none');
+}
+
+/* ── Device / 파라미터 표 ─────────────────── */
+function renderLots() {
+  const rows = cur.lots || [];
+  document.getElementById('lcnt').textContent = `${rows.length}행`;
+  document.getElementById('ltbody').innerHTML = rows.map((r, i) => `
+    <tr class="${r._sel ? 'sel' : ''}">
+      <td class="ck"><input type="checkbox" ${r._sel ? 'checked' : ''}
+            onchange="cur.lots[${i}]._sel=this.checked;renderLots()"></td>
+      <td><input value="${esc(r.lot_cd)}" placeholder="5E2"
+                 oninput="cur.lots[${i}].lot_cd=this.value.toUpperCase()"></td>
+      <td><input value="${esc(r.recipe_id)}" placeholder="E2_M1CU_AB.CAS"
+                 oninput="cur.lots[${i}].recipe_id=this.value"></td>
+      <td><select onchange="cur.lots[${i}].use_yn=this.value">
+        <option value="Y" ${r.use_yn !== 'N' ? 'selected' : ''}>사용</option>
+        <option value="N" ${r.use_yn === 'N' ? 'selected' : ''}>제외</option>
+      </select></td>
+      <td><span class="rdel" onclick="delRow('lots',${i})">×</span></td>
+    </tr>`).join('') ||
+    '<tr><td colspan="5" class="none-row">Device 가 없습니다.</td></tr>';
+}
+
+function renderParams() {
+  const rows = cur.params || [];
+  document.getElementById('pcnt').textContent = `${rows.length}개`;
+  document.getElementById('ptbody').innerHTML = rows.map((r, i) => `
+    <tr class="${r._sel ? 'sel' : ''}">
+      <td class="ck"><input type="checkbox" ${r._sel ? 'checked' : ''}
+            onchange="cur.params[${i}]._sel=this.checked;renderParams()"></td>
+      <td><input value="${esc(r.param)}" placeholder="CU_THK_AVG"
+                 oninput="cur.params[${i}].param=this.value.toUpperCase()"></td>
+      <td><select onchange="cur.params[${i}].param_type=this.value">
+        <option value="">자동</option>
+        ${PTYPES.map(([v, l]) => `<option value="${v}"
+          ${r.param_type === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+      </select></td>
+      <td><select onchange="cur.params[${i}].use_yn=this.value">
+        <option value="Y" ${r.use_yn !== 'N' ? 'selected' : ''}>사용</option>
+        <option value="N" ${r.use_yn === 'N' ? 'selected' : ''}>제외</option>
+      </select></td>
+      <td><span class="rdel" onclick="delRow('params',${i})">×</span></td>
+    </tr>`).join('') ||
+    '<tr><td colspan="5" class="none-row">파라미터가 없습니다.</td></tr>';
+}
+
+function rerender(key) {
+  ({lots: renderLots, params: renderParams, links: renderLinks})[key]();
+}
+
+/* ══════════════════════════════════════════════════
+   행 조작 — 세 표 공통
+   ══════════════════════════════════════════════════ */
+function addRow(key) {
+  cur[key] = cur[key] || [];
+  cur[key].push(TBL[key].blank());
+  rerender(key);
+}
+
+function delRow(key, i) { cur[key].splice(i, 1); rerender(key); }
+
+function selAll(key, on) {
+  (cur[key] || []).forEach(r => { r._sel = !!on; });
+  rerender(key);
+}
+
+function delSel(key) {
+  const n = (cur[key] || []).filter(r => r._sel).length;
+  if (!n) { edMsg('선택된 행이 없습니다', true); return; }
+  if (!confirm(`${TBL[key].label} ${n}행을 삭제할까요?`)) return;
+  cur[key] = cur[key].filter(r => !r._sel);
+  rerender(key);
+}
+
+/* ★ 행 복제 — 선택한 행을 바로 아래에 복사한다.
+   연계 공정은 타입·별칭·공정ID 가 같고 PARAM 만 다른 행을 여러 개
+   넣는 일이 잦아, 그걸 매번 손으로 채우는 게 번거롭다. */
+function dupRows(key) {
+  const rows = cur[key] || [];
+  const picked = rows.map((r, i) => [r, i]).filter(([r]) => r._sel);
+  if (!picked.length) { edMsg('복제할 행을 선택하세요', true); return; }
+
+  // 뒤에서부터 넣어야 앞쪽 인덱스가 밀리지 않는다
+  picked.reverse().forEach(([r, i]) => {
+    const copy = Object.assign({}, r);
+    delete copy._sel;
+    rows.splice(i + 1, 0, copy);
+  });
+  cur[key] = rows;
+  rerender(key);
+  edMsg(`${picked.length}행 복제 — 값을 바꿔 이어서 입력하세요`);
+}
+
+/* ══════════════════════════════════════════════════
+   엑셀 붙여넣기
+   ══════════════════════════════════════════════════ */
+const PASTE_COLS = {
+  lots:   ['lot_cd', 'recipe_id', 'use_yn'],
+  params: ['param', 'param_type', 'use_yn'],
+  links:  ['kind', 'alias', 'link_id', 'lot_cd', 'param', 'scope', 'use_yn'],
+};
+
+function openPaste(key) {
+  const cols = PASTE_COLS[key];
+  const text = prompt(
+    `${TBL[key].label} — 엑셀에서 복사해 붙여넣으세요\n` +
+    `열 순서: ${cols.join(' / ')}\n` +
+    `(탭 또는 쉼표 구분, 헤더 행은 자동으로 걸러냅니다)`);
+  if (!text) return;
+
+  const rows = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const added = [];
+  rows.forEach(line => {
+    const cells = line.split(/\t|,/).map(c => c.trim());
+    // 헤더 행 거르기 — 첫 칸이 컬럼 이름과 같으면 건너뛴다
+    if (cells[0] && cols[0].toUpperCase() === cells[0].toUpperCase()) return;
+    const r = TBL[key].blank();
+    cols.forEach((c, i) => {
+      let v = cells[i] || '';
+      if (!v) return;
+      if (c === 'use_yn') v = /^(n|no|제외|미사용)$/i.test(v) ? 'N' : 'Y';
+      else if (c === 'kind') v = v.toUpperCase();
+      else if (c === 'scope') v = v.toLowerCase();
+      else if (c !== 'recipe_id') v = v.toUpperCase();
+      r[c] = v;
+    });
+    added.push(r);
+  });
+
+  if (!added.length) { edMsg('붙여넣을 내용이 없습니다', true); return; }
+  cur[key] = (cur[key] || []).concat(added);
+  rerender(key);
+  edMsg(`${added.length}행 추가`);
+}
+
+/* ══════════════════════════════════════════════════
+   저장 / 검증
+   ══════════════════════════════════════════════════ */
+function edMsg(t, err) {
+  const el = document.getElementById('ed-msg');
+  if (!el) return;
+  el.className = 'msg ' + (err ? 'err' : 'ok');
+  el.textContent = t;
+}
+
+function collect() {
+  const g = k => ((document.getElementById('f-' + k) || {}).value || '');
+  const strip = rows => (rows || []).map(r => {
+    const o = Object.assign({}, r);
+    delete o._sel;
+    return o;
+  });
+  return {
+    oper_id: g('oper_id').trim().toUpperCase(),
+    oper_desc: g('oper_desc').trim(),
+    fab: g('fab').trim(),
+    eq_model: g('eq_model').trim().toUpperCase(),
+    use_yn: g('use_yn'),
+    lots:   strip((cur.lots   || []).filter(r => (r.lot_cd || '').trim())),
+    params: strip((cur.params || []).filter(r => (r.param  || '').trim())),
+    // ★ 저장 payload 에서 빠뜨리면 서버가 지우기만 하고 안 넣는다
+    links:  strip((cur.links  || []).filter(r =>
+              (r.alias || '').trim() && (r.link_id || '').trim())),
+  };
+}
+
+async function saveOper() {
+  const d = collect();
+  if (!d.oper_id) { edMsg('OPER_ID 를 입력하세요', true); return; }
+
+  const j = await postJSON(API.save, d);
+  if (!j.ok) { edMsg(j.error || '저장 실패', true); return; }
+
+  const s = j.saved;
+  edMsg(`저장 완료 — device ${s.lots} · param ${s.params} · ` +
+        `연계 ${s.links}개(${s.link_params}행)`);
+  cur._new = false;
+  loadOpers();
+}
+
+async function delOper() {
+  if (!cur || !cur.oper_id) return;
+  if (!confirm(`${cur.oper_id} 를 삭제할까요? 되돌릴 수 없습니다.`)) return;
+  const j = await postJSON(API.del, {oper_id: cur.oper_id});
+  if (!j.ok) { edMsg(j.error || '삭제 실패', true); return; }
+  cur = null;
+  document.getElementById('editor').innerHTML = '';
+  msg('삭제했습니다');
+  loadOpers();
+}
+
+/* ══════════════════════════════════════════════════
+   전체 셋업 현황
+
+   ★ 공정을 하나씩 열어 보면 전체 구성을 알 수 없다.
+     어디에 연계가 빠졌는지, 모니터링 적재가 얼마나 무거워질지를
+     이 표로 판단한다.
+   ══════════════════════════════════════════════════ */
+async function showOverview() {
+  const j = await postJSON(API.overview, {});
+  if (!j.ok) { msg(j.error || '현황 조회 실패', true); return; }
+
+  const kc = j.kind_cnt || {};
+  document.getElementById('ov-sum').textContent =
+    `공정 ${j.n_oper}개 · 연계 ${(kc.SRC||0)+(kc.REP||0)+(kc.DEF||0)}건 ` +
+    `(SRC ${kc.SRC||0} · REP ${kc.REP||0} · DEF ${kc.DEF||0}) · ` +
+    `컬럼 모니터링 ${j.n_mon_col} / 분석 ${j.n_ana_col}`;
+
+  const rows = (j.rows || []).map(r => {
+    const links = (r.links || []).map(l => `
+      <div class="lk">
+        <span class="kind-tag k-${esc(l.kind)}">${esc(l.kind)}</span>
+        ${esc(l.alias)}
+        <span class="sc">${esc(l.link_id)} · ${esc(scopeLabel(l.scope))} ·
+          param ${l.n_param}</span>
+      </div>
+      <div class="cols">${(l.columns || []).map(esc).join(', ')}${
+        l.more ? ` 외 ${l.more}개` : ''}</div>`).join('') ||
+      '<span style="color:var(--tx-muted);font-size:11px;">연계 공정 없음</span>';
+
+    return `<tr class="${r.warn.length ? 'warn' : ''}">
+      <td><b>${esc(r.oper_desc || r.oper_id)}</b>
+        <div class="cols">${esc(r.oper_id)}${r.fab ? ' · ' + esc(r.fab) : ''}
+          ${r.use_yn === 'N' ? ' · <b style="color:var(--warn)">미사용</b>' : ''}</div></td>
+      <td style="text-align:right;">${r.n_lot}</td>
+      <td style="text-align:right;">${r.n_param}</td>
+      <td>${links}</td>
+      <td style="text-align:right;">${r.n_mon_col}</td>
+      <td style="text-align:right;">${r.n_ana_col}</td>
+      <td>${r.warn.map(w => `<span class="wtag">${esc(w)}</span>`).join('') || ''}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="none-row">등록된 공정이 없습니다.</td></tr>';
+
+  const shared = j.shared_alias || {};
+  const sharedHtml = Object.keys(shared).length ? `
+    <div class="hint" style="color:var(--warn);">
+      여러 공정이 같은 별칭을 씁니다 —
+      ${Object.entries(shared).slice(0, 6).map(([a, v]) =>
+        `<b>${esc(a)}</b>(${v.map(esc).join(', ')})`).join(' · ')}
+      <br>테이블은 공정별로 나뉘지만, 나중에 합쳐 볼 때 어느 공정의 값인지
+      헷갈릴 수 있습니다.
+    </div>` : '';
+
+  document.getElementById('ov-body').innerHTML = `
+    <table class="ovt">
+      <thead><tr>
+        <th>공정</th><th style="text-align:right;">device</th>
+        <th style="text-align:right;">param</th>
+        <th style="width:46%;">연계 공정 · 생성 컬럼</th>
+        <th style="text-align:right;">모니터링<br>컬럼</th>
+        <th style="text-align:right;">분석<br>컬럼</th>
+        <th style="width:120px;">경고</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${sharedHtml}
+    <div class="hint">모니터링 컬럼은 정기 적재에, 분석 컬럼은 1회성 조회에
+      붙습니다. 용도가 '둘 다' 면 양쪽에 모두 들어갑니다.</div>`;
+
+  document.getElementById('ovpanel').style.display = 'block';
+  document.getElementById('ovpanel').scrollIntoView({behavior:'smooth',
+                                                     block:'nearest'});
+}
+
+function scopeLabel(v) {
+  const m = SCOPES.find(s => s[0] === v);
+  return m ? m[1] : v;
+}
+
+async function runValidate() {
+  const j = await postJSON(API.validate, {});
+  if (!j.ok) { msg(j.error || '검증 실패', true); return; }
+  const items = j.issues || [];
+  document.getElementById('vpanel').style.display = 'block';
+  document.getElementById('vlist').innerHTML = items.map(x => `
+    <div class="vitem bad">
+      <div class="h">${esc(x.oper_desc || x.oper_id)}
+        <span style="font-weight:600;color:var(--tx-muted);">${esc(x.oper_id)}</span></div>
+      <div class="i">${x.issues.map(i => '· ' + esc(i)).join('<br>')}</div>
+    </div>`).join('') ||
+    '<div class="vitem"><div class="h">문제가 없습니다</div></div>';
+  msg(items.length ? `문제 있는 공정 ${items.length}개` : '검증 통과',
+      items.length > 0);
+}
+
+async function importV1() {
+  if (!confirm('기존 기준정보를 v2 로 가져올까요?\n' +
+               '사전공정 → SRC, Response → REP, Defect → DEF 로 옮겨집니다.\n' +
+               '기존 데이터는 그대로 두고 읽기만 합니다.')) return;
+  const j = await postJSON(API.imp, {overwrite: false});
+  if (!j.ok) { msg(j.error || '가져오기 실패', true); return; }
+  msg(`가져오기 완료 — ${(j.imported || []).length}개 공정` +
+      ((j.skipped || []).length ? ` (이미 있어 건너뜀 ${j.skipped.length}개)` : ''));
+  loadOpers();
+}
+
+loadOpers();
+</script>
+{% endblock %}
