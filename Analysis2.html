@@ -1,0 +1,604 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}통합 분석{% endblock %}
+
+{#
+════════════════════════════════════════════════════════════
+  통합 분석 페이지 (기존 analysis 와 병행)
+
+  왼쪽 차트 · 오른쪽 분석 AI.
+
+  ★ 상관 차트 영역을 따로 두지 않는다 — X 축에 DATE 를 고를 수 있으므로
+    트렌드와 상관이 같은 카드로 표현된다.
+  ★ 이슈 구간은 여러 개 정의할 수 있다. 기간·랏·웨이퍼를 섞어 쓸 수 있고,
+    지정하면 모든 차트에 같은 색으로 동시에 표시된다.
+  ★ 차트 데이터는 카드마다 따로 받는다. 한 번에 다 받으면
+    웨이퍼 수천 장 × 컬럼 수백 개라 브라우저가 죽는다.
+════════════════════════════════════════════════════════════
+#}
+
+{% block extra_css %}
+<style>
+:root {
+  --a2-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+             'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --a2-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
+  --r-sm: 9px; --r-md: 12px; --r-lg: 16px;
+  --bad: #dc2626; --warn: #f59e0b; --good: #16a34a;
+}
+.a2, .a2 input, .a2 select, .a2 button, .a2 textarea { font-family: var(--a2-font); }
+.a2 { padding: 20px 24px 60px; }
+.a2-title { font-size: 19px; font-weight: 800; color: var(--tx-1);
+  letter-spacing: -.02em; }
+.a2-sub { font-size: 12px; font-weight: 600; color: var(--tx-2);
+  margin: 3px 0 14px; }
+
+.btn { padding: 7px 14px; border-radius: var(--r-md); font-size: 12px;
+  font-weight: 800; cursor: pointer; border: 1px solid var(--bd);
+  background: var(--bg-2); color: var(--tx-2); transition: all .15s; }
+.btn:hover { color: var(--tx-1); border-color: var(--tx-muted); }
+.btn.pri { background: var(--accent); color: #000; border-color: transparent; }
+.btn.sm { padding: 4px 10px; font-size: 11px; font-weight: 700; }
+.btn.danger { color: var(--bad); border-color: rgba(220,38,38,.35); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.msg { font-size: 12px; font-weight: 700; }
+.msg.ok { color: var(--good); } .msg.err { color: var(--bad); }
+
+.bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 12px 14px; margin-bottom: 12px; }
+.bar select, .bar input { font-size: 12px; font-weight: 600; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-md); padding: 6px 10px; outline: none; }
+.bar select:focus, .bar input:focus { border-color: var(--accent); }
+.lbl { font-size: 11px; font-weight: 800; color: var(--tx-muted); }
+
+/* 왼쪽 차트 · 오른쪽 AI */
+.split { display: grid; grid-template-columns: 1fr 380px; gap: 12px;
+  align-items: start; }
+@media (max-width: 1280px) { .split { grid-template-columns: 1fr; } }
+
+/* 차트 배치 — 개수에 따라 1~3열 */
+.charts { display: grid; gap: 10px; }
+.charts.c1 { grid-template-columns: 1fr; }
+.charts.c2 { grid-template-columns: 1fr 1fr; }
+.charts.c3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 1100px) { .charts.c2, .charts.c3 { grid-template-columns: 1fr; } }
+
+.card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 11px 13px; }
+.card-h { display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 8px; }
+.card-h select { font-size: 11px; font-weight: 700; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-sm); padding: 4px 8px; outline: none; max-width: 150px; }
+.card-h .x { margin-left: auto; color: var(--tx-muted); cursor: pointer;
+  font-size: 15px; padding: 0 3px; }
+.card-h .x:hover { color: var(--bad); }
+.plot { width: 100%; height: 300px; }
+.charts.c2 .plot, .charts.c3 .plot { height: 250px; }
+.cnote { font-size: 10px; font-weight: 600; color: var(--tx-muted);
+  margin-top: 3px; }
+.cnote.warn { color: var(--warn); }
+
+/* 이슈 구간 */
+.spans { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 12px 14px; margin-bottom: 12px; }
+.sp-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  padding: 6px 0; border-bottom: 1px solid rgba(128,128,128,.1); }
+.sp-row:last-child { border-bottom: 0; }
+.sp-dot { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.sp-row input, .sp-row select { font-size: 11px; font-weight: 600;
+  color: var(--tx-1); background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-sm); padding: 4px 8px; outline: none; }
+.sp-row .grow { flex: 1; min-width: 160px; }
+.sp-n { font-size: 10px; font-weight: 700; color: var(--tx-muted);
+  font-family: var(--a2-mono); }
+
+/* 분석 AI */
+.ai { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-lg); padding: 13px 15px; position: sticky; top: 12px; }
+.ai-h { font-size: 13px; font-weight: 800; color: var(--tx-1);
+  margin-bottom: 4px; }
+.ai-log { min-height: 240px; max-height: 52vh; overflow-y: auto;
+  font-size: 12px; line-height: 1.7; color: var(--tx-1);
+  border: 1px solid var(--bd); border-radius: var(--r-md);
+  background: var(--bg-2); padding: 11px 12px; margin: 9px 0; }
+.ai-log .u { color: var(--tx-2); font-weight: 700; margin-top: 8px; }
+.ai-log .a { margin-top: 4px; }
+.ai-in { display: flex; gap: 6px; }
+.ai-in textarea { flex: 1; font-size: 12px; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-md); padding: 8px 10px; outline: none;
+  resize: vertical; min-height: 58px; }
+.ai-in textarea:focus { border-color: var(--accent); }
+.chips { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 8px; }
+.chip { font-size: 11px; font-weight: 700; color: var(--tx-2);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 20px; padding: 4px 10px; cursor: pointer; }
+.chip:hover { color: var(--tx-1); border-color: var(--accent); }
+.empty { padding: 30px; text-align: center; color: var(--tx-muted);
+  font-size: 12px; font-weight: 600; }
+.hint { font-size: 11px; font-weight: 600; color: var(--tx-muted);
+  line-height: 1.6; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="a2">
+  <h1 class="a2-title">통합 분석</h1>
+  <p class="a2-sub">적재 데이터나 1회성 조회 결과를 불러와 차트를 원하는 만큼
+    펼치고, 이슈 구간을 정의해 분석합니다</p>
+
+  <!-- 데이터 소스 -->
+  <div class="bar">
+    <span class="lbl">데이터</span>
+    <select id="src" style="min-width:260px;" onchange="onSrcChange()"></select>
+    <span class="lbl">LOT_CD</span>
+    <select id="lotcd" style="min-width:110px;" onchange="reloadAll()"></select>
+    <span class="lbl">범례</span>
+    <select id="legend" style="min-width:130px;" onchange="reloadAll()"></select>
+    <button class="btn pri" onclick="loadSource()">DB 조회</button>
+    <span class="msg" id="bar-msg"></span>
+    <span class="sp-n" id="meta" style="margin-left:auto;"></span>
+  </div>
+
+  <!-- 이슈 구간 -->
+  <div class="spans">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+      <span style="font-size:13px;font-weight:800;color:var(--tx-1);">이슈 구간</span>
+      <span class="hint">기간·랏·웨이퍼를 섞어 여러 개 정의할 수 있습니다</span>
+      <span style="margin-left:auto;display:flex;gap:6px;">
+        <button class="btn sm" onclick="addSpan()">+ 구간 추가</button>
+        <button class="btn sm" onclick="reloadAll()">적용</button>
+      </span>
+    </div>
+    <div id="sp-list"></div>
+  </div>
+
+  <div class="split">
+    <div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+        <button class="btn" onclick="addChart()">+ 차트 추가</button>
+        <span class="lbl">한 줄에</span>
+        <select id="cols" onchange="applyCols()"
+                style="font-size:12px;padding:5px 9px;border-radius:9px;
+                       border:1px solid var(--bd);background:var(--bg-2);
+                       color:var(--tx-1);">
+          <option value="1">1개</option>
+          <option value="2" selected>2개</option>
+          <option value="3">3개</option>
+        </select>
+        <span class="msg" id="chart-msg"></span>
+      </div>
+      <div class="charts c2" id="charts"></div>
+    </div>
+
+    <!-- 분석 AI -->
+    <div class="ai">
+      <div class="ai-h">분석 AI</div>
+      <div class="hint">이슈 구간을 정의한 뒤 물어보세요. 통계와 머신러닝으로
+        유의미한 요인과 교호작용을 찾습니다.</div>
+      <div class="chips" style="margin-top:9px;">
+        <span class="chip" onclick="ask('지정한 이슈 구간이 나머지와 어떻게 다른지 통계적으로 분석해줘')">구간 비교</span>
+        <span class="chip" onclick="ask('이슈에 가장 큰 영향을 준 요인을 순서대로 알려줘')">요인 순위</span>
+        <span class="chip" onclick="ask('요인들 사이의 교호작용이 있는지 찾아줘')">교호작용</span>
+        <span class="chip" onclick="ask('장비·챔버별로 차이가 있는지 봐줘')">장비 비교</span>
+      </div>
+      <div class="ai-log" id="ai-log">
+        <div class="empty">아직 대화가 없습니다.</div>
+      </div>
+      <div class="ai-in">
+        <textarea id="ai-q" placeholder="예) 7/25~27 구간이 왜 이상한지 분석해줘"></textarea>
+        <button class="btn pri" onclick="sendAsk()">전송</button>
+      </div>
+      <div class="hint" style="margin-top:7px;" id="ai-note"></div>
+    </div>
+  </div>
+</div>
+
+<script src="{% static 'js/plotly-2.27.0.min.js' %}"></script>
+<script>
+const API = {
+  sources: "{% url 'an2-sources' %}",
+  load:    "{% url 'an2-load' %}",
+  chart:   "{% url 'an2-chart' %}",
+  lots:    "{% url 'an2-lots' %}",
+};
+const A2_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', " +
+                "'Segoe UI', 'Noto Sans KR', sans-serif";
+
+/* 이슈 구간 색 — 구간이 늘어도 서로 구분되게 */
+const SPAN_COLORS = ['#dc2626', '#f59e0b', '#7c3aed', '#0ea5e9',
+                     '#db2777', '#16a34a', '#0891b2', '#a16207'];
+const BASE_COLOR = 'rgba(120,130,145,.5)';
+
+let meta = null;        // 현재 소스의 컬럼·기간 정보
+let spans = [];         // 이슈 구간
+let charts = [];        // 차트 카드
+let chartSeq = 0;
+let lotsCache = [];
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"'`]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',
+      "'":'&#39;','`':'&#96;'}[c]));
+}
+function msg(t, err) {
+  const el = document.getElementById('bar-msg');
+  el.className = 'msg ' + (err ? 'err' : 'ok');
+  el.textContent = t;
+}
+function cmsg(t, err) {
+  const el = document.getElementById('chart-msg');
+  el.className = 'msg ' + (err ? 'err' : 'ok');
+  el.textContent = t;
+}
+
+async function postJSON(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { console.error(`API ${res.status}`, url, j.error || ''); return {}; }
+    return j;
+  } catch (e) { console.error('요청 실패', url, e); return {}; }
+}
+
+/* ══════════════════════════════════════════════════
+   데이터 소스
+   ══════════════════════════════════════════════════ */
+async function loadSources() {
+  const j = await postJSON(API.sources, {});
+  if (!j.ok) { msg(j.error || '소스 조회 실패', true); return; }
+
+  const opt = o => `<option value="${esc(o.key)}">${esc(o.label)}` +
+    ` — ${(o.rows || 0).toLocaleString()}행` +
+    `${o.date_max ? ' · ~' + esc(String(o.date_max).slice(0, 10)) : ''}</option>`;
+
+  document.getElementById('src').innerHTML =
+    ((j.loaded || []).length
+      ? `<optgroup label="적재 데이터 (모니터링용)">${j.loaded.map(opt).join('')}</optgroup>` : '') +
+    ((j.adhoc || []).length
+      ? `<optgroup label="1회성 조회 결과 (분석용)">${j.adhoc.map(opt).join('')}</optgroup>` : '');
+
+  if (!(j.loaded || []).length && !(j.adhoc || []).length) {
+    msg('불러올 데이터가 없습니다 — 먼저 적재하거나 1회성 조회를 하세요', true);
+  }
+}
+
+function onSrcChange() {
+  meta = null;
+  document.getElementById('meta').textContent = '';
+  cmsg('');
+}
+
+async function loadSource() {
+  const oper = document.getElementById('src').value;
+  if (!oper) { msg('데이터를 고르세요', true); return; }
+
+  const j = await postJSON(API.load, {oper_id: oper});
+  if (!j.ok) { msg(j.error || '불러오기 실패', true); return; }
+  meta = j;
+
+  document.getElementById('meta').textContent =
+    `${(j.rows || 0).toLocaleString()}행 · ` +
+    `${String(j.date_min || '').slice(0, 10)} ~ ${String(j.date_max || '').slice(0, 10)} · ` +
+    `파라미터 ${(j.numeric || []).length}개`;
+
+  // LOT_CD · 범례 채우기
+  document.getElementById('lotcd').innerHTML =
+    '<option value="">전체</option>' +
+    (j.lot_cds || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  document.getElementById('legend').innerHTML =
+    '<option value="">구분 없음</option>' +
+    (j.legends || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+
+  await loadLots();
+  msg('불러왔습니다 — 차트를 추가하세요');
+
+  if (!charts.length) addChart();
+  else reloadAll();
+}
+
+async function loadLots() {
+  if (!meta) return;
+  const j = await postJSON(API.lots, {
+    oper_id: meta.oper_id,
+    lot_cd: document.getElementById('lotcd').value || null,
+  });
+  lotsCache = j.lots || [];
+  renderSpans();
+}
+
+/* ══════════════════════════════════════════════════
+   이슈 구간
+
+   ★ 여러 개를 정의할 수 있고 기간·랏·웨이퍼를 섞어 쓸 수 있다.
+     겹치면 먼저 정의한 구간이 우선이다 (서버 CASE 순서).
+   ══════════════════════════════════════════════════ */
+function addSpan() {
+  spans.push({mode: 'range', name: `구간 ${spans.length + 1}`,
+              date_from: '', date_to: '', lot_ids: [], wafers: []});
+  renderSpans();
+}
+
+function renderSpans() {
+  const el = document.getElementById('sp-list');
+  if (!spans.length) {
+    el.innerHTML = '<div class="hint" style="padding:6px 0;">' +
+      '정의된 구간이 없습니다. 구간을 추가하면 모든 차트에 함께 표시됩니다.</div>';
+    return;
+  }
+
+  el.innerHTML = spans.map((s, i) => {
+    const col = SPAN_COLORS[i % SPAN_COLORS.length];
+    let body = '';
+    if (s.mode === 'range') {
+      body = `
+        <input type="date" value="${esc(s.date_from)}"
+               onchange="spans[${i}].date_from=this.value">
+        <span class="sp-n">~</span>
+        <input type="date" value="${esc(s.date_to)}"
+               onchange="spans[${i}].date_to=this.value">`;
+    } else if (s.mode === 'lots') {
+      body = `
+        <input class="grow" placeholder="랏 ID — 쉼표·줄바꿈 구분"
+               value="${esc((s.lot_ids || []).join(', '))}"
+               onchange="setList(${i},'lot_ids',this.value)">
+        <span class="sp-n">${(s.lot_ids || []).length}개</span>`;
+    } else {
+      body = `
+        <input class="grow" placeholder="랏.웨이퍼 — 예) TA1234A.01, TA1234A.02"
+               value="${esc((s.wafers || []).join(', '))}"
+               onchange="setList(${i},'wafers',this.value)">
+        <span class="sp-n">${(s.wafers || []).length}장</span>`;
+    }
+
+    return `<div class="sp-row">
+      <span class="sp-dot" style="background:${col}"></span>
+      <input style="width:88px;" value="${esc(s.name)}"
+             onchange="spans[${i}].name=this.value;renderSpans()">
+      <select onchange="spans[${i}].mode=this.value;renderSpans()">
+        <option value="range" ${s.mode === 'range' ? 'selected' : ''}>기간</option>
+        <option value="lots" ${s.mode === 'lots' ? 'selected' : ''}>랏</option>
+        <option value="wafers" ${s.mode === 'wafers' ? 'selected' : ''}>웨이퍼</option>
+      </select>
+      ${body}
+      ${s.mode !== 'range' ? `<button class="btn sm" onclick="pickLots(${i})">고르기</button>` : ''}
+      <button class="btn sm danger" onclick="delSpan(${i})">삭제</button>
+    </div>`;
+  }).join('');
+}
+
+function setList(i, key, text) {
+  spans[i][key] = String(text || '').split(/[\s,;\t\n]+/)
+    .map(v => v.trim().toUpperCase()).filter(Boolean);
+  renderSpans();
+}
+
+function delSpan(i) { spans.splice(i, 1); renderSpans(); reloadAll(); }
+
+/* 랏 목록에서 고르기 — 직접 치는 것보다 빠르고 오타가 없다 */
+function pickLots(i) {
+  if (!lotsCache.length) { msg('먼저 DB 조회를 하세요', true); return; }
+  const s = spans[i];
+  const isWafer = s.mode === 'wafers';
+  const cur = new Set(isWafer ? (s.wafers || []) : (s.lot_ids || []));
+
+  const list = lotsCache.map(l => {
+    if (!isWafer) return `${cur.has(l.lot_id) ? '[v] ' : '[ ] '}${l.lot_id} (${l.n}장)`;
+    return `${l.lot_id} — wf ${(l.wfs || []).join(',')}`;
+  }).join('\n');
+
+  const text = prompt(
+    isWafer
+      ? `웨이퍼를 입력하세요 (랏.웨이퍼 형식, 쉼표 구분)\n\n${list.slice(0, 1500)}`
+      : `랏을 입력하세요 (쉼표 구분)\n\n${list.slice(0, 1500)}`,
+    isWafer ? (s.wafers || []).join(', ') : (s.lot_ids || []).join(', '));
+  if (text === null) return;
+  setList(i, isWafer ? 'wafers' : 'lot_ids', text);
+}
+
+/* ══════════════════════════════════════════════════
+   차트
+   ══════════════════════════════════════════════════ */
+function applyCols() {
+  const n = document.getElementById('cols').value;
+  document.getElementById('charts').className = 'charts c' + n;
+  charts.forEach(c => { if (c.data) drawChart(c); });
+}
+
+function addChart() {
+  if (!meta) { msg('먼저 DB 조회를 하세요', true); return; }
+  const id = ++chartSeq;
+  // 두 번째 차트부터는 앞 차트와 다른 Y 를 기본으로 (같은 걸 두 번 보면 무의미)
+  const used = charts.map(c => c.y_col);
+  const y = (meta.numeric || []).find(p => !used.includes(p)) ||
+            (meta.numeric || [])[0] || '';
+  charts.push({id, x_col: 'DATE', y_col: y, data: null});
+  renderCharts();
+  loadChart(id);
+}
+
+function delChart(id) {
+  charts = charts.filter(c => c.id !== id);
+  renderCharts();
+}
+
+function renderCharts() {
+  const el = document.getElementById('charts');
+  if (!charts.length) {
+    el.innerHTML = '<div class="empty">차트를 추가하세요.</div>';
+    return;
+  }
+
+  const groups = (meta && meta.groups) || {};
+  const optGroups = Object.entries(groups).map(([g, list]) =>
+    `<optgroup label="${esc(g)}">${list.map(p =>
+      `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</optgroup>`).join('');
+
+  el.innerHTML = charts.map(c => `
+    <div class="card" id="card-${c.id}">
+      <div class="card-h">
+        <span class="lbl">X</span>
+        <select onchange="setAxis(${c.id},'x_col',this.value)">
+          <option value="DATE">DATE</option>
+          ${optGroups}
+        </select>
+        <span class="lbl">Y</span>
+        <select onchange="setAxis(${c.id},'y_col',this.value)">${optGroups}</select>
+        <span class="x" onclick="delChart(${c.id})">×</span>
+      </div>
+      <div class="plot" id="plot-${c.id}"></div>
+      <div class="cnote" id="note-${c.id}"></div>
+    </div>`).join('');
+
+  // 현재 선택값 반영 (innerHTML 로 다시 그렸으므로)
+  charts.forEach(c => {
+    const sels = document.querySelectorAll(`#card-${c.id} select`);
+    if (sels[0]) sels[0].value = c.x_col;
+    if (sels[1]) sels[1].value = c.y_col;
+    if (c.data) drawChart(c);
+  });
+}
+
+function setAxis(id, key, val) {
+  const c = charts.find(x => x.id === id);
+  if (!c) return;
+  c[key] = val;
+  loadChart(id);
+}
+
+async function loadChart(id) {
+  const c = charts.find(x => x.id === id);
+  if (!c || !meta || !c.y_col) return;
+
+  const j = await postJSON(API.chart, {
+    oper_id: meta.oper_id, x_col: c.x_col, y_col: c.y_col,
+    legend: document.getElementById('legend').value || null,
+    lot_cd: document.getElementById('lotcd').value || null,
+    spans: spans,
+  });
+  const note = document.getElementById(`note-${id}`);
+  if (!j.ok) {
+    if (note) { note.className = 'cnote warn'; note.textContent = j.error || '조회 실패'; }
+    return;
+  }
+  c.data = j.data || [];
+  c.legend = j.legend;
+  if (note) {
+    note.className = 'cnote' + (j.truncated ? ' warn' : '');
+    note.textContent = j.truncated ? j.note : `${(j.n || 0).toLocaleString()}점`;
+  }
+  drawChart(c);
+}
+
+function reloadAll() {
+  if (!meta) return;
+  charts.forEach(c => loadChart(c.id));
+}
+
+/* 점을 구간·범례로 나눠 그린다.
+   ★ 이슈 구간이 우선이다 — 구간에 속한 점은 그 구간 색으로,
+     나머지만 범례 색으로 나눈다. 둘을 동시에 색으로 표현하면
+     무엇이 무엇인지 알 수 없게 된다. */
+function drawChart(c) {
+  const div = document.getElementById(`plot-${c.id}`);
+  if (!div || !c.data) return;
+  if (!c.data.length) { div.innerHTML = ''; return; }
+
+  const isDate = c.x_col === 'DATE';
+  const traces = [];
+
+  const rest = c.data.filter(d => d.span === null || d.span === undefined);
+  if (rest.length) {
+    if (c.legend) {
+      const by = {};
+      rest.forEach(d => { (by[d.g || '(없음)'] = by[d.g || '(없음)'] || []).push(d); });
+      Object.entries(by).forEach(([g, arr]) => traces.push(mkTrace(arr, g, null)));
+    } else {
+      traces.push(mkTrace(rest, '전체', BASE_COLOR));
+    }
+  }
+
+  spans.forEach((s, i) => {
+    const arr = c.data.filter(d => d.span === i);
+    if (arr.length) {
+      traces.push(mkTrace(arr, s.name || `구간 ${i + 1}`,
+                          SPAN_COLORS[i % SPAN_COLORS.length], 10));
+    }
+  });
+
+  Plotly.newPlot(div, traces, {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {family: A2_FONT, color: '#555', size: 11},
+    margin: {l: 52, r: 14, t: 10, b: 38},
+    xaxis: {title: {text: c.x_col, font: {family: A2_FONT, size: 11}},
+            tickfont: {family: A2_FONT, size: 10},
+            gridcolor: 'rgba(0,0,0,.06)', zeroline: false,
+            type: isDate ? 'date' : 'linear'},
+    yaxis: {title: {text: c.y_col, font: {family: A2_FONT, size: 11}},
+            tickfont: {family: A2_FONT, size: 10},
+            gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
+    showlegend: true,
+    legend: {orientation: 'h', x: 0, y: 1.1,
+             font: {family: A2_FONT, size: 10}},
+    hovermode: 'closest',
+    hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
+                 font: {family: A2_FONT, size: 11}},
+  }, {responsive: true, displaylogo: false,
+      modeBarButtonsToRemove: ['lasso2d', 'autoScale2d']});
+}
+
+function mkTrace(arr, name, color, size) {
+  return {
+    x: arr.map(d => d.x), y: arr.map(d => d.y),
+    text: arr.map(d => d.w || ''),
+    name: String(name), mode: 'markers', type: 'scattergl',
+    marker: Object.assign({size: size || 7, opacity: .8,
+                           line: {width: .4, color: 'rgba(0,0,0,.22)'}},
+                          color ? {color} : {}),
+    hovertemplate: '%{text}<br>%{x}<br><b>%{y:.4g}</b><extra></extra>',
+  };
+}
+
+/* ══════════════════════════════════════════════════
+   분석 AI — 다음 단계에서 연결
+
+   ★ 지금은 자리만 잡아 둔다. 서버가 통계·머신러닝으로 근거표를 만들고
+     LLM 은 그 표를 해석하는 구조로 붙일 예정이다.
+     원시 데이터를 그대로 넘기지 않는다 — 컨텍스트에 안 들어가고
+     LLM 이 숫자 계산을 틀린다.
+   ══════════════════════════════════════════════════ */
+function ask(q) {
+  document.getElementById('ai-q').value = q;
+  sendAsk();
+}
+
+function sendAsk() {
+  const q = document.getElementById('ai-q').value.trim();
+  if (!q) return;
+
+  const log = document.getElementById('ai-log');
+  if (log.querySelector('.empty')) log.innerHTML = '';
+  log.insertAdjacentHTML('beforeend',
+    `<div class="u">${esc(q)}</div>` +
+    `<div class="a" style="color:var(--tx-muted);">분석 AI 는 다음 단계에서 연결됩니다.
+      지금은 화면 구조만 준비돼 있습니다.</div>`);
+  log.scrollTop = log.scrollHeight;
+  document.getElementById('ai-q').value = '';
+
+  // 연결되면 이 정보가 그대로 서버로 간다
+  document.getElementById('ai-note').textContent =
+    `보낼 정보 — 데이터 ${meta ? meta.oper_id : '(미선택)'} · ` +
+    `이슈 구간 ${spans.length}개 · 차트 ${charts.length}개`;
+}
+
+loadSources();
+renderSpans();
+renderCharts();
+</script>
+{% endblock %}
