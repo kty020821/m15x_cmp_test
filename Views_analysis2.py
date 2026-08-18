@@ -52,7 +52,11 @@ NUMERIC_TYPES = {
     'real', 'double precision',
 }
 
-MAX_POINTS = 20000          # 차트 1개가 받아갈 점 수 상한
+# ★ 점 수를 자르지 않는다.
+#   분석 목적이라 표본을 줄이면 이상점·구간 차이가 사라진다.
+#   대신 전송량을 줄여 브라우저가 버티게 한다 —
+#   값은 유효숫자로 반올림하고, 필요 없는 필드는 빼서 보낸다.
+ROUND_DIGITS = 6
 
 
 def _fail(msg, payload=None, exc=None):
@@ -409,29 +413,33 @@ def an2_chart(request):
                 WHERE {where} AND "{x_col}" IS NOT NULL
                   AND "{y_col}" IS NOT NULL
                 ORDER BY "DATE"
-                LIMIT {MAX_POINTS + 1}
             ''', args + wargs)
             rows = cur.fetchall()
 
-        truncated = len(rows) > MAX_POINTS
-        rows = rows[:MAX_POINTS]
-
-        data = [{
-            'id': r[0],
-            'x': (str(r[1])[:19] if is_date_x else
-                  (float(r[1]) if r[1] is not None else None)),
-            'y': float(r[2]) if r[2] is not None else None,
-            'span': r[3],
-            'g': r[4] or '',
-            'w': f'{r[5]}.{r[6]}' if r[5] else '',
-        } for r in rows]
+        # ── 전송량 줄이기 ────────────────────────────────
+        #   점은 하나도 버리지 않는다. 대신 값을 반올림하고
+        #   비어 있는 필드는 아예 넣지 않아 JSON 크기를 줄인다.
+        data = []
+        for r in rows:
+            item = {
+                'id': r[0],
+                'x': (str(r[1])[:19] if is_date_x
+                      else (round(float(r[1]), ROUND_DIGITS)
+                            if r[1] is not None else None)),
+                'y': (round(float(r[2]), ROUND_DIGITS)
+                      if r[2] is not None else None),
+            }
+            if r[3] is not None:
+                item['span'] = r[3]          # 이슈 구간에 속한 점만
+            if r[4]:
+                item['g'] = r[4]             # 범례값이 있을 때만
+            if r[5]:
+                item['w'] = f'{r[5]}.{r[6]}'
+            data.append(item)
 
         return JsonResponse({
             'ok': True, 'x_col': x_col, 'y_col': y_col,
             'legend': legend or '', 'n': len(data),
-            'truncated': truncated,
-            'note': (f'{MAX_POINTS:,}점까지만 표시합니다 '
-                     f'(기간이나 LOT_CD 로 좁혀 보세요)') if truncated else '',
             'data': data,
         })
     except Exception as e:
