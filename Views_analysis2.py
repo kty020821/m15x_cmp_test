@@ -52,11 +52,9 @@ NUMERIC_TYPES = {
     'real', 'double precision',
 }
 
-# ★ 점 수를 자르지 않는다.
-#   분석 목적이라 표본을 줄이면 이상점·구간 차이가 사라진다.
-#   대신 전송량을 줄여 브라우저가 버티게 한다 —
-#   값은 유효숫자로 반올림하고, 필요 없는 필드는 빼서 보낸다.
-ROUND_DIGITS = 6
+# ★ 데이터를 어떤 방식으로도 줄이지 않는다.
+#   점 수 상한도, 값 반올림도 없다. 조회된 것을 그대로 내려보낸다.
+#   분석 목적이므로 원본과 다른 값이 화면에 뜨면 안 된다.
 
 
 def _fail(msg, payload=None, exc=None):
@@ -416,26 +414,16 @@ def an2_chart(request):
             ''', args + wargs)
             rows = cur.fetchall()
 
-        # ── 전송량 줄이기 ────────────────────────────────
-        #   점은 하나도 버리지 않는다. 대신 값을 반올림하고
-        #   비어 있는 필드는 아예 넣지 않아 JSON 크기를 줄인다.
-        data = []
-        for r in rows:
-            item = {
-                'id': r[0],
-                'x': (str(r[1])[:19] if is_date_x
-                      else (round(float(r[1]), ROUND_DIGITS)
-                            if r[1] is not None else None)),
-                'y': (round(float(r[2]), ROUND_DIGITS)
-                      if r[2] is not None else None),
-            }
-            if r[3] is not None:
-                item['span'] = r[3]          # 이슈 구간에 속한 점만
-            if r[4]:
-                item['g'] = r[4]             # 범례값이 있을 때만
-            if r[5]:
-                item['w'] = f'{r[5]}.{r[6]}'
-            data.append(item)
+        # ★ 값은 그대로 보낸다 — 반올림하지 않는다.
+        data = [{
+            'id': r[0],
+            'x': (str(r[1])[:19] if is_date_x
+                  else (float(r[1]) if r[1] is not None else None)),
+            'y': float(r[2]) if r[2] is not None else None,
+            'span': r[3],
+            'g': r[4] or '',
+            'w': f'{r[5]}.{r[6]}' if r[5] else '',
+        } for r in rows]
 
         return JsonResponse({
             'ok': True, 'x_col': x_col, 'y_col': y_col,
