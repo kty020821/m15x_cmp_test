@@ -292,9 +292,14 @@ def save_oper(d, user=''):
         raise ValueError(f'연계 공정은 최대 {MAX_LINKS}개입니다 '
                          f'(현재 {len(aliases)}개: {", ".join(aliases)})')
 
-    # 같은 별칭에 타입이 둘이면 컬럼 규칙이 흔들린다
+    # 같은 별칭에 타입이 둘이면 컬럼 규칙이 흔들린다.
+    #   ★ CHM 은 예외다 — 컬럼이 <별칭>_EQP / <별칭>_CH 라 값 컬럼과
+    #     겹치지 않는다. 사전공정처럼 '챔버도 보고 측정값도 보는' 경우가
+    #     흔해서 같은 별칭을 쓰는 편이 오히려 읽기 쉽다.
     by_alias = {}
     for _, kind, alias, link_id, _lc, _p, _sc, _u in links:
+        if kind == 'CHM':
+            continue
         prev = by_alias.setdefault(alias, (kind, link_id))
         if prev != (kind, link_id):
             raise ValueError(f'별칭 {alias} 에 타입·공정ID 가 두 가지입니다 — '
@@ -458,15 +463,29 @@ def import_from_v1(oper_id=None, overwrite=False):
             continue
 
         links = []
-        # 사전공정 → SRC
+        # ★ 사전공정 → CHM
+        #   사전공정을 등록한 목적은 입고 장비·챔버(pre_eqp_id / pre_eqp_ch)를
+        #   가져오는 것이다. 그 정보는 SRC(측정값) 테이블이 아니라
+        #   wafer-history 에 있으므로 CHM 이 맞다.
+        #   SRC 로 옮기면 챔버를 부르는데 측정값 쿼리가 나간다.
         if _s(src.get('pre_oper_id')):
+            alias = slug(src.get('pre_oper_desc') or src['pre_oper_id'])[:20]
             links.append({
-                'kind': 'SRC',
-                'alias': slug(src.get('pre_oper_desc') or src['pre_oper_id'])[:20],
+                'kind': 'CHM',
+                'alias': alias,
                 'link_id': src['pre_oper_id'],
-                'param': _up(src.get('pre_oper_param')),
+                'param': '',            # 챔버는 PARAM 이 필요 없다
                 'scope': 'both',
             })
+            # 사전공정의 측정값까지 보던 경우에만 SRC 를 따로 추가한다
+            if _s(src.get('pre_oper_param')):
+                links.append({
+                    'kind': 'SRC',
+                    'alias': alias,
+                    'link_id': src['pre_oper_id'],
+                    'param': _up(src.get('pre_oper_param')),
+                    'scope': 'both',
+                })
         # Response → REP, Defect → DEF
         for key, kind in (('resps', 'REP'), ('defects', 'DEF')):
             for r in src.get(key) or []:
@@ -577,7 +596,10 @@ def validate(oper_id=None):
             if not a:
                 issues.append(f"별칭이 빈 연계 공정이 있습니다 ({lk['link_id']})")
                 continue
-            aliases.setdefault(a, set()).add((lk['kind'], lk['link_id']))
+            if lk['kind'] != 'CHM':
+                aliases.setdefault(a, set()).add((lk['kind'], lk['link_id']))
+            else:
+                aliases.setdefault(a, set())
             if lk['kind'] == 'CHM':
                 continue      # 장비·챔버는 PARAM 이 필요 없다
             if not lk['param']:
