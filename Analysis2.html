@@ -490,8 +490,9 @@ async function loadChart(id) {
   c.data = j.data || [];
   c.legend = j.legend;
   if (note) {
-    note.className = 'cnote' + (j.truncated ? ' warn' : '');
-    note.textContent = j.truncated ? j.note : `${(j.n || 0).toLocaleString()}점`;
+    // 점은 전부 그린다 — 자르지 않으므로 경고할 것도 없다
+    note.className = 'cnote';
+    note.textContent = `${(j.n || 0).toLocaleString()}점`;
   }
   drawChart(c);
 }
@@ -553,14 +554,22 @@ function drawChart(c) {
       modeBarButtonsToRemove: ['lasso2d', 'autoScale2d']});
 }
 
+/* ★ 점은 하나도 버리지 않는다 — 분석 목적이라 표본을 줄이면
+   이상점과 구간 차이가 사라진다.
+   대신 점이 많을 때는 크기를 줄이고 테두리를 빼서 겹침을 덜 보이게 한다.
+   scattergl 은 GPU 로 그리므로 수만 점도 버틴다. */
 function mkTrace(arr, name, color, size) {
+  const n = arr.length;
+  const sz = size || (n > 20000 ? 3 : n > 5000 ? 4 : n > 1000 ? 5 : 7);
+  const marker = Object.assign(
+    {size: sz, opacity: n > 5000 ? .55 : .8},
+    n > 5000 ? {} : {line: {width: .4, color: 'rgba(0,0,0,.22)'}},
+    color ? {color} : {});
   return {
     x: arr.map(d => d.x), y: arr.map(d => d.y),
     text: arr.map(d => d.w || ''),
     name: String(name), mode: 'markers', type: 'scattergl',
-    marker: Object.assign({size: size || 7, opacity: .8,
-                           line: {width: .4, color: 'rgba(0,0,0,.22)'}},
-                          color ? {color} : {}),
+    marker: marker,
     hovertemplate: '%{text}<br>%{x}<br><b>%{y:.4g}</b><extra></extra>',
   };
 }
