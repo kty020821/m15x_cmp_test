@@ -199,6 +199,8 @@
                oninput="redrawAll()" style="width:80px;vertical-align:middle;">
         <span class="msg" id="chart-msg"></span>
       </div>
+      <div id="sel-bar" style="display:flex;gap:6px;align-items:center;
+           flex-wrap:wrap;margin-bottom:8px;"></div>
       <div class="charts c2" id="charts"></div>
     </div>
 
@@ -246,6 +248,12 @@ let spans = [];         // 이슈 구간
 let charts = [];        // 차트 카드
 let chartSeq = 0;
 let lotsCache = [];
+
+/* 차트에서 드래그로 고른 점들 (웨이퍼 id 집합).
+   ★ 한 차트에서 고르면 모든 차트에 같이 표시된다 —
+     "이 점들이 다른 축에서는 어디에 있나" 가 분석의 핵심이라
+     차트마다 따로 고르게 하면 의미가 없다. */
+let selIds = new Set();
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"'`]/g, c =>
@@ -458,6 +466,7 @@ function delChart(id) {
 
 function renderCharts() {
   const el = document.getElementById('charts');
+  // innerHTML 로 다시 그리면 div 가 새로 만들어지므로 등록 표시도 사라진다
   if (!charts.length) {
     el.innerHTML = '<div class="empty">차트를 추가하세요.</div>';
     return;
@@ -690,7 +699,96 @@ function drawChart(c) {
     hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
                  font: {family: A2_FONT, size: 11}},
   }, {responsive: true, displaylogo: false,
-      modeBarButtonsToRemove: ['lasso2d', 'autoScale2d']});
+      modeBarButtonsToRemove: ['autoScale2d']});
+
+  // newPlot 이 프라미스를 돌려주지 않는 버전도 있어 직접 등록한다
+  bindSelect(div, c);
+}
+
+/* ══════════════════════════════════════════════════
+   차트 간 선택 연동
+
+   ★ 한 차트에서 드래그로 고르면 그 웨이퍼들이 모든 차트에서 강조된다.
+     "이 점들이 다른 축에서는 어디 있나" 를 보는 게 목적이라
+     차트마다 따로 고르면 의미가 없다.
+   ★ 고른 웨이퍼는 이슈 구간으로 바로 만들 수 있다 —
+     눈으로 찾은 것을 분석 대상으로 넘기는 통로다.
+   ══════════════════════════════════════════════════ */
+function bindSelect(div, c) {
+  if (div._selBound) return;      // 다시 그릴 때마다 중복 등록되지 않게
+  div._selBound = true;
+
+  div.on('plotly_selected', (ev) => {
+    if (!ev || !ev.points || !ev.points.length) return;
+    selIds = new Set(ev.points.map(p => p.customdata).filter(v => v != null));
+    syncSelection(c.id);
+  });
+
+  div.on('plotly_deselect', () => { selIds = new Set(); syncSelection(null); });
+  div.on('plotly_doubleclick', () => { selIds = new Set(); syncSelection(null); });
+}
+
+/* 고른 결과를 나머지 차트에 반영한다.
+   ★ 고른 차트 자신은 Plotly 가 이미 표시해 두었으므로 다시 그리지 않는다 —
+     다시 그리면 드래그한 상자가 사라져 어디를 골랐는지 알 수 없다. */
+function syncSelection(fromId) {
+  charts.forEach(c => {
+    if (c.id === fromId || !c.data) return;
+    drawChart(c);
+  });
+  updateSelBar();
+}
+
+function updateSelBar() {
+  const el = document.getElementById('sel-bar');
+  if (!el) return;
+  if (!selIds.size) { el.innerHTML = ''; return; }
+
+  // 고른 점의 웨이퍼 이름을 모은다 (차트 어디에서든 찾을 수 있다)
+  const names = new Set();
+  charts.forEach(c => (c.data || []).forEach(d => {
+    if (selIds.has(d.id) && d.w) names.add(d.w);
+  }));
+  const list = [...names].sort();
+
+  el.innerHTML = `
+    <span class="msg ok">${selIds.size.toLocaleString()}점 선택
+      · 웨이퍼 ${list.length}장</span>
+    <button class="btn sm" onclick="spanFromSelection()">이슈 구간으로 만들기</button>
+    <button class="btn sm" onclick="copySelection()">웨이퍼 복사</button>
+    <button class="btn sm" onclick="clearSelection()">선택 해제</button>`;
+  el.dataset.wafers = list.join(', ');
+}
+
+function clearSelection() {
+  selIds = new Set();
+  charts.forEach(c => { if (c.data) drawChart(c); });
+  updateSelBar();
+}
+
+/* 눈으로 고른 웨이퍼를 그대로 이슈 구간으로 — 분석으로 넘기는 통로 */
+function spanFromSelection() {
+  const el = document.getElementById('sel-bar');
+  const wafers = (el.dataset.wafers || '').split(',')
+    .map(v => v.trim()).filter(Boolean);
+  if (!wafers.length) {
+    alert('선택한 점에 웨이퍼 정보가 없습니다 (LOT_ID·WF_ID 가 없는 데이터).');
+    return;
+  }
+  spans.push({mode: 'wafers', name: `선택 ${spans.length + 1}`,
+              date_from: '', date_to: '', lot_ids: [], wafers: wafers});
+  renderSpans();
+  clearSelection();
+  reloadAll();
+}
+
+function copySelection() {
+  const el = document.getElementById('sel-bar');
+  const text = el.dataset.wafers || '';
+  if (!text) return;
+  navigator.clipboard.writeText(text)
+    .then(() => cmsg(`웨이퍼 ${text.split(',').length}장 복사됨`))
+    .catch(() => prompt('복사해서 쓰세요', text));
 }
 
 /* ★ 점 수에 따라 크기를 자동으로 줄이지 않는다.
@@ -702,13 +800,26 @@ function mkTrace(arr, name, color, size) {
     {size: sz, opacity: markerOpacity(),
      line: {width: .4, color: 'rgba(0,0,0,.25)'}},
     color ? {color} : {});
-  return {
+
+  const t = {
     x: arr.map(d => d.x), y: arr.map(d => d.y),
     text: arr.map(d => d.w || ''),
+    customdata: arr.map(d => d.id),
     name: String(name), mode: 'markers', type: 'scattergl',
     marker: marker,
     hovertemplate: '%{text}<br>%{x}<br><b>%{y}</b><extra></extra>',
   };
+
+  /* 다른 차트에서 고른 점을 이 차트에도 표시한다.
+     selectedpoints 를 주면 Plotly 가 나머지를 흐리게 그린다. */
+  if (selIds.size) {
+    const idx = [];
+    arr.forEach((d, i) => { if (selIds.has(d.id)) idx.push(i); });
+    t.selectedpoints = idx;
+    t.unselected = {marker: {opacity: 0.08}};
+    t.selected = {marker: {opacity: 1}};
+  }
+  return t;
 }
 
 function markerSize() {
