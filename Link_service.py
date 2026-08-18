@@ -180,7 +180,9 @@ def preview_sql(oper_id, scope=None, days=30, date_from=None, date_to=None,
     dt_s, dt_e = _day_range(days, date_from, date_to)
     base_lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
     if not base_lots:
-        base_lots = ['<LOT_CD>']
+        base_lots = [str(v).upper() for v in cfg2.lots_of(oper_id) if v]
+    if not base_lots:
+        base_lots = ['<LOT_CD 미등록>']
 
     out = []
     for lk in cfg2.links_of(oper_id, scope):
@@ -413,9 +415,19 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
 
     mt_s, mt_e = _month_range(days, date_from, date_to)
     dt_s, dt_e = _day_range(days, date_from, date_to)
+    # ── 조회할 LOT_CD ────────────────────────────────────
+    #   ★ 기준정보에 등록된 device 만 쓴다.
+    #     적재 테이블에서 긁어오면 샘플 랏(S5C 등) 처럼 등록하지 않은
+    #     device 가 섞여 의도치 않은 쿼리가 나간다.
     base_lots = [str(v).upper() for v in (lot_cds or []) if str(v).strip()]
     if not base_lots:
-        base_lots = _lots_of_base(base)
+        base_lots = [str(v).upper() for v in cfg2.lots_of(oper_id) if v]
+    if not base_lots:
+        # 기준정보에 device 가 없으면 조회할 대상이 없다.
+        #   적재 데이터로 대신하지 않는다 — 그게 S5C 가 들어온 경로였다.
+        print(f'[link] {oper_id}: 기준정보에 등록된 LOT_CD 가 없어 '
+              f'연계 조회를 건너뜁니다 (config2 에서 device 를 등록하세요)')
+        return base
 
     for lk in links:
         # ★ 연계 공정은 본공정과 device 코드가 다를 수 있다.
@@ -460,11 +472,3 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
                           '(wf_id 0 패딩)를 확인하세요')
 
     return out.drop(columns=['__wkey'])
-
-
-def _lots_of_base(base):
-    """base 에 들어 있는 LOT_CD 목록"""
-    cols = {c.upper(): c for c in base.columns}
-    if 'LOT_CD' not in cols:
-        return []
-    return sorted({str(v).upper() for v in base[cols['LOT_CD']].dropna()})
