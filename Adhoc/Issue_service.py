@@ -65,7 +65,10 @@ LOT_MIN_N    = 3      # 랏당 웨이퍼가 이보다 적으면 신뢰도 낮음
 #   비교와 그룹핑은 항상 앞 7자리로 맞춘다.
 #   (웨이퍼 단위 식별이 필요하면 이 7자리 뒤에 wf_id 를 붙인다)
 LOT_KEY_LEN = 7
-LOT_KEY_SQL = f'left("LOT_ID", {LOT_KEY_LEN})'
+#   ★ LOT_ID 가 문자형이 아닌 테이블이 섞여 있으면 left() 가
+#     'function left(numeric, integer) does not exist' 로 실패한다.
+#     랏 기반 분석에서만 터져 원인을 찾기 어려우므로 캐스팅해 둔다.
+LOT_KEY_SQL = f'left(CAST("LOT_ID" AS VARCHAR), {LOT_KEY_LEN})'
 
 
 def lot_key(v):
@@ -92,6 +95,18 @@ def _cols(cur, t):
         WHERE table_name = %s
     """, [t])
     return {r[0] for r in cur.fetchall()}
+
+
+def _num(col):
+    """
+    집계용 컬럼 표현.
+
+    ★ Defect 카운트처럼 정수(integer) 컬럼이 있으면
+      PERCENTILE_CONT 가 'function does not exist' 로 실패한다.
+      STDDEV·AVG 도 numeric 으로 돌아와 파이썬에서 Decimal 이 섞인다.
+      집계 전에 double precision 으로 맞춰 그 두 문제를 함께 없앤다.
+    """
+    return f'"{col}"::double precision'
 
 
 def _f(v, nd=3):
@@ -294,10 +309,11 @@ def _part_clauses(sel, have):
 
 
 def _stats(cur, table, param, where, args):
+    v = _num(param)
     cur.execute(f'''
-        SELECT COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
-               MIN("{param}"), MAX("{param}"),
-               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY "{param}")
+        SELECT COUNT({v}), AVG({v}), STDDEV({v}),
+               MIN({v}), MAX({v}),
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {v})
         FROM {table} WHERE {where} AND "{param}" IS NOT NULL
     ''', args)
     n, avg, std, mn, mx, med = cur.fetchone()
@@ -548,7 +564,8 @@ def _bulk_stats(cur, table, params, where, args, chunk):
     for i in range(0, len(params), chunk):
         grp = params[i:i + chunk]
         sel = ", ".join(
-            f'COUNT("{p}"), AVG("{p}"), STDDEV("{p}"), MIN("{p}"), MAX("{p}")'
+            f'COUNT({_num(p)}), AVG({_num(p)}), STDDEV({_num(p)}), '
+            f'MIN({_num(p)}), MAX({_num(p)})'
             for p in grp)
         cur.execute(f'SELECT {sel} FROM {table} WHERE {where}', args)
         row = cur.fetchone()
@@ -854,7 +871,7 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
               'EQP_ID' if 'EQP_ID' in have else None)
         if key:
             cur.execute(f'''
-                SELECT "{key}", COUNT(*), AVG("{param}")
+                SELECT "{key}", COUNT(*), AVG({_num(param)})
                 FROM {table}
                 WHERE {in_where} AND "{param}" IS NOT NULL
                   AND COALESCE("{key}", '') <> ''
@@ -913,7 +930,8 @@ def _lot_breakdown(cur, table, param, base_where, base_args,
     """
     # ★ 7자리 키로 그룹 — 9자리가 섞여도 같은 랏으로 묶인다
     cur.execute(f'''
-        SELECT {LOT_KEY_SQL}, COUNT("{param}"), AVG("{param}"), STDDEV("{param}"),
+        SELECT {LOT_KEY_SQL}, COUNT({_num(param)}), AVG({_num(param)}),
+               STDDEV({_num(param)}),
                MIN("DATE"),
                BOOL_OR({sel_sql}) AS in_sel
         FROM {table}
@@ -963,7 +981,7 @@ def _series_and_cp(cur, table, param, base_where, base_args,
     if unit == 'lot' and 'LOT_ID' in have:
         agg = ", ".join(f'BOOL_OR({e})' for e in extra_sel)
         cur.execute(f'''
-            SELECT {LOT_KEY_SQL}, MIN("DATE"), AVG("{param}"), COUNT(*),
+            SELECT {LOT_KEY_SQL}, MIN("DATE"), AVG({_num(param)}), COUNT(*),
                    BOOL_OR({sel_sql}), {agg}
             FROM {table}
             WHERE ({base_where}) AND "{param}" IS NOT NULL
