@@ -370,6 +370,25 @@ def delete_oper(oper_id):
 # ══════════════════════════════════════════════════════════
 # 적재 파이프라인이 쓰는 형태
 # ══════════════════════════════════════════════════════════
+def lots_of(oper_id):
+    """
+    기준정보에 등록된 LOT_CD 목록.
+
+    ★ 조회 조건은 반드시 여기서 나와야 한다.
+      적재 테이블에서 LOT_CD 를 긁어오면 샘플 랏(S5C 등)처럼
+      등록하지 않은 device 가 섞여 엉뚱한 쿼리가 나간다.
+    """
+    ensure_tables()
+    with _conn().cursor() as cur:
+        cur.execute(f"""
+            SELECT DISTINCT lot_cd FROM {T_LOT}
+            WHERE oper_id = %s AND COALESCE(use_yn,'Y') <> 'N'
+              AND lot_cd IS NOT NULL AND lot_cd <> ''
+            ORDER BY 1
+        """, [_up(oper_id)])
+        return [r[0] for r in cur.fetchall()]
+
+
 def links_of(oper_id, scope=None):
     """
     연계 공정을 별칭 단위로 묶어 돌려준다.
