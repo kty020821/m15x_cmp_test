@@ -212,7 +212,9 @@ def issue_scan(request):
     except ValueError as e:
         return _fail(str(e), {'items': []})
     except Exception as e:
-        return _fail(f'스캔 실패: {e}', {'items': []}, exc=e)
+        # 원인을 찾을 수 있게 예외 종류까지 남긴다
+        return _fail(f'스캔 실패: {e.__class__.__name__}: {e}',
+                     {'items': []}, exc=e)
 
 
 @csrf_exempt
@@ -236,7 +238,7 @@ def issue_analyze(request):
     except ValueError as e:
         return _fail(str(e))                 # 입력 오류는 그대로 안내
     except Exception as e:
-        return _fail(f'분석 실패: {e}', exc=e)
+        return _fail(f'분석 실패: {e.__class__.__name__}: {e}', exc=e)
 
 
 @csrf_exempt
