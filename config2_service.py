@@ -44,11 +44,11 @@ T_LINK  = 'cmp_cfg2_link'
 # 연계 공정 최대 개수 (별칭 기준)
 MAX_LINKS = 3
 
-KINDS  = ['SRC', 'REP', 'DEF', 'CHM']
+KINDS  = ['SRC', 'REP', 'DEF']
 SCOPES = ['both', 'mon', 'ana']
 
 KIND_LABEL = {'SRC': 'SRC (측정값)', 'REP': 'REP (Response)',
-              'DEF': 'DEF (Defect)', 'CHM': 'CHM (장비·챔버)'}
+              'DEF': 'DEF (Defect)'}
 SCOPE_LABEL = {'both': '둘 다', 'mon': '모니터링', 'ana': '분석'}
 
 # 웨이퍼 번호 자릿수 — '01'~'09' 로 0 이 붙는다
@@ -86,32 +86,41 @@ def wafer_key(alias_lot_id, wf_id):
     return f'{_s(alias_lot_id)}.{w}'
 
 
-def link_column(kind, alias, param):
-    """
-    연계 공정 값이 들어갈 컬럼 이름.
-    예) link_column('SRC', 'M1CU', 'CU_THK_AVG') -> 'SRC_M1CU_CU_THK_AVG'
+# ── chamber 파라미터 ──────────────────────────────────────
+#   ★ 조회처를 가르는 기준은 '타입' 이 아니라 'param 이 chamber 인가' 다.
+#     같은 사전공정이라도
+#       param = CHAMBER  → apc_sk_wafer_hst_r2r_all_* (장비·챔버 이력)
+#       param = 그 외    → tas_src_wf_metr_inf        (측정값)
+#     기존 SRC 쿼리에서 left join 으로 붙어 있던 두 출처를 그대로 나눈 것이다.
+CHAMBER_PARAMS = {'CHAMBER', 'CH', 'CHM', 'EQP_CH', 'MODULE', 'MODULE_ID',
+                  '챔버'}
 
-    ★ 규칙의 단일 소재지다. 적재·화면 미리보기·점검이 모두 이 함수를
-      거쳐야 이름이 갈리지 않는다.
-    ★ 항상 문자열 하나를 돌려준다.
-      CHM 은 컬럼이 두 개(<별칭>_EQP, <별칭>_CH)라 목록이 필요하지만,
-      그건 chm_columns() 가 따로 맡는다. 한 함수가 상황에 따라
-      문자열과 리스트를 오가면 부르는 쪽이 전부 분기해야 하고,
-      실제로 딕셔너리 키로 쓰다가 unhashable 오류가 났다.
-    """
-    k = _up(kind) if _up(kind) in KINDS else 'SRC'
-    a, p = slug(alias), slug(param)
-    if k == 'CHM':
-        return f'{a}_EQP' if a else ''      # 대표 컬럼 (검증·표시용)
-    if not p:
-        return ''
-    return f'{k}_{a}_{p}' if a else f'{k}_{p}'
+
+def is_chamber_param(param):
+    return slug(param).upper() in CHAMBER_PARAMS or not slug(param)
 
 
 def chm_columns(alias):
-    """CHM 이 만드는 컬럼 두 개 — 장비와 챔버"""
+    """chamber 가 만드는 컬럼 두 개 — 장비와 챔버"""
     a = slug(alias)
     return [f'{a}_EQP', f'{a}_CH'] if a else []
+
+
+def link_column(kind, alias, param):
+    """
+    연계 공정 '측정값' 컬럼 이름.
+    예) link_column('SRC', 'M1CU', 'CU_THK_AVG') -> 'SRC_M1CU_CU_THK_AVG'
+
+    ★ 규칙의 단일 소재지다.
+    ★ chamber 는 여기서 다루지 않는다 — chm_columns() 가 맡는다.
+      chamber param 이면 빈 문자열을 돌려주므로, 부르는 쪽은
+      is_chamber_param() 으로 먼저 갈라야 한다.
+    """
+    k = _up(kind) if _up(kind) in KINDS else 'SRC'
+    a, p = slug(alias), slug(param)
+    if is_chamber_param(param) or not p:
+        return ''
+    return f'{k}_{a}_{p}' if a else f'{k}_{p}'
 
 
 # ══════════════════════════════════════════════════════════
@@ -302,12 +311,12 @@ def save_oper(d, user=''):
                          f'(현재 {len(aliases)}개: {", ".join(aliases)})')
 
     # 같은 별칭에 타입이 둘이면 컬럼 규칙이 흔들린다.
-    #   ★ CHM 은 예외다 — 컬럼이 <별칭>_EQP / <별칭>_CH 라 값 컬럼과
-    #     겹치지 않는다. 사전공정처럼 '챔버도 보고 측정값도 보는' 경우가
-    #     흔해서 같은 별칭을 쓰는 편이 오히려 읽기 쉽다.
+    #   ★ chamber 행은 예외다 — 컬럼이 <별칭>_EQP / <별칭>_CH 라
+    #     측정값 컬럼과 겹치지 않는다. '챔버도 보고 측정값도 보는' 경우가
+    #     흔하므로 같은 별칭에 함께 두는 것이 정상이다.
     by_alias = {}
     for _, kind, alias, link_id, _lc, _p, _sc, _u in links:
-        if kind == 'CHM':
+        if is_chamber_param(_p):
             continue
         prev = by_alias.setdefault(alias, (kind, link_id))
         if prev != (kind, link_id):
@@ -372,7 +381,7 @@ def links_of(oper_id, scope=None):
     반환: [{'kind','alias','link_id','scope','params':[...], 'columns':[...]}]
 
     ★ 묶는 키는 (타입, 별칭)이다. 별칭만으로 묶으면 안 된다 —
-      사전공정처럼 같은 별칭에 CHM(장비·챔버)과 SRC(측정값)가 함께
+      사전공정처럼 같은 별칭에 chamber 와 측정값이 함께
       등록되는 경우, 먼저 온 행의 타입으로 전체가 굳어
       챔버를 부르는데 SRC 쿼리가 나간다.
     """
@@ -390,22 +399,28 @@ def links_of(oper_id, scope=None):
     for seq, kind, alias, link_id, lot_cd, prm, sc in rows:
         if scope and sc not in (scope, 'both'):
             continue
-        key = (kind, alias)          # ★ 타입까지 묶음 키에 넣는다
+        # ★ 묶음 키에 타입을 넣지 않는다 — chamber 와 측정값이 같은
+        #   연계 공정(같은 별칭·공정ID)에 함께 등록되는 것이 정상이고,
+        #   조회처는 아래에서 param 으로 갈린다.
+        key = (alias, link_id)
         o = out.setdefault(key, {'seq': seq, 'kind': kind, 'alias': alias,
                                  'link_id': link_id, 'scope': sc,
-                                 'lot_cds': [], 'params': [], 'columns': []})
+                                 'lot_cds': [], 'params': [], 'columns': [],
+                                 'want_chm': False})
         # 지정된 LOT_CD 만 모은다. 하나도 없으면 본공정 것을 쓴다는 뜻
         if lot_cd and lot_cd not in o['lot_cds']:
             o['lot_cds'].append(lot_cd)
-        if kind == 'CHM':
-            if not o['columns']:
-                o['columns'] = chm_columns(alias)
+        # ★ 한 연계 공정 안에서 chamber 와 측정값을 함께 등록할 수 있다.
+        #   param 이 chamber 계열이면 장비·챔버 이력에서,
+        #   아니면 측정값 테이블에서 가져온다.
+        if is_chamber_param(prm):
+            if not o['want_chm']:
+                o['want_chm'] = True
+                o['columns'] = chm_columns(alias) + o['columns']
         elif prm and prm not in o['params']:
             o['params'].append(prm)
             o['columns'].append(link_column(kind, alias, prm))
-    # CHM 을 먼저 둔다 — 장비·챔버가 앞 컬럼에 오면 표를 읽기 쉽다
-    return sorted(out.values(),
-                  key=lambda x: (x['seq'], 0 if x['kind'] == 'CHM' else 1))
+    return sorted(out.values(), key=lambda x: x['seq'])
 
 
 def build_config_df(include_unused=False):
@@ -480,18 +495,18 @@ def import_from_v1(oper_id=None, overwrite=False):
             continue
 
         links = []
-        # ★ 사전공정 → CHM
+        # ★ 사전공정 → param='CHAMBER'
         #   사전공정을 등록한 목적은 입고 장비·챔버(pre_eqp_id / pre_eqp_ch)를
-        #   가져오는 것이다. 그 정보는 SRC(측정값) 테이블이 아니라
-        #   wafer-history 에 있으므로 CHM 이 맞다.
-        #   SRC 로 옮기면 챔버를 부르는데 측정값 쿼리가 나간다.
+        #   가져오는 것이다. 그 정보는 측정값 테이블이 아니라
+        #   wafer-history 에 있고, 조회처는 param 이 가른다.
         if _s(src.get('pre_oper_id')):
             alias = slug(src.get('pre_oper_desc') or src['pre_oper_id'])[:20]
+            # 사전공정을 등록한 목적은 입고 장비·챔버다 → param 을 CHAMBER 로
             links.append({
-                'kind': 'CHM',
+                'kind': 'SRC',
                 'alias': alias,
                 'link_id': src['pre_oper_id'],
-                'param': '',            # 챔버는 PARAM 이 필요 없다
+                'param': 'CHAMBER',
                 'scope': 'both',
             })
             # 사전공정의 측정값까지 보던 경우에만 SRC 를 따로 추가한다
@@ -613,11 +628,10 @@ def validate(oper_id=None):
             if not a:
                 issues.append(f"별칭이 빈 연계 공정이 있습니다 ({lk['link_id']})")
                 continue
-            if lk['kind'] != 'CHM':
-                aliases.setdefault(a, set()).add((lk['kind'], lk['link_id']))
-            else:
-                aliases.setdefault(a, set())
-            if lk['kind'] == 'CHM':
+            aliases.setdefault(a, set())
+            if not is_chamber_param(lk['param']):
+                aliases[a].add((lk['kind'], lk['link_id']))
+            if is_chamber_param(lk['param']):
                 continue      # 장비·챔버는 PARAM 이 필요 없다
             if not lk['param']:
                 issues.append(f'{a}: 관리 PARAM 이 없어 조회되지 않습니다')
@@ -636,9 +650,9 @@ def validate(oper_id=None):
         cols = {}
         seen_chm = set()
         for lk in d['links']:
-            if lk['kind'] == 'CHM':
+            if is_chamber_param(lk['param']):
                 if lk['alias'] in seen_chm:
-                    continue            # 같은 별칭의 CHM 은 한 번만 센다
+                    continue            # 같은 별칭의 챔버는 한 번만 센다
                 seen_chm.add(lk['alias'])
                 names = chm_columns(lk['alias'])
             else:
