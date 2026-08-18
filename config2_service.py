@@ -93,16 +93,25 @@ def link_column(kind, alias, param):
 
     ★ 규칙의 단일 소재지다. 적재·화면 미리보기·점검이 모두 이 함수를
       거쳐야 이름이 갈리지 않는다.
-    ★ CHM(장비·챔버)은 값이 아니라 라벨이라 <별칭>_EQP / <별칭>_CH 로
-      짧게 만든다. 차트 범례·그룹 기준으로 쓰이는 값이다.
+    ★ 항상 문자열 하나를 돌려준다.
+      CHM 은 컬럼이 두 개(<별칭>_EQP, <별칭>_CH)라 목록이 필요하지만,
+      그건 chm_columns() 가 따로 맡는다. 한 함수가 상황에 따라
+      문자열과 리스트를 오가면 부르는 쪽이 전부 분기해야 하고,
+      실제로 딕셔너리 키로 쓰다가 unhashable 오류가 났다.
     """
     k = _up(kind) if _up(kind) in KINDS else 'SRC'
     a, p = slug(alias), slug(param)
     if k == 'CHM':
-        return [f'{a}_EQP', f'{a}_CH'] if a else []
+        return f'{a}_EQP' if a else ''      # 대표 컬럼 (검증·표시용)
     if not p:
         return ''
     return f'{k}_{a}_{p}' if a else f'{k}_{p}'
+
+
+def chm_columns(alias):
+    """CHM 이 만드는 컬럼 두 개 — 장비와 챔버"""
+    a = slug(alias)
+    return [f'{a}_EQP', f'{a}_CH'] if a else []
 
 
 # ══════════════════════════════════════════════════════════
@@ -390,7 +399,7 @@ def links_of(oper_id, scope=None):
             o['lot_cds'].append(lot_cd)
         if kind == 'CHM':
             if not o['columns']:
-                o['columns'] = list(link_column(kind, alias, ''))
+                o['columns'] = chm_columns(alias)
         elif prm and prm not in o['params']:
             o['params'].append(prm)
             o['columns'].append(link_column(kind, alias, prm))
@@ -625,11 +634,18 @@ def validate(oper_id=None):
 
         # 컬럼 이름 충돌
         cols = {}
+        seen_chm = set()
         for lk in d['links']:
-            c = link_column(lk['kind'], lk['alias'], lk['param'])
-            if c:
-                cols.setdefault(c, 0)
-                cols[c] += 1
+            if lk['kind'] == 'CHM':
+                if lk['alias'] in seen_chm:
+                    continue            # 같은 별칭의 CHM 은 한 번만 센다
+                seen_chm.add(lk['alias'])
+                names = chm_columns(lk['alias'])
+            else:
+                c = link_column(lk['kind'], lk['alias'], lk['param'])
+                names = [c] if c else []
+            for c in names:
+                cols[c] = cols.get(c, 0) + 1
         dup = [c for c, n in cols.items() if n > 1]
         if dup:
             issues.append(f'컬럼 이름이 겹칩니다: {", ".join(dup[:5])}')
