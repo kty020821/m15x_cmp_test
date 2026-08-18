@@ -361,6 +361,11 @@ def links_of(oper_id, scope=None):
       None         전부
 
     반환: [{'kind','alias','link_id','scope','params':[...], 'columns':[...]}]
+
+    ★ 묶는 키는 (타입, 별칭)이다. 별칭만으로 묶으면 안 된다 —
+      사전공정처럼 같은 별칭에 CHM(장비·챔버)과 SRC(측정값)가 함께
+      등록되는 경우, 먼저 온 행의 타입으로 전체가 굳어
+      챔버를 부르는데 SRC 쿼리가 나간다.
     """
     ensure_tables()
     with _conn().cursor() as cur:
@@ -368,7 +373,7 @@ def links_of(oper_id, scope=None):
             SELECT seq, kind, alias, link_id, lot_cd, param, scope
             FROM {T_LINK}
             WHERE oper_id = %s AND COALESCE(use_yn,'Y') <> 'N'
-            ORDER BY seq, alias, param
+            ORDER BY seq, kind, alias, param
         ''', [_up(oper_id)])
         rows = cur.fetchall()
 
@@ -376,9 +381,10 @@ def links_of(oper_id, scope=None):
     for seq, kind, alias, link_id, lot_cd, prm, sc in rows:
         if scope and sc not in (scope, 'both'):
             continue
-        o = out.setdefault(alias, {'seq': seq, 'kind': kind, 'alias': alias,
-                                   'link_id': link_id, 'scope': sc,
-                                   'lot_cds': [], 'params': [], 'columns': []})
+        key = (kind, alias)          # ★ 타입까지 묶음 키에 넣는다
+        o = out.setdefault(key, {'seq': seq, 'kind': kind, 'alias': alias,
+                                 'link_id': link_id, 'scope': sc,
+                                 'lot_cds': [], 'params': [], 'columns': []})
         # 지정된 LOT_CD 만 모은다. 하나도 없으면 본공정 것을 쓴다는 뜻
         if lot_cd and lot_cd not in o['lot_cds']:
             o['lot_cds'].append(lot_cd)
@@ -388,7 +394,9 @@ def links_of(oper_id, scope=None):
         elif prm and prm not in o['params']:
             o['params'].append(prm)
             o['columns'].append(link_column(kind, alias, prm))
-    return sorted(out.values(), key=lambda x: x['seq'])
+    # CHM 을 먼저 둔다 — 장비·챔버가 앞 컬럼에 오면 표를 읽기 쉽다
+    return sorted(out.values(),
+                  key=lambda x: (x['seq'], 0 if x['kind'] == 'CHM' else 1))
 
 
 def build_config_df(include_unused=False):
