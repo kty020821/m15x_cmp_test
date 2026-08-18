@@ -69,7 +69,7 @@ where mt between '{mt_s}' and '{mt_e}'
   and defect_class_nm in ({params})
 """
 
-# ── CHM: 장비·챔버 이력 ───────────────────────────────────
+# ── chamber: 장비·챔버 이력 ───────────────────────────────
 #   ★ chamber 정보는 SRC(측정값) 테이블에 없다.
 #     기존 SRC 쿼리가 left join 하던 wafer-history 에서 온다.
 #   ★ 이 apc_sk_wafer_hst_r2r_all_* 은 R2R 계산 이력을 담는
@@ -130,7 +130,6 @@ SQL = {'SRC': SQL_SRC, 'REP': SQL_REP, 'DEF': SQL_DEF}
 
 # 조회 후 컬럼 이름 통일 — 뒤 단계를 하나로 쓰기 위한 것
 RENAME = {
-    'CHM': {},          # 장비·챔버는 값이 아니라 라벨이라 따로 다룬다
     'SRC': {'param_nm': 'param', 'meas_val': 'value'},
     'REP': {'param_nm': 'param', 'meas_val': 'value'},
     'DEF': {'defect_class_nm': 'param', 'meas_defect_cnt': 'value'},
@@ -188,13 +187,12 @@ def preview_sql(oper_id, scope=None, days=30, date_from=None, date_to=None,
         lots = [str(v).upper() for v in (lk.get('lot_cds') or []) if v] \
                or base_lots
 
-        if lk['kind'] == 'CHM':
+        if lk.get('want_chm'):
             out.append({
-                'kind': 'CHM', 'alias': lk['alias'],
+                'kind': 'CHAMBER', 'alias': lk['alias'],
                 'link_id': lk['link_id'], 'lot_cd': '(해당 없음)',
                 'query': build_chm_sql(lk['link_id'], dt_s, dt_e).strip(),
             })
-            continue
 
         params = [p for p in lk['params'] if p]
         if not params:
@@ -425,31 +423,41 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
         lots = [str(v).upper() for v in (lk.get('lot_cds') or []) if v] \
                or base_lots
 
-        if lk['kind'] == 'CHM':
-            # 장비·챔버는 값이 아니라 라벨이라 조회·정리 경로가 다르다
-            df = fetch_chm(lake, lk, dt_s, dt_e, run_query,
-                           on_progress=on_progress)
-            wide = pivot_chm(df, lk)
-        else:
-            df = fetch_link(lake, lk, lots, mt_s, mt_e, run_query,
-                            on_progress=on_progress)
-            wide = pivot_link(df, lk)
-        if wide is None or wide.empty:
-            if VERBOSE:
-                print(f"  [{lk['kind']}:{lk['alias']}] 결과 없음")
-            continue
+        # ★ 한 연계 공정이 두 가지를 함께 가져올 수 있다.
+        #   param 이 chamber 면 장비·챔버 이력에서, 그 외 param 은
+        #   측정값 테이블에서. 기존 SRC 쿼리가 left join 으로 붙여 두던
+        #   두 출처를 그대로 나눈 것이다.
+        jobs = []
+        if lk.get('want_chm'):
+            jobs.append('CHM')
+        if lk.get('params'):
+            jobs.append(lk['kind'])
 
-        wide = wide.rename(columns={'wkey': '__wkey'})
-        before = set(out.columns)
-        out = out.merge(wide, on='__wkey', how='left')
-        added = [c for c in out.columns if c not in before]
-        if VERBOSE and added:
-            hit = int(out[added[0]].notna().sum())
-            print(f"  [{lk['kind']}:{lk['alias']}] 컬럼 {len(added)}개 추가 · "
-                  f"값 있는 웨이퍼 {hit:,}장")
-            if hit == 0:
-                print('    값이 하나도 안 붙었습니다 — 조인 키(wf_id 0 패딩)를 '
-                      '확인하세요')
+        for tag in jobs:
+            if tag == 'CHM':
+                wide = pivot_chm(
+                    fetch_chm(lake, lk, dt_s, dt_e, run_query,
+                              on_progress=on_progress), lk)
+            else:
+                wide = pivot_link(
+                    fetch_link(lake, lk, lots, mt_s, mt_e, run_query,
+                               on_progress=on_progress), lk)
+            if wide is None or wide.empty:
+                if VERBOSE:
+                    print(f"  [{tag}:{lk['alias']}] 결과 없음")
+                continue
+
+            wide = wide.rename(columns={'wkey': '__wkey'})
+            before = set(out.columns)
+            out = out.merge(wide, on='__wkey', how='left')
+            added = [c for c in out.columns if c not in before]
+            if VERBOSE and added:
+                hit = int(out[added[0]].notna().sum())
+                print(f"  [{tag}:{lk['alias']}] 컬럼 {len(added)}개 추가 · "
+                      f"값 있는 웨이퍼 {hit:,}장")
+                if hit == 0:
+                    print('    값이 하나도 안 붙었습니다 — 조인 키'
+                          '(wf_id 0 패딩)를 확인하세요')
 
     return out.drop(columns=['__wkey'])
 
