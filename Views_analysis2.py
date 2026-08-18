@@ -139,6 +139,16 @@ def an2_sources(request):
             opers = cfg.list_opers()
         except Exception:
             opers = []
+
+        # 공정 코드 → 공정명. 1회성 결과에도 이름을 붙이기 위한 것.
+        #   ★ 코드만 보여 주면 무슨 공정인지 알 수 없다.
+        name_of = {o['oper_id']: (o.get('oper_desc') or '') for o in opers}
+        try:
+            from . import config2_service as cfg2
+            for o in cfg2.list_opers():
+                name_of.setdefault(o['oper_id'], o.get('oper_desc') or '')
+        except Exception:
+            pass
         for o in opers:
             t = _table(o['oper_id'])
             if t not in info:
@@ -158,10 +168,15 @@ def an2_sources(request):
                 if t not in info:
                     continue
                 c = j.get('cond') or {}
+                code = str(c.get('oper_id') or '')
+                desc = name_of.get(code) or name_of.get(code.upper()) or ''
+                # 공정명이 있으면 이름을, 없으면 코드를 보여 준다
+                head = f'{desc} ({code})' if desc else code
                 out_adhoc.append({
                     'key': j['oper_id'], 'kind': 'adhoc',
-                    'label': f"#{j['job_id']} {c.get('oper_id', '')}",
+                    'label': f"#{j['job_id']} {head}".strip(),
                     'oper_id': j['oper_id'],
+                    'src_oper': code, 'oper_desc': desc,
                     'span': f"{c.get('date_from', '')} ~ {c.get('date_to', '')}",
                     **info[t]})
         except Exception as e:
