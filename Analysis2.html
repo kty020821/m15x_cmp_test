@@ -191,6 +191,12 @@
           <option value="2" selected>2개</option>
           <option value="3">3개</option>
         </select>
+        <span class="lbl">점 크기</span>
+        <input id="mk-size" type="range" min="2" max="20" value="8"
+               oninput="redrawAll()" style="width:90px;vertical-align:middle;">
+        <span class="lbl">투명도</span>
+        <input id="mk-op" type="range" min="10" max="100" value="85"
+               oninput="redrawAll()" style="width:80px;vertical-align:middle;">
         <span class="msg" id="chart-msg"></span>
       </div>
       <div class="charts c2" id="charts"></div>
@@ -640,7 +646,13 @@ function drawChart(c) {
   const isDate = c.x_col === 'DATE';
   const traces = [];
 
-  const rest = c.data.filter(d => d.span === null || d.span === undefined);
+  /* ★ 점은 하나도 빠지면 안 된다.
+     서버가 준 span 번호가 지금 정의된 구간 범위를 벗어나면(구간을 지웠는데
+     아직 다시 조회하지 않은 경우) 그 점이 어느 트레이스에도 안 들어가
+     조용히 사라진다. 범위 밖이면 '나머지' 로 친다. */
+  const inSpan = d => Number.isInteger(d.span) &&
+                      d.span >= 0 && d.span < spans.length;
+  const rest = c.data.filter(d => !inSpan(d));
   if (rest.length) {
     if (c.legend) {
       const by = {};
@@ -652,10 +664,11 @@ function drawChart(c) {
   }
 
   spans.forEach((s, i) => {
-    const arr = c.data.filter(d => d.span === i);
+    const arr = c.data.filter(d => inSpan(d) && d.span === i);
     if (arr.length) {
       traces.push(mkTrace(arr, s.name || `구간 ${i + 1}`,
-                          SPAN_COLORS[i % SPAN_COLORS.length], 10));
+                          SPAN_COLORS[i % SPAN_COLORS.length],
+                          markerSize() + 2));
     }
   });
 
@@ -680,24 +693,37 @@ function drawChart(c) {
       modeBarButtonsToRemove: ['lasso2d', 'autoScale2d']});
 }
 
-/* ★ 점은 하나도 버리지 않는다 — 분석 목적이라 표본을 줄이면
-   이상점과 구간 차이가 사라진다.
-   대신 점이 많을 때는 크기를 줄이고 테두리를 빼서 겹침을 덜 보이게 한다.
-   scattergl 은 GPU 로 그리므로 수만 점도 버틴다. */
+/* ★ 점 수에 따라 크기를 자동으로 줄이지 않는다.
+   점이 많다고 작게 그리면 "데이터가 잘린 건가" 싶게 보이고,
+   무엇보다 크기는 보는 사람이 정할 문제다. 위 '점 크기' 로 고른다. */
 function mkTrace(arr, name, color, size) {
-  const n = arr.length;
-  const sz = size || (n > 20000 ? 3 : n > 5000 ? 4 : n > 1000 ? 5 : 7);
+  const sz = size || markerSize();
   const marker = Object.assign(
-    {size: sz, opacity: n > 5000 ? .55 : .8},
-    n > 5000 ? {} : {line: {width: .4, color: 'rgba(0,0,0,.22)'}},
+    {size: sz, opacity: markerOpacity(),
+     line: {width: .4, color: 'rgba(0,0,0,.25)'}},
     color ? {color} : {});
   return {
     x: arr.map(d => d.x), y: arr.map(d => d.y),
     text: arr.map(d => d.w || ''),
     name: String(name), mode: 'markers', type: 'scattergl',
     marker: marker,
-    hovertemplate: '%{text}<br>%{x}<br><b>%{y:.4g}</b><extra></extra>',
+    hovertemplate: '%{text}<br>%{x}<br><b>%{y}</b><extra></extra>',
   };
+}
+
+function markerSize() {
+  const el = document.getElementById('mk-size');
+  return el ? Number(el.value) || 8 : 8;
+}
+
+function markerOpacity() {
+  const el = document.getElementById('mk-op');
+  return el ? Number(el.value) / 100 : 0.85;
+}
+
+/* 크기·투명도만 바꿀 때는 다시 조회하지 않는다 — 이미 받은 점을 다시 그린다 */
+function redrawAll() {
+  charts.forEach(c => { if (c.data) drawChart(c); });
 }
 
 /* ══════════════════════════════════════════════════
