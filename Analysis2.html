@@ -77,6 +77,28 @@
 .card-h .x:hover { color: var(--bad); }
 .plot { width: 100%; height: 300px; }
 .charts.c2 .plot, .charts.c3 .plot { height: 250px; }
+/* 검색되는 컬럼 선택기 — 파라미터가 수백 개라 드롭박스로는 못 찾는다 */
+.pick { position: relative; display: inline-block; }
+.pick > input { font-size: 11px; font-weight: 700; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: var(--r-sm); padding: 4px 8px; outline: none;
+  width: 150px; font-family: var(--a2-mono); cursor: pointer; }
+.pick > input:focus { border-color: var(--accent); cursor: text; }
+.pick-panel { display: none; position: absolute; top: calc(100% + 3px);
+  left: 0; z-index: 40; width: 260px; max-height: 300px; overflow-y: auto;
+  background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: var(--r-md); padding: 4px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.16); }
+.pick.on .pick-panel { display: block; }
+.pick-g { font-size: 10px; font-weight: 800; color: var(--tx-muted);
+  padding: 6px 8px 3px; }
+.pick-i { font-size: 11px; font-weight: 700; color: var(--tx-1);
+  font-family: var(--a2-mono); padding: 5px 8px; border-radius: 6px;
+  cursor: pointer; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.pick-i:hover, .pick-i.act { background: var(--bg-2); color: var(--accent); }
+.pick-i .hit { color: var(--accent); }
+.pick-none { font-size: 11px; color: var(--tx-muted); padding: 10px; }
 .cnote { font-size: 10px; font-weight: 600; color: var(--tx-muted);
   margin-top: 3px; }
 .cnote.warn { color: var(--warn); }
@@ -435,35 +457,139 @@ function renderCharts() {
     return;
   }
 
-  const groups = (meta && meta.groups) || {};
-  const optGroups = Object.entries(groups).map(([g, list]) =>
-    `<optgroup label="${esc(g)}">${list.map(p =>
-      `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</optgroup>`).join('');
-
   el.innerHTML = charts.map(c => `
     <div class="card" id="card-${c.id}">
       <div class="card-h">
         <span class="lbl">X</span>
-        <select onchange="setAxis(${c.id},'x_col',this.value)">
-          <option value="DATE">DATE</option>
-          ${optGroups}
-        </select>
+        ${pickHtml(c.id, 'x_col', c.x_col)}
         <span class="lbl">Y</span>
-        <select onchange="setAxis(${c.id},'y_col',this.value)">${optGroups}</select>
+        ${pickHtml(c.id, 'y_col', c.y_col)}
         <span class="x" onclick="delChart(${c.id})">×</span>
       </div>
       <div class="plot" id="plot-${c.id}"></div>
       <div class="cnote" id="note-${c.id}"></div>
     </div>`).join('');
 
-  // 현재 선택값 반영 (innerHTML 로 다시 그렸으므로)
-  charts.forEach(c => {
-    const sels = document.querySelectorAll(`#card-${c.id} select`);
-    if (sels[0]) sels[0].value = c.x_col;
-    if (sels[1]) sels[1].value = c.y_col;
-    if (c.data) drawChart(c);
-  });
+  charts.forEach(c => { if (c.data) drawChart(c); });
 }
+
+/* ══════════════════════════════════════════════════
+   컬럼 선택기 — 검색되는 드롭다운
+
+   ★ 파라미터가 수백 개라 기본 <select> 로는 찾을 수가 없다.
+     칸에 글자를 치면 걸러지고, 어느 그룹(본공정·연계) 것인지도 보인다.
+   ══════════════════════════════════════════════════ */
+function pickHtml(id, key, val) {
+  const isX = key === 'x_col';
+  return `
+    <span class="pick" id="pick-${id}-${key}">
+      <input value="${esc(val)}" placeholder="검색"
+             title="${esc(val)}"
+             onfocus="openPick(${id},'${key}')"
+             oninput="filterPick(${id},'${key}',this.value)"
+             onkeydown="pickKey(event,${id},'${key}')">
+      <div class="pick-panel" id="pp-${id}-${key}"></div>
+    </span>`;
+}
+
+function pickInput(id, key) {
+  const w = document.getElementById(`pick-${id}-${key}`);
+  return w ? w.querySelector('input') : null;
+}
+
+function openPick(id, key) {
+  closeAllPicks();
+  const w = document.getElementById(`pick-${id}-${key}`);
+  if (w) w.classList.add('on');
+  filterPick(id, key, '');          // 열 때는 전체를 보여 준다
+  const inp = pickInput(id, key);
+  if (inp) inp.select();
+}
+
+function closeAllPicks() {
+  document.querySelectorAll('.pick.on').forEach(w => w.classList.remove('on'));
+}
+
+/* 후보 목록 — X 축에만 DATE 를 넣는다 */
+function pickOptions(key) {
+  const groups = (meta && meta.groups) || {};
+  const out = key === 'x_col' ? [['시각', ['DATE']]] : [];
+  return out.concat(Object.entries(groups));
+}
+
+function filterPick(id, key, q) {
+  const panel = document.getElementById(`pp-${id}-${key}`);
+  if (!panel) return;
+  const qq = String(q || '').trim().toUpperCase();
+
+  let html = '', n = 0;
+  pickOptions(key).forEach(([g, list]) => {
+    const hit = list.filter(p => !qq || p.toUpperCase().includes(qq));
+    if (!hit.length) return;
+    html += `<div class="pick-g">${esc(g)} · ${hit.length}</div>`;
+    hit.forEach(p => {
+      n++;
+      // 검색어와 일치하는 부분을 표시해 왜 걸렸는지 보이게 한다
+      let label = esc(p);
+      if (qq) {
+        const i = p.toUpperCase().indexOf(qq);
+        label = esc(p.slice(0, i)) + '<span class="hit">' +
+                esc(p.slice(i, i + qq.length)) + '</span>' +
+                esc(p.slice(i + qq.length));
+      }
+      html += `<div class="pick-i" onmousedown="choosePick(${id},'${key}','${esc(p)}')">${label}</div>`;
+    });
+  });
+
+  panel.innerHTML = n ? html :
+    '<div class="pick-none">일치하는 컬럼이 없습니다.</div>';
+}
+
+function choosePick(id, key, val) {
+  const inp = pickInput(id, key);
+  if (inp) { inp.value = val; inp.title = val; inp.blur(); }
+  closeAllPicks();
+  setAxis(id, key, val);
+}
+
+/* 위·아래로 고르고 Enter 로 선택, Esc 로 닫기 */
+function pickKey(ev, id, key) {
+  const panel = document.getElementById(`pp-${id}-${key}`);
+  if (!panel) return;
+  const items = [...panel.querySelectorAll('.pick-i')];
+  if (!items.length) return;
+  let i = items.findIndex(x => x.classList.contains('act'));
+
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    if (i >= 0) items[i].classList.remove('act');
+    i = ev.key === 'ArrowDown'
+      ? (i + 1) % items.length
+      : (i <= 0 ? items.length - 1 : i - 1);
+    items[i].classList.add('act');
+    items[i].scrollIntoView({block: 'nearest'});
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault();
+    (i >= 0 ? items[i] : items[0]).dispatchEvent(new MouseEvent('mousedown'));
+  } else if (ev.key === 'Escape') {
+    closeAllPicks();
+    const inp = pickInput(id, key);
+    if (inp) inp.blur();
+  }
+}
+
+/* 바깥을 누르면 닫는다. 고르지 않고 나가면 원래 값으로 되돌린다 —
+   빈 칸이나 오타가 남아 있으면 무엇이 그려진 건지 알 수 없다. */
+document.addEventListener('mousedown', (ev) => {
+  if (ev.target.closest && ev.target.closest('.pick')) return;
+  charts.forEach(c => {
+    ['x_col', 'y_col'].forEach(k => {
+      const inp = pickInput(c.id, k);
+      if (inp && inp.value !== c[k]) inp.value = c[k];
+    });
+  });
+  closeAllPicks();
+});
 
 function setAxis(id, key, val) {
   const c = charts.find(x => x.id === id);
