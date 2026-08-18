@@ -91,17 +91,36 @@ def show_links(oper_id):
               f"{r['scope']:<5} {r['use_yn']}")
 
     print(f'\n{"=" * 66}\n조회 단위로 묶은 결과 (실제 쿼리가 나가는 기준)\n{"=" * 66}')
+
+    # ★ 어느 테이블로 나가는지는 kind 가 아니라 want_chm / params 가 정한다.
+    #   chamber 는 wafer-history, 나머지 PARAM 은 타입별 측정 테이블.
+    #   한 연계 공정이 둘 다 가져갈 수 있다.
+    tbl = {'SRC': 'tas_src_wf_metr_inf',
+           'REP': 'tas_rep_wf_metr_inf',
+           'DEF': 'tas_dft_wf_inf'}
+
     for scope in (None, 'mon', 'ana'):
         gs = cfg2.links_of(oper_id, scope)
         tag = {None: '전체(1회성)', 'mon': '정기 적재', 'ana': '분석 전용'}[scope]
         print(f'\n  [{tag}] {len(gs)}건')
         for g in gs:
-            src = ('wafer-history (장비·챔버)' if g['kind'] == 'CHM' else
-                   'tas_src_wf_metr_inf' if g['kind'] == 'SRC' else
-                   'tas_rep_wf_metr_inf' if g['kind'] == 'REP' else
-                   'tas_dft_wf_inf')
-            print(f"    {g['kind']:<4} {g['alias']:<12} -> {src}")
-            print(f"         params={g['params']} columns={g['columns']}")
+            if not g.get('want_chm') and not g.get('params'):
+                print(f"    {g['alias']:<12} 조회할 것이 없습니다 "
+                      f"(PARAM 을 확인하세요)")
+                continue
+            print(f"    {g['alias']:<12} ({g['kind']}, {g['link_id']})")
+            if g.get('want_chm'):
+                print(f"       chamber -> apc_sk_wafer_hst_r2r_all_* "
+                      f"(장비·챔버)")
+            if g.get('params'):
+                print(f"       {g['params']} -> "
+                      f"{tbl.get(g['kind'], '?')}")
+            print(f"       columns={g['columns']}")
+
+        # 구버전이 배포돼 있으면 want_chm 키 자체가 없다 — 바로 알려 준다
+        if gs and 'want_chm' not in gs[0]:
+            print('\n  ※ 배포된 config2_service.py 가 구버전입니다 — '
+                  'chamber 분기가 없는 버전이라 최신본으로 교체하세요')
 
 
 def show_sql(oper_id, days, date_from, date_to):
