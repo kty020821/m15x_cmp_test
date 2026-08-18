@@ -97,7 +97,7 @@ tr.sel td { background: rgba(125,125,125,.06); }
 .k-SRC { color: #185fa5; background: rgba(24,95,165,.12); }
 .k-REP { color: #0f6e56; background: rgba(15,110,86,.12); }
 .k-DEF { color: #854f0b; background: rgba(133,79,11,.14); }
-.k-CHM { color: #5b21b6; background: rgba(91,33,182,.12); }
+.k-CHAMBER { color: #5b21b6; background: rgba(91,33,182,.12); }
 
 .olist { display: flex; flex-direction: column; gap: 3px; max-height: 62vh;
   overflow-y: auto; }
@@ -231,13 +231,24 @@ function slug(v) {
   return String(v || '').trim().toUpperCase()
     .replace(/[^0-9A-Z_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
 }
+/* ★ 조회처는 타입이 아니라 PARAM 이 정한다.
+     PARAM 이 chamber 계열이면 장비·챔버 이력(apc)에서,
+     그 외에는 측정값 테이블에서 가져온다.
+     서버 config2_service.is_chamber_param 과 같은 목록이다. */
+const CHAMBER_PARAMS = ['CHAMBER', 'CH', 'CHM', 'EQP_CH', 'MODULE',
+                        'MODULE_ID', '챔버'];
+function isChamberParam(p) {
+  const v = slug(p);
+  return !v || CHAMBER_PARAMS.includes(v);
+}
+
 function linkColumn(r) {
   const k = KINDS.some(x => x[0] === r.kind) ? r.kind : 'SRC';
   const a = slug(r.alias), p = slug(r.param);
-  // CHM 은 값이 아니라 라벨이라 PARAM 없이 두 컬럼이 만들어진다
-  if (k === 'CHM') return a ? `${a}_EQP, ${a}_CH` : '';
-  if (!p) return '';
-  return a ? `${k}_${a}_${p}` : `${k}_${p}`;
+  if (isChamberParam(r.param)) {
+    return a ? `${a}_EQP, ${a}_CH` : '';
+  }
+  return a && p ? `${k}_${a}_${p}` : (p ? `${k}_${p}` : '');
 }
 
 /* ══════════════════════════════════════════════════
@@ -331,7 +342,8 @@ function renderEditor() {
     </div>
 
     ${section('links', '연계 공정',
-      `최대 ${MAX_LINKS}개 · 파라미터 1개당 1행`,
+      `최대 ${MAX_LINKS}개 · 파라미터 1개당 1행 · ` +
+      `PARAM 에 CHAMBER 를 넣으면 장비·챔버 이력에서 가져옵니다`,
       `<th style="width:70px;">타입</th>
        <th style="width:84px;">별칭 *</th>
        <th style="width:102px;">공정·스텝 *</th>
@@ -404,8 +416,8 @@ function renderLinks() {
       <td><input value="${esc(r.lot_cd || '')}" placeholder="본공정과 같음"
                  title="비우면 본공정의 LOT_CD 를 그대로 씁니다"
                  oninput="cur.links[${i}].lot_cd=this.value.toUpperCase()"></td>
-      <td><input value="${esc(r.param)}" placeholder="${r.kind === 'CHM' ? '(불필요)' : 'CU_THK_AVG'}"
-                 ${r.kind === 'CHM' ? 'disabled' : ''}
+      <td><input value="${esc(r.param)}" placeholder="CHAMBER 또는 CU_THK_AVG"
+                 title="CHAMBER 를 넣으면 장비·챔버 이력에서, 그 외에는 측정값 테이블에서 가져옵니다"
                  oninput="cur.links[${i}].param=this.value.toUpperCase();refreshCol(${i})"></td>
       <td><select onchange="cur.links[${i}].scope=this.value">
         ${SCOPES.map(([v, l]) => `<option value="${v}"
@@ -413,7 +425,7 @@ function renderLinks() {
       </select></td>
       <td class="colprev ${col ? '' : 'none'}" id="col-${i}"
           title="병합 후 이 이름의 컬럼에 값이 들어갑니다">
-        ${col || (r.kind === 'CHM' ? '별칭 필요' : 'PARAM 필요')}</td>
+        ${col || '별칭 필요'}</td>
       <td><select onchange="cur.links[${i}].use_yn=this.value">
         <option value="Y" ${r.use_yn !== 'N' ? 'selected' : ''}>사용</option>
         <option value="N" ${r.use_yn === 'N' ? 'selected' : ''}>제외</option>
@@ -431,8 +443,7 @@ function refreshCol(i) {
   const el = document.getElementById('col-' + i);
   if (!el) return;
   const col = linkColumn(cur.links[i]);
-  el.textContent = col ||
-    (cur.links[i].kind === 'CHM' ? '별칭 필요' : 'PARAM 필요');
+  el.textContent = col || '별칭 필요';
   el.className = 'colprev ' + (col ? '' : 'none');
 }
 
