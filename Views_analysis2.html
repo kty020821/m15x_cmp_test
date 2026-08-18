@@ -1,0 +1,439 @@
+"""
+equipment/views_analysis2.py
+════════════════════════════════════════════════════════════
+통합 분석 페이지 API (기존 analysis 와 병행)
+
+  analysis2/                 페이지
+  api/an2/sources/           데이터 소스 목록 (적재 공정 + 1회성 결과)
+  api/an2/load/              소스 선택 → 메타·컬럼 목록
+  api/an2/chart/             차트 1개분 데이터 (X·Y + 범례)
+  api/an2/lots/              이슈 구간 지정용 랏·웨이퍼 후보
+
+────────────────────────────────────────────────────────────
+설계 메모
+
+★ 데이터를 한 번에 다 내려보내지 않는다.
+  웨이퍼 수천 장 × 컬럼 수백 개를 통째로 주면 브라우저가 죽는다.
+  'DB 조회' 는 메타와 컬럼 목록만 받고, 차트를 추가할 때마다
+  그 축에 필요한 컬럼만 조회한다.
+
+★ 이슈 구간 판정은 서버가 한다.
+  구간이 여러 개이고 기간·랏·웨이퍼가 섞이므로, 각 점이 어느 구간에
+  속하는지는 SQL 로 한 번에 붙이는 편이 정확하고 빠르다.
+  화면은 받은 span 번호로 색만 칠한다.
+════════════════════════════════════════════════════════════
+"""
+
+import json
+import re
+import traceback
+
+from django.shortcuts import render
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.db import connections
+
+# 값이 아니라 식별·구분용인 컬럼 (Y 축 후보에서 뺀다)
+META_COLS = {
+    'ID', 'DATE', 'PROCESS_ID', 'RECIPE_ID', 'EQP_ID', 'EQP_CH_ID',
+    'EQP_MODEL', 'OPERATION_ID', 'LOT_CD', 'LOT_ID', 'SUBSTRATE_ID',
+    'WF_ID', 'IDLE', 'PRE_LAYER', 'PRE_EQP_ID', 'PRE_EQP_CH', 'QTY',
+    'REWORK_N', 'MEAS_N',
+}
+
+# 범례(색 구분)로 쓸 만한 컬럼 — 있는 것만 화면에 내보낸다
+LEGEND_CANDIDATES = [
+    'EQP_ID', 'EQP_CH_ID', 'RECIPE_ID', 'LOT_CD', 'LOT_ID',
+    'PRE_EQP_ID', 'PRE_EQP_CH', 'PRE_LAYER', 'IDLE', 'REWORK_N',
+]
+
+NUMERIC_TYPES = {
+    'smallint', 'integer', 'bigint', 'decimal', 'numeric',
+    'real', 'double precision',
+}
+
+MAX_POINTS = 20000          # 차트 1개가 받아갈 점 수 상한
+
+
+def _fail(msg, payload=None, exc=None):
+    print(f'[an2] {msg}')
+    if exc is not None:
+        traceback.print_exc()
+    out = dict(payload or {})
+    out['ok'] = False
+    out['error'] = msg
+    return JsonResponse(out, status=200)
+
+
+def _body(request):
+    try:
+        return json.loads(request.body) if request.body else {}
+    except Exception:
+        return {}
+
+
+def _safe(v):
+    return bool(v) and bool(re.match(r'^[0-9A-Za-z_\-]+$', str(v)))
+
+
+def _table(oper_id):
+    return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
+
+
+def _conn():
+    return connections['analysis_db']
+
+
+def _exists(cur, t):
+    cur.execute("SELECT to_regclass(%s) IS NOT NULL", [t])
+    return bool(cur.fetchone()[0])
+
+
+def _cols(cur, table):
+    cur.execute("""
+        SELECT column_name, data_type FROM information_schema.columns
+        WHERE table_name = %s ORDER BY ordinal_position
+    """, [table])
+    return [(c.upper(), d.lower()) for c, d in cur.fetchall()]
+
+
+def analysis2_page(request):
+    return render(request, 'equipment/analysis2.html', {})
+
+
+# ══════════════════════════════════════════════════════════
+# 데이터 소스
+# ══════════════════════════════════════════════════════════
+@csrf_exempt
+def an2_sources(request):
+    """
+    고를 수 있는 데이터 소스.
+      loaded  정기 적재 공정 (모니터링용, 상시)
+      adhoc   1회성 조회 결과 (분석용, 연계 공정까지 포함)
+    """
+    try:
+        out_loaded, out_adhoc = [], []
+
+        with _conn().cursor() as cur:
+            cur.execute("SELECT tablename FROM pg_tables "
+                        "WHERE tablename LIKE 'cmp_analysis_%' ORDER BY 1")
+            tables = [r[0] for r in cur.fetchall()]
+
+            info = {}
+            for t in tables:
+                try:
+                    cur.execute(f'SELECT COUNT(*), MIN("DATE"), MAX("DATE") '
+                                f'FROM {t}')
+                    n, d1, d2 = cur.fetchone()
+                    info[t] = {'rows': n or 0,
+                               'date_min': str(d1)[:19] if d1 else None,
+                               'date_max': str(d2)[:19] if d2 else None}
+                except Exception:
+                    info[t] = {'rows': 0, 'date_min': None, 'date_max': None}
+
+        # 정기 적재 — 기준정보에 등록된 공정
+        try:
+            from . import config_service as cfg
+            opers = cfg.list_opers()
+        except Exception:
+            opers = []
+        for o in opers:
+            t = _table(o['oper_id'])
+            if t not in info:
+                continue
+            out_loaded.append({
+                'key': o['oper_id'], 'kind': 'loaded',
+                'label': o.get('oper_desc') or o['oper_id'],
+                'oper_id': o['oper_id'], **info[t]})
+
+        # 1회성 조회 결과
+        try:
+            from . import adhoc_service as ah
+            for j in ah.list_jobs(limit=50):
+                if j['status'] != '완료' or not j.get('has_table', True):
+                    continue
+                t = _table(j['oper_id'])
+                if t not in info:
+                    continue
+                c = j.get('cond') or {}
+                out_adhoc.append({
+                    'key': j['oper_id'], 'kind': 'adhoc',
+                    'label': f"#{j['job_id']} {c.get('oper_id', '')}",
+                    'oper_id': j['oper_id'],
+                    'span': f"{c.get('date_from', '')} ~ {c.get('date_to', '')}",
+                    **info[t]})
+        except Exception as e:
+            print(f'[an2] 1회성 목록 조회 생략: {e.__class__.__name__}: {e}')
+
+        return JsonResponse({'ok': True, 'loaded': out_loaded,
+                             'adhoc': out_adhoc})
+    except Exception as e:
+        return _fail(f'소스 조회 실패: {e}', {'loaded': [], 'adhoc': []}, exc=e)
+
+
+@csrf_exempt
+def an2_load(request):
+    """
+    소스를 골라 메타와 컬럼 목록을 받는다.
+
+    ★ 실제 데이터는 여기서 안 내려간다 — 차트를 추가할 때 그 축만 조회한다.
+    """
+    b = _body(request)
+    oper_id = b.get('oper_id')
+    if not _safe(oper_id):
+        return _fail('oper_id 형식 오류')
+
+    table = _table(oper_id)
+    try:
+        with _conn().cursor() as cur:
+            if not _exists(cur, table):
+                return _fail(f'{table} 이 없습니다 — 아직 적재되지 않았습니다')
+
+            cols = _cols(cur, table)
+            names = {c for c, _ in cols}
+
+            numeric = [c for c, d in cols
+                       if d in NUMERIC_TYPES and c not in META_COLS
+                       and not c.endswith(('_OFFSET', '_FORMULA'))]
+            legends = [c for c in LEGEND_CANDIDATES if c in names]
+
+            lot_cd_col = 'LOT_CD' if 'LOT_CD' in names else None
+            lot_cds = []
+            if lot_cd_col:
+                cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {table} '
+                            f'WHERE "LOT_CD" IS NOT NULL ORDER BY 1')
+                lot_cds = [str(r[0]) for r in cur.fetchall()]
+
+            cur.execute(f'SELECT COUNT(*), MIN("DATE"), MAX("DATE") FROM {table}')
+            n, d1, d2 = cur.fetchone()
+
+        # 접두어로 무리를 지어 준다 — 컬럼이 많아 그냥 나열하면 못 찾는다
+        groups = {}
+        for c in numeric:
+            g = ('연계·Response' if c.startswith('REP_') else
+                 '연계·Defect' if c.startswith('DEF_') else
+                 '연계·측정' if c.startswith('SRC_') else
+                 '본공정')
+            groups.setdefault(g, []).append(c)
+
+        return JsonResponse({
+            'ok': True, 'oper_id': oper_id, 'table': table,
+            'rows': n or 0,
+            'date_min': str(d1)[:19] if d1 else None,
+            'date_max': str(d2)[:19] if d2 else None,
+            'numeric': numeric, 'groups': groups,
+            'legends': legends, 'lot_cds': lot_cds,
+            'has_wf': 'WF_ID' in names and 'LOT_ID' in names,
+        })
+    except Exception as e:
+        return _fail(f'불러오기 실패: {e}', exc=e)
+
+
+# ══════════════════════════════════════════════════════════
+# 이슈 구간
+# ══════════════════════════════════════════════════════════
+def _span_clause(span, names, args):
+    """
+    이슈 구간 1개 → SQL 조건.
+
+      range   기간
+      lots    LOT_ID 목록
+      wafers  'LOT_ID.WF_ID' 목록
+
+    ★ 랏·웨이퍼 지정은 앞 7자리로 비교한다.
+      LOT_ID 에 9자리가 섞여 있어도 같은 랏으로 잡히게.
+    """
+    mode = (span or {}).get('mode', 'range')
+
+    if mode == 'range':
+        d1, d2 = str(span.get('date_from') or ''), str(span.get('date_to') or '')
+        if not d1 or not d2:
+            return None
+        if d1 > d2:
+            d1, d2 = d2, d1
+        if len(d1) == 10:
+            d1 += ' 00:00:00'
+        if len(d2) == 10:
+            d2 += ' 23:59:59'
+        args += [d1, d2]
+        return '("DATE" >= %s AND "DATE" <= %s)'
+
+    if mode == 'lots':
+        vals = sorted({str(v).strip().upper()[:7]
+                       for v in (span.get('lot_ids') or []) if str(v).strip()})
+        if not vals or 'LOT_ID' not in names:
+            return None
+        args += vals
+        ph = ",".join(['%s'] * len(vals))
+        return f'(left(CAST("LOT_ID" AS VARCHAR), 7) IN ({ph}))'
+
+    if mode == 'wafers':
+        vals = []
+        for v in (span.get('wafers') or []):
+            t = str(v).strip().upper()
+            if not t:
+                continue
+            lot, _, wf = t.rpartition('.')
+            if not lot:
+                continue
+            vals.append(f'{lot[:7]}.{wf.zfill(2)}')
+        vals = sorted(set(vals))
+        if not vals or 'LOT_ID' not in names or 'WF_ID' not in names:
+            return None
+        args += vals
+        ph = ",".join(['%s'] * len(vals))
+        return (f"(left(CAST(\"LOT_ID\" AS VARCHAR), 7) || '.' || "
+                f"lpad(CAST(\"WF_ID\" AS VARCHAR), 2, '0') IN ({ph}))")
+
+    return None
+
+
+def _span_case(spans, names, args):
+    """
+    여러 구간 → CASE 식. 각 행이 몇 번 구간인지 돌려준다.
+
+    ★ 앞선 구간이 우선이다 — 구간이 겹치면 먼저 정의한 쪽으로 친다.
+      겹치는 구간을 만드는 건 사용자 선택이므로 막지 않고,
+      규칙만 분명히 해 둔다.
+    """
+    parts = []
+    for i, sp in enumerate(spans or []):
+        c = _span_clause(sp, names, args)
+        if c:
+            parts.append(f'WHEN {c} THEN {i}')
+    if not parts:
+        return 'CAST(NULL AS INTEGER)'
+    return 'CASE ' + ' '.join(parts) + ' ELSE NULL END'
+
+
+@csrf_exempt
+def an2_lots(request):
+    """이슈 구간 지정용 랏·웨이퍼 후보"""
+    b = _body(request)
+    oper_id = b.get('oper_id')
+    if not _safe(oper_id):
+        return _fail('oper_id 형식 오류', {'lots': []})
+    table = _table(oper_id)
+    lot_cd = b.get('lot_cd')
+
+    try:
+        with _conn().cursor() as cur:
+            if not _exists(cur, table):
+                return _fail(f'{table} 이 없습니다', {'lots': []})
+            names = {c for c, _ in _cols(cur, table)}
+            if 'LOT_ID' not in names:
+                return JsonResponse({'ok': True, 'lots': []})
+
+            where, args = '1=1', []
+            if lot_cd and 'LOT_CD' in names:
+                where, args = '"LOT_CD" = %s', [lot_cd]
+
+            wf = ('lpad(CAST("WF_ID" AS VARCHAR), 2, \'0\')'
+                  if 'WF_ID' in names else "''")
+            cur.execute(f'''
+                SELECT left(CAST("LOT_ID" AS VARCHAR), 7) AS lot,
+                       COUNT(*), MIN("DATE"),
+                       string_agg(DISTINCT {wf}, ',' ORDER BY {wf})
+                FROM {table}
+                WHERE {where} AND "LOT_ID" IS NOT NULL
+                GROUP BY 1 ORDER BY MIN("DATE")
+            ''', args)
+            lots = [{'lot_id': r[0], 'n': r[1],
+                     'date': str(r[2])[:19] if r[2] else '',
+                     'wfs': (r[3] or '').split(',')}
+                    for r in cur.fetchall()]
+        return JsonResponse({'ok': True, 'lots': lots})
+    except Exception as e:
+        return _fail(f'랏 조회 실패: {e}', {'lots': []}, exc=e)
+
+
+# ══════════════════════════════════════════════════════════
+# 차트 데이터
+# ══════════════════════════════════════════════════════════
+@csrf_exempt
+def an2_chart(request):
+    """
+    차트 1개분 데이터.
+
+      x_col   'DATE' 또는 숫자 컬럼   ← 상관 차트를 따로 두지 않는 이유
+      y_col   숫자 컬럼
+      legend  색 구분 컬럼 (선택)
+      spans   이슈 구간 목록 (선택)
+    """
+    b = _body(request)
+    oper_id = b.get('oper_id')
+    x_col, y_col = b.get('x_col'), b.get('y_col')
+    legend = b.get('legend') or None
+    lot_cd = b.get('lot_cd') or None
+
+    if not _safe(oper_id) or not _safe(x_col) or not _safe(y_col):
+        return _fail('컬럼 이름 형식 오류', {'data': []})
+
+    table = _table(oper_id)
+    try:
+        with _conn().cursor() as cur:
+            if not _exists(cur, table):
+                return _fail(f'{table} 이 없습니다', {'data': []})
+
+            cols = _cols(cur, table)
+            names = {c for c, _ in cols}
+            num = {c for c, d in cols if d in NUMERIC_TYPES}
+
+            for c in (x_col, y_col):
+                if c.upper() not in names:
+                    return _fail(f'{c} 컬럼이 없습니다', {'data': []})
+            if y_col.upper() not in num:
+                return _fail(f'{y_col} 은 숫자 컬럼이 아닙니다', {'data': []})
+            is_date_x = x_col.upper() == 'DATE'
+            if not is_date_x and x_col.upper() not in num:
+                return _fail(f'{x_col} 은 숫자 컬럼이 아닙니다', {'data': []})
+
+            args = []
+            span_sql = _span_case(b.get('spans'), names, args)
+
+            where, wargs = '1=1', []
+            if lot_cd and 'LOT_CD' in names:
+                where, wargs = '"LOT_CD" = %s', [lot_cd]
+
+            xsel = '"DATE"' if is_date_x else f'"{x_col}"::double precision'
+            lsel = f', CAST("{legend}" AS VARCHAR)' \
+                   if legend and legend.upper() in names else ", ''"
+            wfsel = (', left(CAST("LOT_ID" AS VARCHAR), 7), '
+                     'lpad(CAST("WF_ID" AS VARCHAR), 2, \'0\')'
+                     if {'LOT_ID', 'WF_ID'} <= names else ", '', ''")
+
+            cur.execute(f'''
+                SELECT id, {xsel}, "{y_col}"::double precision,
+                       ({span_sql}){lsel}{wfsel}
+                FROM {table}
+                WHERE {where} AND "{x_col}" IS NOT NULL
+                  AND "{y_col}" IS NOT NULL
+                ORDER BY "DATE"
+                LIMIT {MAX_POINTS + 1}
+            ''', args + wargs)
+            rows = cur.fetchall()
+
+        truncated = len(rows) > MAX_POINTS
+        rows = rows[:MAX_POINTS]
+
+        data = [{
+            'id': r[0],
+            'x': (str(r[1])[:19] if is_date_x else
+                  (float(r[1]) if r[1] is not None else None)),
+            'y': float(r[2]) if r[2] is not None else None,
+            'span': r[3],
+            'g': r[4] or '',
+            'w': f'{r[5]}.{r[6]}' if r[5] else '',
+        } for r in rows]
+
+        return JsonResponse({
+            'ok': True, 'x_col': x_col, 'y_col': y_col,
+            'legend': legend or '', 'n': len(data),
+            'truncated': truncated,
+            'note': (f'{MAX_POINTS:,}점까지만 표시합니다 '
+                     f'(기간이나 LOT_CD 로 좁혀 보세요)') if truncated else '',
+            'data': data,
+        })
+    except Exception as e:
+        return _fail(f'차트 조회 실패: {e.__class__.__name__}: {e}',
+                     {'data': []}, exc=e)
