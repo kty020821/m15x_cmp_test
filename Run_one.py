@@ -6,6 +6,7 @@ run_one.py  (프로젝트 루트)
     python run_one.py V5071000B                 최근 45일
     python run_one.py V5071000B --days 7        최근 7일 (시험할 때 권장)
     python run_one.py V5071000B --from 2025-08-01 --to 2025-08-07
+    python run_one.py V5071000B --links         연계 공정 등록 상태 확인
     python run_one.py V5071000B --sql           던질 쿼리만 보기 (실행 안 함)
     python run_one.py --list                    등록된 공정 목록만 보기
     python run_one.py --status                  공정별 적재 상태
@@ -65,6 +66,44 @@ def show_status():
               f'{d.get("rows", 0):>10,}  {state}')
 
 
+def show_links(oper_id):
+    """
+    기준정보 v2 에 등록된 연계 공정을 그대로 출력한다.
+
+    ★ '챔버가 SRC 로 나간다' 같은 문제는 대부분 등록 상태가 원인이다.
+      DB 에 저장된 행을 그대로 보여 주면 코드를 뒤질 필요가 없다.
+    """
+    from equipment import config2_service as cfg2
+
+    d = cfg2.get_oper(oper_id)
+    if not d:
+        print(f'{oper_id} 가 기준정보 v2 에 없습니다 '
+              f'(config2 페이지에서 등록하거나 가져오기를 하세요)')
+        return
+
+    print(f'\n{"=" * 66}\n저장된 연계 공정 행 — {oper_id}\n{"=" * 66}')
+    if not d['links']:
+        print('  등록된 연계 공정이 없습니다')
+    for r in d['links']:
+        print(f"  {r['kind']:<4} {r['alias']:<12} {r['link_id']:<12} "
+              f"lot_cd={r['lot_cd'] or '(본공정)':<8} "
+              f"param={r['param'] or '(없음)':<14} "
+              f"{r['scope']:<5} {r['use_yn']}")
+
+    print(f'\n{"=" * 66}\n조회 단위로 묶은 결과 (실제 쿼리가 나가는 기준)\n{"=" * 66}')
+    for scope in (None, 'mon', 'ana'):
+        gs = cfg2.links_of(oper_id, scope)
+        tag = {None: '전체(1회성)', 'mon': '정기 적재', 'ana': '분석 전용'}[scope]
+        print(f'\n  [{tag}] {len(gs)}건')
+        for g in gs:
+            src = ('wafer-history (장비·챔버)' if g['kind'] == 'CHM' else
+                   'tas_src_wf_metr_inf' if g['kind'] == 'SRC' else
+                   'tas_rep_wf_metr_inf' if g['kind'] == 'REP' else
+                   'tas_dft_wf_inf')
+            print(f"    {g['kind']:<4} {g['alias']:<12} -> {src}")
+            print(f"         params={g['params']} columns={g['columns']}")
+
+
 def show_sql(oper_id, days, date_from, date_to):
     """실행하지 않고 던질 쿼리만 출력 — Lake 에 그대로 붙여넣어 확인용"""
     from equipment import analysis_service as svc
@@ -115,7 +154,9 @@ def main():
     ap.add_argument('--unlock', action='store_true',
                     help="멈춘 '실행중' 잠금 해제")
     ap.add_argument('--sql', action='store_true',
-                    help='Response·Defect 조회 쿼리만 출력 (실행 안 함)')
+                    help='연계 공정 조회 쿼리만 출력 (실행 안 함)')
+    ap.add_argument('--links', action='store_true',
+                    help='기준정보 v2 의 연계 공정 등록 상태 확인')
     args = ap.parse_args()
 
     if args.list:
@@ -125,6 +166,12 @@ def main():
     if args.unlock:
         ids = ls.reset_stale()
         print(f'잠금 해제: {ids or "없음"}')
+        return 0
+    if args.links:
+        if not args.oper_id:
+            print('공정 ID 가 필요합니다. 예: python run_one.py V5071000B --links')
+            return 1
+        show_links(args.oper_id.upper())
         return 0
     if args.sql:
         if not args.oper_id:
