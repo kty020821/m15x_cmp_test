@@ -1078,8 +1078,16 @@ async function checkLlm() {
   const j = await postJSON(API.llmInfo, {});
   llmOn = !!(j && j.llm);
   const note = document.getElementById('ai-note');
-  if (note && !llmOn) {
-    note.textContent = 'AI 미설정 — 계산 결과만 표시됩니다';
+  if (!note) return;
+
+  const c = (j && j.config) || {};
+  if (llmOn) {
+    // 주소를 잘못 넣었을 때 화면에서 바로 알 수 있게 한다
+    note.textContent = `AI 연결 — ${c.model || ''} · ${c.base_url || ''}`;
+    note.title = `API 키: ${c.api_key || '(없음)'}`;
+  } else {
+    note.textContent = 'AI 미설정 — 계산 결과만 표시됩니다 '
+                     + '(settings.py 의 LLM_URL)';
   }
 }
 
