@@ -27,14 +27,21 @@ equipment/llm_service.py
   환각으로 숫자를 지어내면 그게 가장 나쁘다.
 
 ────────────────────────────────────────────────────────────
-설정 (settings.py)
+설정 (config/settings.py)
 
-  CMP_LLM = {
-      'base_url': 'https://사내주소/v1',   # OpenAI 호환 엔드포인트
-      'api_key':  '...',
-      'model':    'gpt-4o',
-      'timeout':  120,
-  }
+  이미 쓰고 있는 이름이 있으면 그대로 쓴다. 아래 중 아무 형태나 된다.
+
+  ① 개별 변수 (기존 방식)
+     LLM_URL     = os.getenv('LLM_URL', '')      # OpenAI 호환 엔드포인트
+     LLM_API_KEY = os.getenv('LLM_API_KEY', '')
+     LLM_MODEL   = os.getenv('LLM_MODEL', 'gpt-4o')
+
+  ② 묶음
+     CMP_LLM = {'base_url': ..., 'api_key': ..., 'model': ..., 'timeout': 120}
+
+  ★ base_url 은 /chat/completions 를 뺀 주소다.
+    'https://host/v1' 처럼 넣으면 되고, 끝에 /chat/completions 가
+    붙어 있어도 알아서 떼어 낸다 — 흔한 실수라 여기서 흡수한다.
 ════════════════════════════════════════════════════════════
 """
 
@@ -86,20 +93,60 @@ SYSTEM_PROMPT = """\
 """
 
 
+def _s(v):
+    return str(v or '').strip()
+
+
 def _cfg():
+    """
+    설정을 읽는다. 기존에 쓰던 개별 변수를 먼저 보고, 없으면 CMP_LLM 을 본다.
+
+    ★ 이름을 강요하지 않는다 — 이미 LLM_URL 로 운영 중인데 새 이름을
+      요구하면 환경변수·배포 설정까지 다 손봐야 한다.
+    """
     c = getattr(settings, 'CMP_LLM', None) or {}
-    return {
-        'base_url': (c.get('base_url') or '').rstrip('/'),
-        'api_key': c.get('api_key') or '',
-        'model': c.get('model') or 'gpt-4o',
-        'timeout': int(c.get('timeout') or 120),
-    }
+
+    url = (_s(getattr(settings, 'LLM_URL', ''))
+           or _s(getattr(settings, 'LLM_BASE_URL', ''))
+           or _s(c.get('base_url')))
+    key = (_s(getattr(settings, 'LLM_API_KEY', ''))
+           or _s(getattr(settings, 'LLM_KEY', ''))
+           or _s(getattr(settings, 'OPENAI_API_KEY', ''))
+           or _s(c.get('api_key')))
+    model = (_s(getattr(settings, 'LLM_MODEL', ''))
+             or _s(c.get('model')) or 'gpt-4o')
+    timeout = getattr(settings, 'LLM_TIMEOUT', None) or c.get('timeout') or 120
+
+    # 끝에 /chat/completions 가 붙어 있으면 떼어 낸다 (흔한 실수)
+    url = url.rstrip('/')
+    for tail in ('/chat/completions', '/completions'):
+        if url.endswith(tail):
+            url = url[:-len(tail)]
+
+    return {'base_url': url, 'api_key': key, 'model': model,
+            'timeout': int(timeout)}
 
 
 def available():
-    """설정이 되어 있는지 — 화면이 안내 문구를 정할 때 쓴다"""
+    """
+    쓸 수 있는 상태인지 — 화면이 안내 문구를 정할 때 쓴다.
+    ★ 주소만 있으면 된다. 사내 게이트웨이는 키 없이 열려 있기도 하다.
+    """
+    return bool(_cfg()['base_url'])
+
+
+def config_info():
+    """설정 상태 확인용 (키는 가린다)"""
     c = _cfg()
-    return bool(c['base_url'] and c['api_key'])
+    key = c['api_key']
+    return {
+        'base_url': c['base_url'] or '(없음)',
+        'model': c['model'],
+        'api_key': (key[:4] + '…' + key[-4:]) if len(key) > 8
+                   else ('설정됨' if key else '(없음)'),
+        'timeout': c['timeout'],
+        'ready': bool(c['base_url']),
+    }
 
 
 def _post(messages, tools=None):
@@ -113,8 +160,8 @@ def _post(messages, tools=None):
     import urllib.error
 
     c = _cfg()
-    if not c['base_url'] or not c['api_key']:
-        raise RuntimeError('LLM 설정이 없습니다 — settings.py 의 CMP_LLM 을 '
+    if not c['base_url']:
+        raise RuntimeError('LLM 주소가 없습니다 — settings.py 의 LLM_URL 을 '
                            '확인하세요')
 
     body = {'model': c['model'], 'messages': messages, 'temperature': 0.2}
@@ -122,12 +169,15 @@ def _post(messages, tools=None):
         body['tools'] = tools
         body['tool_choice'] = 'auto'
 
+    headers = {'Content-Type': 'application/json'}
+    # 사내 게이트웨이는 키 없이 열려 있는 경우도 있어 조건부로 넣는다
+    if c['api_key']:
+        headers['Authorization'] = f"Bearer {c['api_key']}"
+
     req = urllib.request.Request(
         f"{c['base_url']}/chat/completions",
         data=json.dumps(body).encode('utf-8'),
-        headers={'Content-Type': 'application/json',
-                 'Authorization': f"Bearer {c['api_key']}"},
-        method='POST')
+        headers=headers, method='POST')
 
     try:
         with urllib.request.urlopen(req, timeout=c['timeout']) as r:
