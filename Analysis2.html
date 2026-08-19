@@ -99,6 +99,17 @@
 .pick-i:hover, .pick-i.act { background: var(--bg-2); color: var(--accent); }
 .pick-i .hit { color: var(--accent); }
 .pick-none { font-size: 11px; color: var(--tx-muted); padding: 10px; }
+/* 범례 색 바꾸기 */
+.lgd { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.lgd-i { display: inline-flex; align-items: center; gap: 5px;
+  background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: 20px; padding: 3px 10px 3px 4px; font-size: 11px;
+  font-weight: 700; color: var(--tx-1); font-family: var(--a2-mono); }
+.lgd-i input[type=color] { width: 18px; height: 18px; padding: 0;
+  border: none; border-radius: 50%; background: none; cursor: pointer; }
+.lgd-i input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+.lgd-i input[type=color]::-webkit-color-swatch { border: 1px solid rgba(0,0,0,.2);
+  border-radius: 50%; }
 .cnote { font-size: 10px; font-weight: 600; color: var(--tx-muted);
   margin-top: 3px; }
 .cnote.warn { color: var(--warn); }
@@ -201,6 +212,7 @@
       </div>
       <div id="sel-bar" style="display:flex;gap:6px;align-items:center;
            flex-wrap:wrap;margin-bottom:8px;"></div>
+      <div id="lgd-bar" class="lgd" style="margin-bottom:8px;"></div>
       <div class="charts c2" id="charts"></div>
     </div>
 
@@ -254,6 +266,29 @@ let lotsCache = [];
      "이 점들이 다른 축에서는 어디에 있나" 가 분석의 핵심이라
      차트마다 따로 고르게 하면 의미가 없다. */
 let selIds = new Set();
+
+/* 범례 값별 색.
+   ★ 색을 고정하지 않으면 조회할 때마다 순서가 바뀌어 같은 장비가
+     다른 색으로 나온다. 값 이름으로 색을 기억해 두고, 사용자가
+     바꾸면 그 값을 쓴다. */
+let legendColors = {};          // {'CMP01': '#dc2626', ...}
+
+/* 기본 팔레트 — 겹쳐도 구분되는 색으로 골랐다 */
+const LEGEND_PALETTE = [
+  '#2563eb', '#16a34a', '#f59e0b', '#7c3aed', '#dc2626',
+  '#0891b2', '#db2777', '#65a30d', '#ea580c', '#4f46e5',
+  '#0d9488', '#a16207',
+];
+
+function legendColor(name) {
+  if (legendColors[name]) return legendColors[name];
+  // 이름을 해시해 배정 — 순서가 바뀌어도 같은 값은 같은 색
+  let h = 0;
+  for (let i = 0; i < String(name).length; i++) {
+    h = (h * 31 + String(name).charCodeAt(i)) >>> 0;
+  }
+  return LEGEND_PALETTE[h % LEGEND_PALETTE.length];
+}
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"'`]/g, c =>
@@ -333,6 +368,7 @@ async function loadSource() {
     (j.legends || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
 
   await loadLots();
+  renderLegendBar();
   msg('불러왔습니다 — 차트를 추가하세요');
 
   if (!charts.length) addChart();
@@ -636,6 +672,7 @@ async function loadChart(id) {
     note.textContent = `${(j.n || 0).toLocaleString()}점`;
   }
   drawChart(c);
+  renderLegendBar();
 }
 
 function reloadAll() {
@@ -666,7 +703,8 @@ function drawChart(c) {
     if (c.legend) {
       const by = {};
       rest.forEach(d => { (by[d.g || '(없음)'] = by[d.g || '(없음)'] || []).push(d); });
-      Object.entries(by).forEach(([g, arr]) => traces.push(mkTrace(arr, g, null)));
+      Object.entries(by).sort((a, b) => a[0].localeCompare(b[0]))
+        .forEach(([g, arr]) => traces.push(mkTrace(arr, g, legendColor(g))));
     } else {
       traces.push(mkTrace(rest, '전체', BASE_COLOR));
     }
@@ -861,6 +899,68 @@ function mkTrace(arr, name, color, size) {
   return t;
 }
 
+/* ══════════════════════════════════════════════════
+   범례 색 바꾸기
+
+   ★ 장비마다 늘 같은 색으로 보는 사람이 많아, 자동 배정만으로는
+     부족하다. 값별로 직접 고를 수 있게 하고 이 브라우저에 기억해 둔다.
+   ══════════════════════════════════════════════════ */
+function renderLegendBar() {
+  const el = document.getElementById('lgd-bar');
+  if (!el) return;
+
+  // 지금 그려진 차트들에서 범례 값을 모은다
+  const names = new Set();
+  charts.forEach(c => (c.data || []).forEach(d => {
+    if (d.g) names.add(d.g);
+  }));
+  const list = [...names].sort();
+
+  if (!list.length || !document.getElementById('legend').value) {
+    el.innerHTML = '';
+    return;
+  }
+
+  el.innerHTML =
+    `<span class="lbl">범례 색</span>` +
+    list.map(n => `
+      <span class="lgd-i">
+        <input type="color" value="${legendColor(n)}"
+               oninput="setLegendColor('${esc(n)}', this.value)">
+        ${esc(n)}
+      </span>`).join('') +
+    `<button class="btn sm" onclick="resetLegendColors()">색 초기화</button>`;
+}
+
+function setLegendColor(name, color) {
+  legendColors[name] = color;
+  saveLegendColors();
+  charts.forEach(c => { if (c.data) drawChart(c); });
+}
+
+function resetLegendColors() {
+  legendColors = {};
+  saveLegendColors();
+  charts.forEach(c => { if (c.data) drawChart(c); });
+  renderLegendBar();
+}
+
+/* 브라우저에 기억 — 다음에 열어도 같은 장비가 같은 색이다.
+   ★ 저장이 막힌 환경일 수 있으므로 실패해도 그냥 넘어간다. */
+function saveLegendColors() {
+  try {
+    window.localStorage.setItem('an2_legend_colors',
+                                JSON.stringify(legendColors));
+  } catch (e) { /* 무시 */ }
+}
+
+function loadLegendColors() {
+  try {
+    const v = window.localStorage.getItem('an2_legend_colors');
+    if (v) legendColors = JSON.parse(v) || {};
+  } catch (e) { legendColors = {}; }
+}
+
 function markerSize() {
   const el = document.getElementById('mk-size');
   return el ? Number(el.value) || 8 : 8;
@@ -908,6 +1008,7 @@ function sendAsk() {
     `이슈 구간 ${spans.length}개 · 차트 ${charts.length}개`;
 }
 
+loadLegendColors();      // 지난번에 고른 색을 먼저 읽는다
 loadSources();
 renderSpans();
 renderCharts();
