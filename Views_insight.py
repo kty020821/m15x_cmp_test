@@ -46,8 +46,16 @@ def _safe(v):
 
 @csrf_exempt
 def an2_llm(request):
-    """LLM 설정 여부 — 화면이 버튼 문구를 정할 때 쓴다"""
-    return JsonResponse({'ok': True, 'llm': llm.available()})
+    """
+    LLM 설정 여부 — 화면이 안내 문구를 정할 때 쓴다.
+    설정 상태도 함께 준다 (키는 가려서). 주소를 잘못 넣었을 때
+    화면에서 바로 확인할 수 있어야 한다.
+    """
+    try:
+        return JsonResponse({'ok': True, 'llm': llm.available(),
+                             'config': llm.config_info()})
+    except Exception as e:
+        return _fail(f'설정 확인 실패: {e}', {'llm': False}, exc=e)
 
 
 @csrf_exempt
