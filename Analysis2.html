@@ -154,6 +154,21 @@
   background: var(--bg-2); border: 1px solid var(--bd);
   border-radius: 20px; padding: 4px 10px; cursor: pointer; }
 .chip:hover { color: var(--tx-1); border-color: var(--accent); }
+/* 근거표 — AI 가 무엇을 보고 말했는지 확인용 */
+.evs { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.ev { border: 1px solid var(--bd); border-radius: var(--r-sm);
+  background: var(--bg-2); padding: 4px 8px; }
+.ev summary { font-size: 11px; font-weight: 800; color: var(--tx-2);
+  cursor: pointer; font-family: var(--a2-mono); }
+.ev summary:hover { color: var(--tx-1); }
+.evt { width: 100%; border-collapse: collapse; margin: 5px 0 2px;
+  font-size: 10px; font-family: var(--a2-mono); }
+.evt th { color: var(--tx-muted); font-weight: 800; text-align: left;
+  padding: 3px 5px; border-bottom: 1px solid var(--bd); white-space: nowrap; }
+.evt td { padding: 3px 5px; color: var(--tx-1);
+  border-bottom: 1px solid rgba(128,128,128,.08);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 130px; }
 .empty { padding: 30px; text-align: center; color: var(--tx-muted);
   font-size: 12px; font-weight: 600; }
 .hint { font-size: 11px; font-weight: 600; color: var(--tx-muted);
@@ -226,10 +241,11 @@
       <div class="hint">이슈 구간을 정의한 뒤 물어보세요. 통계와 머신러닝으로
         유의미한 요인과 교호작용을 찾습니다.</div>
       <div class="chips" style="margin-top:9px;">
-        <span class="chip" onclick="ask('지정한 이슈 구간이 나머지와 어떻게 다른지 통계적으로 분석해줘')">구간 비교</span>
-        <span class="chip" onclick="ask('이슈에 가장 큰 영향을 준 요인을 순서대로 알려줘')">요인 순위</span>
-        <span class="chip" onclick="ask('요인들 사이의 교호작용이 있는지 찾아줘')">교호작용</span>
+        <span class="chip" onclick="ask('이슈 구간이 나머지와 무엇이 다른지 분석해줘')">구간 비교</span>
+        <span class="chip" onclick="ask('이슈 구간을 가장 잘 설명하는 요인을 순서대로 알려줘')">요인 순위</span>
+        <span class="chip" onclick="ask('장비나 챔버에 따라 영향이 달라지는 교호작용이 있는지 찾아줘')">교호작용</span>
         <span class="chip" onclick="ask('장비·챔버별로 차이가 있는지 봐줘')">장비 비교</span>
+        <span class="chip" onclick="runCalcOnly()">계산만</span>
       </div>
       <div class="ai-log" id="ai-log">
         <div class="empty">아직 대화가 없습니다.</div>
@@ -250,6 +266,9 @@ const API = {
   load:    "{% url 'an2-load' %}",
   chart:   "{% url 'an2-chart' %}",
   lots:    "{% url 'an2-lots' %}",
+  ask:     "{% url 'an2-ask' %}",
+  run:     "{% url 'an2-run' %}",
+  llmInfo: "{% url 'an2-llm' %}",
 };
 const A2_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', " +
                 "'Segoe UI', 'Noto Sans KR', sans-serif";
@@ -1043,38 +1062,188 @@ function redrawAll() {
 }
 
 /* ══════════════════════════════════════════════════
-   분석 AI — 다음 단계에서 연결
+   분석 AI
 
-   ★ 지금은 자리만 잡아 둔다. 서버가 통계·머신러닝으로 근거표를 만들고
-     LLM 은 그 표를 해석하는 구조로 붙일 예정이다.
-     원시 데이터를 그대로 넘기지 않는다 — 컨텍스트에 안 들어가고
-     LLM 이 숫자 계산을 틀린다.
+   ★ 원시 데이터는 서버에만 있다. 화면은 질문과 지금 상태(공정·구간)만
+     보내고, 서버가 통계·머신러닝으로 근거표를 만든 뒤
+     LLM 이 그것을 해석한다.
+   ★ LLM 설정이 없거나 실패해도 계산 결과는 나온다 —
+     분석 자체는 서버가 이미 할 수 있다.
    ══════════════════════════════════════════════════ */
+let aiBusy = false;
+let aiHistory = [];
+let llmOn = null;          // null=미확인
+
+async function checkLlm() {
+  const j = await postJSON(API.llmInfo, {});
+  llmOn = !!(j && j.llm);
+  const note = document.getElementById('ai-note');
+  if (note && !llmOn) {
+    note.textContent = 'AI 미설정 — 계산 결과만 표시됩니다';
+  }
+}
+
+function aiLog(html) {
+  const log = document.getElementById('ai-log');
+  const empty = log.querySelector('.empty');
+  if (empty) log.innerHTML = '';
+  log.insertAdjacentHTML('beforeend', html);
+  log.scrollTop = log.scrollHeight;
+}
+
 function ask(q) {
   document.getElementById('ai-q').value = q;
   sendAsk();
 }
 
-function sendAsk() {
+async function sendAsk() {
+  if (aiBusy) return;
   const q = document.getElementById('ai-q').value.trim();
   if (!q) return;
+  if (!meta) { alert('먼저 DB 조회를 하세요.'); return; }
 
-  const log = document.getElementById('ai-log');
-  if (log.querySelector('.empty')) log.innerHTML = '';
-  log.insertAdjacentHTML('beforeend',
-    `<div class="u">${esc(q)}</div>` +
-    `<div class="a" style="color:var(--tx-muted);">분석 AI 는 다음 단계에서 연결됩니다.
-      지금은 화면 구조만 준비돼 있습니다.</div>`);
-  log.scrollTop = log.scrollHeight;
+  aiBusy = true;
   document.getElementById('ai-q').value = '';
+  aiLog(`<div class="u">${esc(q)}</div>
+         <div class="a" id="ai-wait" style="color:var(--tx-muted);">
+           분석 중… 통계와 머신러닝을 돌리므로 30초 정도 걸릴 수 있습니다.</div>`);
 
-  // 연결되면 이 정보가 그대로 서버로 간다
-  document.getElementById('ai-note').textContent =
-    `보낼 정보 — 데이터 ${meta ? meta.oper_id : '(미선택)'} · ` +
-    `이슈 구간 ${spans.length}개 · 차트 ${charts.length}개`;
+  const payload = {
+    question: q,
+    oper_id: meta.oper_id,
+    spans: spans,
+    lot_cd: document.getElementById('lotcd').value || null,
+    span_a: 0,
+    history: aiHistory.slice(-8),
+    columns: (meta.numeric || []).slice(0, 200),
+  };
+
+  let j;
+  try {
+    j = await postJSON(API.ask, payload);
+  } catch (e) {
+    j = {ok: false, error: String(e)};
+  }
+
+  const wait = document.getElementById('ai-wait');
+  if (wait) wait.remove();
+
+  if (!j || !j.ok) {
+    aiLog(`<div class="a" style="color:var(--bad);">
+             ${esc((j && j.error) || '분석에 실패했습니다')}</div>`);
+    aiBusy = false;
+    return;
+  }
+
+  const answer = j.answer || '';
+  aiHistory.push({role: 'user', content: q});
+  aiHistory.push({role: 'assistant', content: answer});
+
+  const badge = j.llm === false
+    ? '<span class="lbl" style="color:var(--warn);">계산 결과만</span>' : '';
+  const meta_txt = [
+    j.rounds ? `도구 ${j.rounds}회` : '',
+    j.elapsed ? `${j.elapsed}초` : '',
+  ].filter(Boolean).join(' · ');
+
+  aiLog(`<div class="a">${badge}${fmtAnswer(answer)}</div>
+         ${j.note ? `<div class="lbl" style="color:var(--warn);
+            margin-top:3px;">${esc(j.note)}</div>` : ''}
+         ${evidenceHtml(j.evidence)}
+         ${meta_txt ? `<div class="lbl" style="margin-top:3px;">${meta_txt}</div>` : ''}`);
+  aiBusy = false;
+}
+
+/* 줄바꿈과 굵게만 처리한다 — 임의 HTML 을 그대로 넣지 않는다 */
+function fmtAnswer(t) {
+  return esc(t)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\n/g, '<br>');
+}
+
+/* 근거표 — 답변 아래에 접어서 보여 준다.
+   ★ AI 가 무엇을 보고 말했는지 확인할 수 있어야 한다. */
+function evidenceHtml(ev) {
+  if (!ev || !ev.length) return '';
+  const items = ev.map(e => {
+    const r = e.result || {};
+    const head = `${e.tool}${r.ok ? '' : ' — 실패'}`;
+    let body = '';
+
+    if (!r.ok) {
+      body = `<div class="lbl">${esc(r.error || '')}</div>`;
+    } else if (r.tool === 'compare_groups') {
+      body = evTable(['파라미터', '효과', '구간', '나머지', 'q'],
+        (r.items || []).slice(0, 8).map(i => [
+          i.param, i.cohens_d, i.mean_a, i.mean_b,
+          i.significant ? `${i.q} ✓` : i.q]));
+    } else if (r.tool === 'feature_importance') {
+      body = evTable(['변수', '중요도'],
+        (r.items || []).slice(0, 8).map(i => [i.feature, i.importance]));
+    } else if (r.tool === 'interaction') {
+      body = evTable(['범주', '파라미터', '점수'],
+        (r.items || []).slice(0, 6).map(i => [
+          i.category, i.param, i.sign_flip ? `${i.score} (반대)` : i.score]));
+    } else if (r.tool === 'distribution') {
+      const g = (r.groups || [])[0] || {};
+      body = evTable(['구분', '평균', 'n'],
+        (g.levels || []).slice(0, 8).map(i => [i.level, i.mean, i.n]));
+    } else {
+      body = `<div class="lbl">${esc(r.method || '')}</div>`;
+    }
+
+    const conf = r.confidence
+      ? ` · 신뢰도 ${({high: '높음', mid: '보통', low: '낮음'})[r.confidence]
+          || r.confidence}` : '';
+    return `<details class="ev">
+      <summary>${esc(head)}${esc(conf)}</summary>
+      ${body}
+      ${r.note ? `<div class="lbl" style="color:var(--warn);">${esc(r.note)}</div>` : ''}
+    </details>`;
+  }).join('');
+
+  return `<div class="evs">${items}</div>`;
+}
+
+/* LLM 없이 계산만 — 빠르게 근거표만 보고 싶을 때 */
+async function runCalcOnly() {
+  if (aiBusy) return;
+  if (!meta) { alert('먼저 DB 조회를 하세요.'); return; }
+  if (!spans.length) { alert('이슈 구간을 먼저 정의하세요.'); return; }
+
+  aiBusy = true;
+  aiLog(`<div class="u">기본 분석 (계산만)</div>
+         <div class="a" id="ai-wait" style="color:var(--tx-muted);">계산 중…</div>`);
+
+  const j = await postJSON(API.run, {
+    oper_id: meta.oper_id, spans: spans,
+    lot_cd: document.getElementById('lotcd').value || null, span_a: 0,
+  });
+
+  const wait = document.getElementById('ai-wait');
+  if (wait) wait.remove();
+
+  if (!j || !j.ok) {
+    aiLog(`<div class="a" style="color:var(--bad);">
+             ${esc((j && j.error) || '실패')}</div>`);
+  } else {
+    aiLog(`<div class="a">${fmtAnswer(j.answer || '')}</div>
+           ${evidenceHtml(j.evidence)}`);
+  }
+  aiBusy = false;
+}
+
+function evTable(head, rows) {
+  if (!rows.length) return '<div class="lbl">항목 없음</div>';
+  return `<table class="evt">
+    <thead><tr>${head.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${r.map(c =>
+      `<td>${esc(c == null ? '-' : c)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table>`;
 }
 
 loadLegendColors();      // 지난번에 고른 색을 먼저 읽는다
+checkLlm();              // AI 설정 여부를 먼저 확인해 안내를 정한다
 loadSources();
 renderSpans();
 renderCharts();
