@@ -533,7 +533,7 @@ function renderLinks() {
                  oninput="cur.links[${i}].alias=this.value.toUpperCase();refreshCol(${i})"></td>
       <td><input value="${esc(r.link_id)}" placeholder="T5515000C"
                  oninput="cur.links[${i}].link_id=this.value.toUpperCase();refreshCol(${i})"></td>
-      <td><input value="${esc(r.lot_cd || '')}" placeholder="본공정과 같음"
+      <td><input value="${esc(r.lot_cd || '')}"
                  title="비우면 본공정의 LOT_CD 를 그대로 씁니다"
                  oninput="cur.links[${i}].lot_cd=this.value.toUpperCase()"></td>
       <td><input value="${esc(r.param)}" placeholder="CHAMBER 또는 CU_THK_AVG"
