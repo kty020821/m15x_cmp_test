@@ -10,6 +10,7 @@ from . import views_monitor as vm
 from . import views_config as vc
 from . import views_config2 as v2
 from . import views_analysis2 as a2
+from . import views_insight as ai
 from . import views_adhoc as vh
 from . import views_load as vl
 
@@ -46,6 +47,9 @@ urlpatterns = [
     path('api/an2/load/',     a2.an2_load,       name='an2-load'),
     path('api/an2/chart/',    a2.an2_chart,      name='an2-chart'),
     path('api/an2/lots/',     a2.an2_lots,       name='an2-lots'),
+    path('api/an2/ask/',      ai.an2_ask,        name='an2-ask'),
+    path('api/an2/run/',      ai.an2_run,        name='an2-run'),
+    path('api/an2/llm/',      ai.an2_llm,        name='an2-llm'),
 
     # 기준정보 v2 — 연계 공정 다중 등록 (기존 config 와 병행)
     path('config2/',              v2.config2_page,     name='config2'),
