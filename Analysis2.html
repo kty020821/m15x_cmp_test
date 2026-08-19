@@ -696,10 +696,16 @@ function drawChart(c) {
     legend: {orientation: 'h', x: 0, y: 1.1,
              font: {family: A2_FONT, size: 10}},
     hovermode: 'closest',
+    /* ★ 기본값이 zoom 이라 드래그하면 확대만 되고 선택이 안 됐다.
+       이 화면은 '점을 골라 분석하는' 것이 목적이므로 선택을 기본으로 둔다.
+       확대는 모드 바의 돋보기나 휠로 할 수 있다. */
+    dragmode: 'select',
     hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
                  font: {family: A2_FONT, size: 11}},
   }, {responsive: true, displaylogo: false,
-      modeBarButtonsToRemove: ['autoScale2d']});
+      modeBarButtonsToRemove: ['autoScale2d'],
+      // 선택·올가미를 남겨 두어 확대와 오갈 수 있게
+      modeBarButtonsToAdd: ['select2d', 'lasso2d']});
 
   // newPlot 이 프라미스를 돌려주지 않는 버전도 있어 직접 등록한다
   bindSelect(div, c);
@@ -715,8 +721,15 @@ function drawChart(c) {
      눈으로 찾은 것을 분석 대상으로 넘기는 통로다.
    ══════════════════════════════════════════════════ */
 function bindSelect(div, c) {
-  if (div._selBound) return;      // 다시 그릴 때마다 중복 등록되지 않게
-  div._selBound = true;
+  /* ★ Plotly 는 newPlot 마다 리스너를 새로 붙일 수 있으므로 먼저 떼어 낸다.
+     예전엔 _selBound 플래그로 막았는데, renderCharts 가 innerHTML 로
+     카드를 다시 만들면 div 가 통째로 새것이 되어 플래그가 사라지고,
+     반대로 같은 div 에 다시 그릴 때는 등록이 건너뛰어져
+     선택이 먹었다 안 먹었다 했다. */
+  if (!div.removeAllListeners) return;   // Plotly 가 붙여 준 메서드
+  div.removeAllListeners('plotly_selected');
+  div.removeAllListeners('plotly_deselect');
+  div.removeAllListeners('plotly_doubleclick');
 
   div.on('plotly_selected', (ev) => {
     if (!ev || !ev.points || !ev.points.length) return;
@@ -734,9 +747,35 @@ function bindSelect(div, c) {
 function syncSelection(fromId) {
   charts.forEach(c => {
     if (c.id === fromId || !c.data) return;
-    drawChart(c);
+    applySelection(c);
   });
   updateSelBar();
+}
+
+/* 선택 표시만 갱신한다.
+   ★ newPlot 으로 다시 그리면 수만 점을 매번 새로 그려 느리고,
+     확대해 둔 범위까지 초기화된다. restyle 은 표시만 바꾼다. */
+function applySelection(c) {
+  const div = document.getElementById(`plot-${c.id}`);
+  if (!div || !div.data) { if (c.data) drawChart(c); return; }
+
+  const pts = div.data.map(tr => {
+    if (!selIds.size) return null;          // null = 선택 없음(전부 보통)
+    const idx = [];
+    (tr.customdata || []).forEach((id, i) => { if (selIds.has(id)) idx.push(i); });
+    return idx;
+  });
+
+  try {
+    Plotly.restyle(div, {
+      selectedpoints: pts,
+      'unselected.marker.opacity': selIds.size ? 0.08 : 1,
+      'selected.marker.opacity': 1,
+    });
+  } catch (e) {
+    console.warn('선택 표시 갱신 실패, 다시 그립니다:', e);
+    drawChart(c);
+  }
 }
 
 function updateSelBar() {
