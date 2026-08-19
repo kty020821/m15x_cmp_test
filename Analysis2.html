@@ -76,8 +76,9 @@
 .card-h .x { margin-left: auto; color: var(--tx-muted); cursor: pointer;
   font-size: 15px; padding: 0 3px; }
 .card-h .x:hover { color: var(--bad); }
-.plot { width: 100%; height: 300px; }
-.charts.c2 .plot, .charts.c3 .plot { height: 250px; }
+/* 범례가 아래로 내려가 자리를 차지하므로 그만큼 높인다 */
+.plot { width: 100%; height: 340px; }
+.charts.c2 .plot, .charts.c3 .plot { height: 300px; }
 /* 검색되는 컬럼 선택기 — 파라미터가 수백 개라 드롭박스로는 못 찾는다 */
 .pick { position: relative; display: inline-block; }
 .pick > input { font-size: 11px; font-weight: 700; color: var(--tx-1);
@@ -782,7 +783,8 @@ function drawChart(c) {
   Plotly.newPlot(div, traces, {
     paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
     font: {family: A2_FONT, color: '#555', size: 11},
-    margin: {l: 52, r: 14, t: 10, b: 38},
+    /* 범례가 X축 아래로 내려가므로 아래 여백을 늘린다 */
+    margin: {l: 52, r: 14, t: 10, b: 64},
     xaxis: {title: {text: c.x_col, font: {family: A2_FONT, size: 11}},
             tickfont: {family: A2_FONT, size: 10},
             gridcolor: 'rgba(0,0,0,.06)', zeroline: false,
@@ -791,7 +793,11 @@ function drawChart(c) {
             tickfont: {family: A2_FONT, size: 10},
             gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
     showlegend: true,
-    legend: {orientation: 'h', x: 0, y: 1.1,
+    /* ★ 범례를 X축 아래에 둔다.
+       위에 있으면 차트 제목·축과 붙어 어수선하고,
+       항목이 늘어나면 그래프 영역을 밀어 내렸다. */
+    legend: {orientation: 'h', x: 0.5, xanchor: 'center',
+             y: -0.18, yanchor: 'top',
              font: {family: A2_FONT, size: 10}},
     hovermode: 'closest',
     /* ★ 기본값이 zoom 이라 드래그하면 확대만 되고 선택이 안 됐다.
