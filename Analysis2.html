@@ -93,7 +93,6 @@
   background: var(--bg-3); border: 1px solid var(--bd);
   border-radius: var(--r-md); padding: 4px;
   box-shadow: 0 8px 26px rgba(0,0,0,.22); }
-.pick.on .pick-panel { display: block; }
 .pick-g { font-size: 10px; font-weight: 800; color: var(--tx-muted);
   padding: 6px 8px 3px; }
 .pick-i { font-size: 11px; font-weight: 700; color: var(--tx-1);
@@ -535,7 +534,10 @@ function renderCharts() {
      칸에 글자를 치면 걸러지고, 어느 그룹(본공정·연계) 것인지도 보인다.
    ══════════════════════════════════════════════════ */
 function pickHtml(id, key, val) {
-  const isX = key === 'x_col';
+  /* ★ 목록(패널)은 카드 안에 두지 않는다.
+     카드 안에 두면 카드 경계에서 잘리고, position:fixed 로 띄워도
+     조상에 transform 이 걸려 있으면 좌표 기준이 그쪽으로 바뀌어
+     엉뚱한 자리에 뜬다. body 직속 패널 하나를 공유한다. */
   return `
     <span class="pick" id="pick-${id}-${key}">
       <input value="${esc(val)}" placeholder="검색"
@@ -543,9 +545,23 @@ function pickHtml(id, key, val) {
              onfocus="openPick(${id},'${key}')"
              oninput="filterPick(${id},'${key}',this.value)"
              onkeydown="pickKey(event,${id},'${key}')">
-      <div class="pick-panel" id="pp-${id}-${key}"></div>
     </span>`;
 }
+
+/* body 직속 패널 — 한 번에 하나만 열리므로 하나면 충분하다 */
+function pickPanel() {
+  let el = document.getElementById('pick-panel');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'pick-panel';
+    el.className = 'pick-panel';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+/* 지금 열려 있는 선택기 */
+let openPickAt = null;      // {id, key}
 
 function pickInput(id, key) {
   const w = document.getElementById(`pick-${id}-${key}`);
@@ -554,8 +570,8 @@ function pickInput(id, key) {
 
 function openPick(id, key) {
   closeAllPicks();
-  const w = document.getElementById(`pick-${id}-${key}`);
-  if (w) w.classList.add('on');
+  openPickAt = {id, key};
+  pickPanel().style.display = 'block';
   filterPick(id, key, '');          // 열 때는 전체를 보여 준다
   placePick(id, key);
   const inp = pickInput(id, key);
@@ -567,8 +583,8 @@ function openPick(id, key) {
      목록이 잘려 아래 항목이 안 보이던 문제. */
 function placePick(id, key) {
   const inp = pickInput(id, key);
-  const panel = document.getElementById(`pp-${id}-${key}`);
-  if (!inp || !panel || !inp.getBoundingClientRect) return;
+  const panel = pickPanel();
+  if (!inp || !inp.getBoundingClientRect) return;
 
   const r = inp.getBoundingClientRect();
   const vh = window.innerHeight || 800;
@@ -590,7 +606,9 @@ function placePick(id, key) {
 }
 
 function closeAllPicks() {
-  document.querySelectorAll('.pick.on').forEach(w => w.classList.remove('on'));
+  openPickAt = null;
+  const el = document.getElementById('pick-panel');
+  if (el) el.style.display = 'none';
 }
 
 /* 후보 목록 — X 축에만 DATE 를 넣는다 */
@@ -601,8 +619,7 @@ function pickOptions(key) {
 }
 
 function filterPick(id, key, q) {
-  const panel = document.getElementById(`pp-${id}-${key}`);
-  if (!panel) return;
+  const panel = pickPanel();
   const qq = String(q || '').trim().toUpperCase();
 
   let html = '', n = 0;
@@ -628,9 +645,7 @@ function filterPick(id, key, q) {
     '<div class="pick-none">일치하는 컬럼이 없습니다.</div>';
 
   // 목록 길이가 바뀌면 뒤집힘 여부도 달라질 수 있다
-  if (panel.parentElement && panel.parentElement.classList.contains('on')) {
-    placePick(id, key);
-  }
+  if (openPickAt) placePick(id, key);
 }
 
 function choosePick(id, key, val) {
@@ -642,8 +657,7 @@ function choosePick(id, key, val) {
 
 /* 위·아래로 고르고 Enter 로 선택, Esc 로 닫기 */
 function pickKey(ev, id, key) {
-  const panel = document.getElementById(`pp-${id}-${key}`);
-  if (!panel) return;
+  const panel = pickPanel();
   const items = [...panel.querySelectorAll('.pick-i')];
   if (!items.length) return;
   let i = items.findIndex(x => x.classList.contains('act'));
@@ -671,14 +685,14 @@ function pickKey(ev, id, key) {
 /* 화면이 움직이면 떠 있는 목록도 따라와야 한다 (fixed 라 자동이 아니다) */
 ['scroll', 'resize'].forEach(evt =>
   window.addEventListener(evt, () => {
-    document.querySelectorAll('.pick.on').forEach(w => {
-      const m = /^pick-(\d+)-(\w+)$/.exec(w.id);
-      if (m) placePick(Number(m[1]), m[2]);
-    });
+    if (openPickAt) placePick(openPickAt.id, openPickAt.key);
   }, true));
 
 document.addEventListener('mousedown', (ev) => {
-  if (ev.target.closest && ev.target.closest('.pick')) return;
+  // 입력칸이나 목록 안을 누른 것은 '바깥 클릭' 이 아니다.
+  //   목록이 body 직속으로 옮겨졌으므로 .pick 만 봐서는 안 된다.
+  if (ev.target.closest &&
+      (ev.target.closest('.pick') || ev.target.closest('.pick-panel'))) return;
   charts.forEach(c => {
     ['x_col', 'y_col'].forEach(k => {
       const inp = pickInput(c.id, k);
