@@ -412,6 +412,12 @@ def an2_chart(request):
             if lot_cd and 'LOT_CD' in names:
                 where, wargs = '"LOT_CD" = %s', [lot_cd]
 
+            # ★ ID 컬럼이 없는 테이블이 있다.
+            #   차트 간 선택 연동에 점 식별자가 필요하므로,
+            #   없으면 행 번호를 만들어 쓴다.
+            idsel = ('"ID"' if 'ID' in names
+                     else 'ROW_NUMBER() OVER (ORDER BY "DATE")')
+
             xsel = '"DATE"' if is_date_x else f'"{x_col}"::double precision'
             lsel = f', CAST("{legend}" AS VARCHAR)' \
                    if legend and legend.upper() in names else ", ''"
@@ -420,7 +426,7 @@ def an2_chart(request):
                      if {'LOT_ID', 'WF_ID'} <= names else ", '', ''")
 
             cur.execute(f'''
-                SELECT id, {xsel}, "{y_col}"::double precision,
+                SELECT {idsel}, {xsel}, "{y_col}"::double precision,
                        ({span_sql}){lsel}{wfsel}
                 FROM {table}
                 WHERE {where} AND "{x_col}" IS NOT NULL
