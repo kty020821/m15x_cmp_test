@@ -1,3 +1,7 @@
+다행입니다! 역시 한도 초과나 토큰 제한 쪽에 걸렸던 429 에러였군요. 모델을 바꿔서 해결되셨다니 다행입니다.
+요청하신 대로 AI 채팅 영역의 글씨 크기를 키우고(12px → 13.5px), 사용자의 질문과 AI의 답변이 카카오톡처럼 확실하게 구분되도록(말풍선 UI 및 로봇 아이콘 추가) CSS와 자바스크립트 렌더링 부분을 싹 고쳤습니다.
+이제 누가 무슨 말을 했는지 시각적으로 아주 뚜렷하게 분리될 것입니다.
+기존 Analysis2.html 내용을 모두 지우고 아래 코드로 교체해 주세요!
 {% extends 'base.html' %}
 {% load static %}
 {% block title %}통합 분석{% endblock %}
@@ -58,27 +62,27 @@
   display: grid; 
   grid-template-columns: 1fr 1fr; /* 1:1 비율 (반반) */
   gap: 16px; 
-  align-items: stretch; /* ★ 핵심: 자식 요소가 부모 높이에 맞게 늘어나도록 설정 */
+  align-items: stretch; /* 부모 높이에 맞게 늘어남 */
   flex: 1; /* 남은 화면 전체를 차지 */
-  min-height: 0; /* ★ 핵심: 내부 콘텐츠 때문에 레이아웃이 무한정 커지는 것 방지 */
-  overflow: hidden; /* 영역 밖으로 넘어가는 요소 숨김 */
+  min-height: 0; /* 내부 콘텐츠로 인한 무한 확장 방지 */
+  overflow: hidden; 
 }
 
 /* 차트 영역 컨테이너 (개별 스크롤) */
 .chart-area {
   height: 100%;
-  overflow-y: auto; /* 내용이 넘치면 스크롤 */
-  padding-right: 8px; /* 스크롤바 영역 확보 */
+  overflow-y: auto; 
+  padding-right: 8px; 
   min-height: 0;
 }
 
 @media (max-width: 1280px) { 
   .split { grid-template-columns: 1fr; overflow-y: auto; align-items: start; }
   .chart-area { height: auto; overflow-y: visible; }
-  .ai { height: 600px; /* 모바일/작은 화면에서는 고정 높이 */ }
+  .ai { height: 600px; }
 }
 
-/* 차트 배치 — 개수에 따라 1~3열 */
+/* 차트 배치 */
 .charts { display: grid; gap: 10px; }
 .charts.c1 { grid-template-columns: 1fr; }
 .charts.c2 { grid-template-columns: 1fr 1fr; }
@@ -96,11 +100,10 @@
 .card-h .x { margin-left: auto; color: var(--tx-muted); cursor: pointer;
  font-size: 15px; padding: 0 3px; }
 .card-h .x:hover { color: var(--bad); }
-/* 범례가 아래로 내려가 자리를 차지하므로 그만큼 높인다 */
 .plot { width: 100%; height: 340px; }
 .charts.c2 .plot, .charts.c3 .plot { height: 300px; }
 
-/* 검색되는 컬럼 선택기 — 파라미터가 수백 개라 드롭박스로는 못 찾는다 */
+/* 검색되는 컬럼 선택기 */
 .pick { position: relative; display: inline-block; }
 .pick > input { font-size: 11px; font-weight: 700; color: var(--tx-1);
  background: var(--bg-2); border: 1px solid var(--bd);
@@ -151,26 +154,56 @@
 .sp-n { font-size: 10px; font-weight: 700; color: var(--tx-muted);
  font-family: var(--a2-mono); }
 
-/* 분석 AI (플렉스 컨테이너로 꽉 차게) */
+/* 분석 AI 컨테이너 */
 .ai { background: var(--bg-3); border: 1px solid var(--bd);
  border-radius: var(--r-lg); padding: 13px 15px; 
  height: 100%; display: flex; flex-direction: column; box-sizing: border-box; 
- min-height: 0; /* ★ 핵심: 그리드 자식 요소가 콘텐츠 크기만큼 늘어나는 것 방지 */
-}
+ min-height: 0; }
 .ai-h { font-size: 13px; font-weight: 800; color: var(--tx-1);
  margin-bottom: 4px; flex-shrink: 0; }
  
-/* ★ 로그(대화 내역) 영역 개별 스크롤 */
+/* ========================================================
+   ★ 로그(대화 내역) 영역 개별 스크롤 & 폰트 크기/말풍선 UI 개선 
+======================================================== */
 .ai-log { 
- flex: 1; /* 남은 공간을 끝까지 채움 */
- overflow-y: auto; /* 내용이 길어지면 자동 스크롤 */
- min-height: 0; /* ★ 핵심: 플렉스 자식 요소가 자기 콘텐츠 크기만큼 커지는 것 방지 */
- font-size: 12px; line-height: 1.7; color: var(--tx-1);
+ flex: 1; /* 남은 공간 채움 */
+ overflow-y: auto; /* 자동 스크롤 */
+ min-height: 0; 
+ font-size: 13.5px; /* ★ 글씨 크기 키움 (기존 12px) */
+ line-height: 1.7; 
+ color: var(--tx-1);
  border: 1px solid var(--bd); border-radius: var(--r-md);
- background: var(--bg-2); padding: 11px 12px; margin: 9px 0; 
+ background: var(--bg-2); padding: 16px 14px; margin: 9px 0; 
+ display: flex; flex-direction: column; gap: 24px; /* ★ 대화 간격 확실히 띄움 */
 }
-.ai-log .u { color: var(--tx-2); font-weight: 700; margin-top: 8px; }
-.ai-log .a { margin-top: 4px; }
+
+/* 사용자 말풍선 (우측 정렬) */
+.ai-log .u { 
+  align-self: flex-end; 
+  background: rgba(128, 128, 128, 0.08); /* 옅은 음영 */
+  border: 1px solid var(--bd);
+  border-radius: 16px 16px 2px 16px; /* 꼬리가 오른쪽 아래 */
+  padding: 10px 15px; 
+  color: var(--tx-1); 
+  font-weight: 700; 
+  max-width: 85%; 
+  margin: 0; 
+  word-break: break-word;
+}
+
+/* AI 답변 컨테이너 (좌측 정렬) */
+.ai-log .a { 
+  align-self: flex-start; 
+  width: 100%; 
+  margin: 0; 
+}
+
+/* AI 로봇 아이콘 이름표 */
+.ai-name { 
+  font-size: 13px; font-weight: 800; color: var(--tx-2); 
+  margin-bottom: 6px; display: flex; align-items: center; gap: 4px; 
+}
+
 .ai-in { display: flex; gap: 6px; flex-shrink: 0; }
 .ai-in textarea { flex: 1; font-size: 12px; color: var(--tx-1);
  background: var(--bg-2); border: 1px solid var(--bd);
@@ -183,30 +216,30 @@
  border-radius: 20px; padding: 4px 10px; cursor: pointer; }
 .chip:hover { color: var(--tx-1); border-color: var(--accent); }
 
-/* 스크롤바 디자인 예쁘게 다듬기 */
+/* 스크롤바 디자인 */
 .chart-area::-webkit-scrollbar, .ai-log::-webkit-scrollbar, .pick-panel::-webkit-scrollbar { width: 8px; }
 .chart-area::-webkit-scrollbar-thumb, .ai-log::-webkit-scrollbar-thumb, .pick-panel::-webkit-scrollbar-thumb { 
   background: rgba(128,128,128,0.25); border-radius: 4px; 
 }
 .chart-area::-webkit-scrollbar-thumb:hover, .ai-log::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.5); }
 
-/* 근거표 — AI 가 무엇을 보고 말했는지 확인용 */
-.evs { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
-.ev { border: 1px solid var(--bd); border-radius: var(--r-sm);
- background: var(--bg-2); padding: 4px 8px; }
-.ev summary { font-size: 11px; font-weight: 800; color: var(--tx-2);
+/* 근거표 */
+.evs { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; }
+.ev { border: 1px solid var(--bd); border-radius: var(--r-md);
+ background: var(--bg-2); padding: 6px 10px; }
+.ev summary { font-size: 11.5px; font-weight: 800; color: var(--tx-2);
  cursor: pointer; font-family: var(--a2-mono); }
 .ev summary:hover { color: var(--tx-1); }
 .evt { width: 100%; border-collapse: collapse; margin: 5px 0 2px;
- font-size: 10px; font-family: var(--a2-mono); }
+ font-size: 10.5px; font-family: var(--a2-mono); }
 .evt th { color: var(--tx-muted); font-weight: 800; text-align: left;
- padding: 3px 5px; border-bottom: 1px solid var(--bd); white-space: nowrap; }
-.evt td { padding: 3px 5px; color: var(--tx-1);
+ padding: 4px 5px; border-bottom: 1px solid var(--bd); white-space: nowrap; }
+.evt td { padding: 4px 5px; color: var(--tx-1);
  border-bottom: 1px solid rgba(128,128,128,.08);
  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
  max-width: 130px; }
-.empty { padding: 30px; text-align: center; color: var(--tx-muted);
- font-size: 12px; font-weight: 600; }
+.empty { margin: auto; text-align: center; color: var(--tx-muted);
+ font-size: 12px; font-weight: 600; padding: 40px; }
 .hint { font-size: 11px; font-weight: 600; color: var(--tx-muted);
  line-height: 1.6; }
 </style>
@@ -311,7 +344,6 @@ const API = {
 const A2_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', " +
  "'Segoe UI', 'Noto Sans KR', sans-serif";
 
-/* 이슈 구간 색 — 구간이 늘어도 서로 구분되게 */
 const SPAN_COLORS = ['#dc2626', '#f59e0b', '#7c3aed', '#0ea5e9',
  '#db2777', '#16a34a', '#0891b2', '#a16207'];
 const BASE_COLOR = 'rgba(120,130,145,.5)';
@@ -1042,6 +1074,9 @@ function aiKey(ev) {
  }
 }
 
+/* ========================================================
+   ★ 메시지 렌더링 부분 수정: 말풍선, 아이콘 반영
+======================================================== */
 async function sendAsk() {
  if (aiBusy) return;
  const q = document.getElementById('ai-q').value.trim();
@@ -1050,9 +1085,15 @@ async function sendAsk() {
 
  aiBusy = true;
  document.getElementById('ai-q').value = '';
- aiLog(`<div class="u">${esc(q)}</div>
- <div class="a" id="ai-wait" style="color:var(--tx-muted);">
- 분석 중… 통계와 머신러닝을 돌리므로 30초 정도 걸릴 수 있습니다.</div>`);
+ 
+ // 내 질문(말풍선) + AI 대기 메시지 렌더링
+ aiLog(`
+   <div class="u">${esc(q)}</div>
+   <div class="a" id="ai-wait" style="color:var(--tx-muted);">
+     <div class="ai-name">🤖 AI</div>
+     분석 중… 통계와 머신러닝을 돌리므로 30초 정도 걸릴 수 있습니다.
+   </div>
+ `);
 
  const payload = {
  question: q,
@@ -1075,8 +1116,12 @@ async function sendAsk() {
  if (wait) wait.remove();
 
  if (!j || !j.ok) {
- aiLog(`<div class="a" style="color:var(--bad);">
- ${esc((j && j.error) || '분석에 실패했습니다')}</div>`);
+ aiLog(`
+   <div class="a" style="color:var(--bad);">
+     <div class="ai-name">🤖 AI</div>
+     ${esc((j && j.error) || '분석에 실패했습니다')}
+   </div>
+ `);
  aiBusy = false;
  return;
  }
@@ -1086,17 +1131,22 @@ async function sendAsk() {
  aiHistory.push({role: 'assistant', content: answer});
 
  const badge = j.llm === false
- ? '<span class="lbl" style="color:var(--warn);">계산 결과만</span>' : '';
+ ? '<span class="lbl" style="color:var(--warn); border:1px solid var(--warn); padding:2px 6px; border-radius:4px; margin-right:6px;">계산 결과만</span><br><br>' : '';
  const meta_txt = [
  j.rounds ? `도구 ${j.rounds}회` : '',
  j.elapsed ? `${j.elapsed}초` : '',
  ].filter(Boolean).join(' · ');
 
- aiLog(`<div class="a">${badge}${fmtAnswer(answer)}</div>
- ${j.note ? `<div class="lbl" style="color:var(--warn);
- margin-top:3px;">${esc(j.note)}</div>` : ''}
- ${evidenceHtml(j.evidence)}
- ${meta_txt ? `<div class="lbl" style="margin-top:3px;">${meta_txt}</div>` : ''}`);
+ // AI의 최종 답변 렌더링
+ aiLog(`
+   <div class="a">
+     <div class="ai-name">🤖 AI</div>
+     ${badge}${fmtAnswer(answer)}
+     ${j.note ? `<div class="lbl" style="color:var(--warn); margin-top:8px;">${esc(j.note)}</div>` : ''}
+     ${evidenceHtml(j.evidence)}
+     ${meta_txt ? `<div class="lbl" style="margin-top:8px;">${meta_txt}</div>` : ''}
+   </div>
+ `);
  aiBusy = false;
 }
 
@@ -1154,8 +1204,13 @@ async function runCalcOnly() {
  if (!spans.length) { alert('이슈 구간을 먼저 정의하세요.'); return; }
 
  aiBusy = true;
- aiLog(`<div class="u">기본 분석 (계산만)</div>
- <div class="a" id="ai-wait" style="color:var(--tx-muted);">계산 중…</div>`);
+ aiLog(`
+   <div class="u">기본 분석 (계산만)</div>
+   <div class="a" id="ai-wait" style="color:var(--tx-muted);">
+     <div class="ai-name">🤖 AI</div>
+     계산 중…
+   </div>
+ `);
 
  const j = await postJSON(API.run, {
  oper_id: meta.oper_id, spans: spans,
@@ -1166,11 +1221,20 @@ async function runCalcOnly() {
  if (wait) wait.remove();
 
  if (!j || !j.ok) {
- aiLog(`<div class="a" style="color:var(--bad);">
- ${esc((j && j.error) || '실패')}</div>`);
+ aiLog(`
+   <div class="a" style="color:var(--bad);">
+     <div class="ai-name">🤖 AI</div>
+     ${esc((j && j.error) || '실패')}
+   </div>
+ `);
  } else {
- aiLog(`<div class="a">${fmtAnswer(j.answer || '')}</div>
- ${evidenceHtml(j.evidence)}`);
+ aiLog(`
+   <div class="a">
+     <div class="ai-name">🤖 AI</div>
+     ${fmtAnswer(j.answer || '')}
+     ${evidenceHtml(j.evidence)}
+   </div>
+ `);
  }
  aiBusy = false;
 }
@@ -1191,3 +1255,4 @@ renderSpans();
 renderCharts();
 </script>
 {% endblock %}
+
