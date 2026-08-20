@@ -251,7 +251,8 @@
         <div class="empty">아직 대화가 없습니다.</div>
       </div>
       <div class="ai-in">
-        <textarea id="ai-q" placeholder="예) 7/25~27 구간이 왜 이상한지 분석해줘"></textarea>
+        <textarea id="ai-q" onkeydown="aiKey(event)"
+                  placeholder="예) 7/25~27 구간이 왜 이상한지 분석해줘 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
         <button class="btn pri" onclick="sendAsk()">전송</button>
       </div>
       <div class="hint" style="margin-top:7px;" id="ai-note"></div>
@@ -1101,6 +1102,17 @@ function aiLog(html) {
 
 function ask(q) {
   document.getElementById('ai-q').value = q;
+  sendAsk();
+}
+
+/* Enter 로 전송, Shift+Enter 로 줄바꿈.
+   ★ textarea 는 기본이 줄바꿈이라 직접 처리해야 한다.
+   ★ 한글 입력 중(조합 중)에는 무시한다 — 안 그러면 마지막 글자가
+     확정되기 전에 전송돼 '분석해' 처럼 잘려 나간다. */
+function aiKey(ev) {
+  if (ev.key !== 'Enter' || ev.shiftKey) return;
+  if (ev.isComposing || ev.keyCode === 229) return;
+  ev.preventDefault();
   sendAsk();
 }
 
