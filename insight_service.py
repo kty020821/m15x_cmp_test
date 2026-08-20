@@ -29,6 +29,7 @@ equipment/insight_service.py
 """
 
 import re
+import math
 import traceback
 
 import numpy as np
@@ -153,6 +154,27 @@ def _confidence(n_in, n_out):
     return 'high', ''
 
 
+def _welch_p_normal(x, y):
+    """
+    scipy 없이 Welch 검정의 p 값 — 정규근사.
+
+    ★ 표본이 30 이상이면 t분포와 정규분포가 거의 같아
+      실용적으로 충분하다. 표본이 아주 작으면 p 값이 조금 낙관적이지만,
+      그런 경우는 신뢰도(_confidence)가 이미 'low' 로 표시된다.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    nx, ny = len(x), len(y)
+    if nx < 2 or ny < 2:
+        return 1.0
+    se = np.sqrt(x.var(ddof=1) / nx + y.var(ddof=1) / ny)
+    if se == 0:
+        return 1.0
+    z = abs(x.mean() - y.mean()) / se
+    # 양측 p = 2 * (1 - Φ(z)) — 오차함수로 계산
+    return float(2.0 * (1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))))
+
+
 # ══════════════════════════════════════════════════════════
 # 도구 1. 구간 비교
 # ══════════════════════════════════════════════════════════
@@ -166,7 +188,13 @@ def compare_groups(oper_id, spans, lot_cd=None, span_a=0, span_b=None,
       cohens_d    효과크기 (0.2 작음 / 0.5 중간 / 0.8 큼)
       p, q        t검정 p값과 FDR 보정값
     """
-    from scipy import stats
+    # ★ scipy 가 없어도 이 도구는 돌아야 한다 — 가장 기본이 되는 분석이다.
+    #   없으면 정규근사로 p 값을 구한다(표본이 크면 t검정과 거의 같다).
+    try:
+        from scipy import stats
+        _ttest = lambda x, y: stats.ttest_ind(x, y, equal_var=False)[1]
+    except ImportError:
+        _ttest = _welch_p_normal
 
     df, num, cat = load_frame(oper_id, spans, lot_cd)
     a = df[df['__span'] == span_a]
@@ -188,7 +216,7 @@ def compare_groups(oper_id, spans, lot_cd=None, span_a=0, span_b=None,
                          max(1, len(x) + len(y) - 2))
         d = (mx - my) / pooled if pooled > 0 else 0.0
         try:
-            t, p = stats.ttest_ind(x, y, equal_var=False)
+            p = _ttest(x, y)
         except Exception:
             p = 1.0
         rows.append({'param': c, 'n_a': len(x), 'n_b': len(y),
@@ -233,10 +261,16 @@ def feature_importance(oper_id, spans, lot_cd=None, span_a=0, top=20):
     ★ permutation importance 를 쓴다 — 트리의 기본 중요도는
       값 종류가 많은 변수를 과대평가한다.
     """
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.inspection import permutation_importance
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import roc_auc_score
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.inspection import permutation_importance
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import roc_auc_score
+    except ImportError:
+        # ★ scikit-learn 이 없는 서버가 있다. 그렇다고 이 도구가
+        #   통째로 죽으면 안 되므로 단변량 대체 방식으로 답한다.
+        #   변수 간 상호작용은 못 잡지만 순위는 낼 수 있다.
+        return _importance_fallback(oper_id, spans, lot_cd, span_a, top)
 
     df, num, cat = load_frame(oper_id, spans, lot_cd)
     y = (df['__span'] == span_a).astype(int)
@@ -296,6 +330,77 @@ def feature_importance(oper_id, spans, lot_cd=None, span_a=0, top=20):
         'confidence': conf, 'note': note,
         'items': items,
         'method': 'RandomForest + permutation importance (검증셋 30%)',
+    }
+
+
+def _importance_fallback(oper_id, spans, lot_cd=None, span_a=0, top=20):
+    """
+    scikit-learn 이 없을 때의 요인 순위.
+
+    각 변수가 '구간 여부' 를 얼마나 가르는지를 AUC 로 잰다.
+    한 변수만 쓰는 분류기의 성능과 같아서, 트리 모델의 중요도와
+    비슷한 순위를 준다.
+
+    ★ 한계: 변수를 하나씩만 보므로 '둘이 함께일 때만 문제' 인 경우를
+      못 잡는다. 그 사실을 note 에 적어 LLM 이 오해하지 않게 한다.
+    """
+    df, num, cat = load_frame(oper_id, spans, lot_cd)
+    y = (df['__span'] == span_a).astype(int).to_numpy()
+    if y.sum() < 10 or (1 - y).sum() < 10:
+        return {'ok': False,
+                'error': f'표본이 부족합니다 (구간 {int(y.sum())}장 / '
+                         f'나머지 {int((1 - y).sum())}장)'}
+
+    def auc_of(v):
+        """순위 기반 AUC — 정규분포를 가정하지 않는다"""
+        m = ~pd.isna(v)
+        if m.sum() < 20:
+            return None
+        vv, yy = np.asarray(v)[m], y[m]
+        n1, n0 = yy.sum(), (1 - yy).sum()
+        if n1 < 5 or n0 < 5:
+            return None
+        r = pd.Series(vv).rank().to_numpy()
+        a = (r[yy == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+        return float(a)
+
+    items = []
+    for c in num:
+        a = auc_of(df[c].to_numpy())
+        if a is None:
+            continue
+        # 0.5 에서 얼마나 벗어났나 — 방향은 무관
+        items.append({'feature': c, 'importance': round(abs(a - 0.5) * 2, 4),
+                      'auc': round(a, 3)})
+
+    # 범주형은 수준별 구간 비율의 퍼짐으로 본다
+    for c in cat:
+        g = pd.DataFrame({'v': df[c].astype(str), 'y': y})
+        rate = g.groupby('v')['y'].agg(['mean', 'count'])
+        rate = rate[rate['count'] >= MIN_SAMPLE]
+        if len(rate) < 2:
+            continue
+        items.append({'feature': c,
+                      'importance': round(float(rate['mean'].max()
+                                                - rate['mean'].min()), 4),
+                      'levels': int(len(rate))})
+
+    if not items:
+        return {'ok': False, 'error': '평가 가능한 변수가 없습니다'}
+
+    items.sort(key=lambda r: r['importance'], reverse=True)
+    conf, note = _confidence(int(y.sum()), int((1 - y).sum()))
+    note = ((note + ' · ') if note else '') + \
+           ('scikit-learn 이 없어 단변량 방식으로 계산했습니다 — '
+            '변수 하나씩만 보므로 여러 변수가 함께 작용하는 경우는 '
+            '잡지 못합니다')
+
+    return {
+        'ok': True, 'tool': 'feature_importance',
+        'n_in': int(y.sum()), 'n_out': int((1 - y).sum()),
+        'auc': None, 'confidence': conf, 'note': note,
+        'items': items[:top],
+        'method': '변수별 단변량 AUC (sklearn 미설치 대체)',
     }
 
 
