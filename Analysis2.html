@@ -58,8 +58,9 @@
   display: grid; 
   grid-template-columns: 1fr 1fr; /* 1:1 비율 (반반) */
   gap: 16px; 
-  align-items: start;
+  align-items: stretch; /* ★ 핵심: 자식 요소가 부모 높이에 맞게 늘어나도록 설정 */
   flex: 1; /* 남은 화면 전체를 차지 */
+  min-height: 0; /* ★ 핵심: 내부 콘텐츠 때문에 레이아웃이 무한정 커지는 것 방지 */
   overflow: hidden; /* 영역 밖으로 넘어가는 요소 숨김 */
 }
 
@@ -68,10 +69,11 @@
   height: 100%;
   overflow-y: auto; /* 내용이 넘치면 스크롤 */
   padding-right: 8px; /* 스크롤바 영역 확보 */
+  min-height: 0;
 }
 
 @media (max-width: 1280px) { 
-  .split { grid-template-columns: 1fr; overflow-y: auto; }
+  .split { grid-template-columns: 1fr; overflow-y: auto; align-items: start; }
   .chart-area { height: auto; overflow-y: visible; }
   .ai { height: 600px; /* 모바일/작은 화면에서는 고정 높이 */ }
 }
@@ -152,7 +154,9 @@
 /* 분석 AI (플렉스 컨테이너로 꽉 차게) */
 .ai { background: var(--bg-3); border: 1px solid var(--bd);
  border-radius: var(--r-lg); padding: 13px 15px; 
- height: 100%; display: flex; flex-direction: column; box-sizing: border-box; }
+ height: 100%; display: flex; flex-direction: column; box-sizing: border-box; 
+ min-height: 0; /* ★ 핵심: 그리드 자식 요소가 콘텐츠 크기만큼 늘어나는 것 방지 */
+}
 .ai-h { font-size: 13px; font-weight: 800; color: var(--tx-1);
  margin-bottom: 4px; flex-shrink: 0; }
  
@@ -160,6 +164,7 @@
 .ai-log { 
  flex: 1; /* 남은 공간을 끝까지 채움 */
  overflow-y: auto; /* 내용이 길어지면 자동 스크롤 */
+ min-height: 0; /* ★ 핵심: 플렉스 자식 요소가 자기 콘텐츠 크기만큼 커지는 것 방지 */
  font-size: 12px; line-height: 1.7; color: var(--tx-1);
  border: 1px solid var(--bd); border-radius: var(--r-md);
  background: var(--bg-2); padding: 11px 12px; margin: 9px 0; 
@@ -245,7 +250,6 @@
  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
  <button class="btn" onclick="addChart()">+ 차트 추가</button>
  <span class="lbl">한 줄에</span>
- <!-- 영역이 반으로 줄었으므로 기본 1개 컬럼으로 수정 -->
  <select id="cols" onchange="applyCols()"
  style="font-size:12px;padding:5px 9px;border-radius:9px;
  border:1px solid var(--bd);background:var(--bg-2);
@@ -265,7 +269,7 @@
  <div id="sel-bar" style="display:flex;gap:6px;align-items:center;
  flex-wrap:wrap;margin-bottom:8px;"></div>
  <div id="lgd-bar" class="lgd" style="margin-bottom:8px;"></div>
- <div class="charts c1" id="charts"></div> <!-- 기본 c1 (1열) 로 지정 -->
+ <div class="charts c1" id="charts"></div>
  </div>
 
  <!-- 분석 AI (오른쪽 50%) -->
@@ -1023,7 +1027,6 @@ function ask(q) {
 
 /* ══════════════════════════════════════════════════
  AI 채팅 전송 키 처리 (Enter)
- ★ 조합 상태일 때 무시하지 않고 짧게 대기 후 전송
  ══════════════════════════════════════════════════ */
 function aiKey(ev) {
  if (ev.key === 'Enter' && ev.shiftKey) {
