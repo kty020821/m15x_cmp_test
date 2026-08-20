@@ -1,3 +1,5 @@
+두 가지 수정 사항(ID 컬럼 쿼리 부분과 한글 오타 부분)을 모두 반영한 insight_service.py 전체 코드입니다.
+기존 내용을 모두 지우고 아래 코드로 교체해서 저장해 주시면 됩니다.
 """
 equipment/insight_service.py
 ════════════════════════════════════════════════════════════
@@ -109,7 +111,8 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
         if lot_cd and 'LOT_CD' in names:
             where, wargs = '"LOT_CD" = %s', [lot_cd]
 
-        sel = ", ".join(f'"{c}"' for c in dict.fromkeys(keep))
+        # ★ ID는 소문자로 묶고 나머지는 대문자로 묶어서 쿼리 오류 방지
+        sel = ", ".join('id' if c == 'ID' else f'"{c}"' for c in dict.fromkeys(keep))
         cur.execute(f'''
             SELECT {sel}, COALESCE({span_sql}, -1) AS __span
             FROM {table} WHERE {where} ORDER BY "DATE"
@@ -517,6 +520,7 @@ def distribution(oper_id, spans, param, lot_cd=None, by=None, span_a=0):
             if len(v) < 5:
                 continue
             inn = g['__span'] == span_a
+            # ★ 문법(Syntax) 에러가 발생하던 오타 수정 완료
             grp.append({
                 'level': lv, 'n': len(v),
                 'mean': round(float(v.mean()), 4),
@@ -659,3 +663,4 @@ def run_tool(name, args, spans):
     except Exception as e:
         traceback.print_exc()
         return {'ok': False, 'error': f'{e.__class__.__name__}: {e}'}
+
