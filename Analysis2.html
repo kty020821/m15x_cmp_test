@@ -355,27 +355,52 @@ async function postJSON(url, payload) {
 /* ══════════════════════════════════════════════════
  백그라운드 DB 구축 통신 (화면 멈춤 방지)
  ══════════════════════════════════════════════════ */
+// 에러를 삼키지 않고 정확한 메시지를 반환하도록 수정
+async function postJSON(url, payload) {
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload || {}),
+        });
+        const text = await res.text();
+        let j;
+        try { 
+            j = JSON.parse(text); 
+        } catch (e) { 
+            return { ok: false, error: `[HTTP ${res.status}] 서버 오류:\n` + text.slice(0, 200) }; 
+        }
+        
+        if (!res.ok) {
+            return { ok: false, error: j.error || `HTTP ${res.status} 오류가 발생했습니다.` };
+        }
+        return j;
+    } catch (e) {
+        return { ok: false, error: `통신 실패: ${e.message}` };
+    }
+}
+
 async function startBuildDb(isCfg2) {
     const srcVal = document.getElementById('src').value;
     if (!srcVal) { 
-        alert("먼저 적재할 공정 데이터를 드롭박스에서 고르세요."); 
+        alert("먼저 상단 데이터 드롭박스에서 공정을 선택하세요."); 
         return; 
     }
     
-    // 접미사(_CFG2 등) 제거하여 순수 공정 ID 추출
-    const operId = srcVal.replace(/_(CFG2|cfg2)$/i, '').trim().toUpperCase();
+    // 접미사(_CFG2, adhoc_ 등) 제거하여 순수 공정 ID(예: 2300) 추출
+    const operId = srcVal.replace(/_(CFG2|cfg2)$/i, '').replace(/^adhoc_/i, '').trim().toUpperCase();
     
     if (!confirm(`[${operId}] 공정을 백그라운드에서 적재합니다 (Config${isCfg2 ? '2' : '1'}).\n계속하시겠습니까?`)) return;
 
     const res = await postJSON(API.buildDb, { oper_id: operId, is_cfg2: isCfg2 });
     if (!res.ok) { 
-        alert(res.error || '적재 시작 실패'); 
+        alert(`적재 시작 실패:\n${res.error}`); 
         return; 
     }
 
     const statusDiv = document.getElementById('build-status');
     statusDiv.style.display = 'flex';
-    document.getElementById('build-msg').textContent = '준비 중...';
+    document.getElementById('build-msg').textContent = '적재 시작 중...';
     document.getElementById('build-progress').value = 0;
     
     if (pollInterval) clearInterval(pollInterval);
@@ -393,11 +418,11 @@ async function startBuildDb(isCfg2) {
                     alert(`DB 구축 완료: ${state.msg}`);
                     loadSources();
                 } else {
-                    alert(`DB 구축 실패: ${state.msg}`);
+                    alert(`DB 구축 실패:\n${state.msg}`);
                 }
             }
         }
-    }, 2000); // 2초 주기 폴링
+    }, 2500);
 }
 
 async function loadSources() {
