@@ -150,19 +150,12 @@ def config_info():
 
 
 def _post(messages, tools=None):
-    """
-    OpenAI 호환 chat/completions 호출.
-
-    ★ requests 는 사내망에서 프록시 설정이 걸릴 수 있어
-      urllib 로 직접 부른다 (표준 라이브러리라 의존이 없다).
-    """
     import urllib.request
     import urllib.error
 
     c = _cfg()
     if not c['base_url']:
-        raise RuntimeError('LLM 주소가 없습니다 — settings.py 의 LLM_URL 을 '
-                           '확인하세요')
+        raise RuntimeError('LLM 주소가 없습니다 — settings.py 의 LLM_URL 을 확인하세요')
 
     body = {'model': c['model'], 'messages': messages, 'temperature': 0.2}
     if tools:
@@ -170,14 +163,21 @@ def _post(messages, tools=None):
         body['tool_choice'] = 'auto'
 
     headers = {'Content-Type': 'application/json'}
-    # 사내 게이트웨이는 키 없이 열려 있는 경우도 있어 조건부로 넣는다
     if c['api_key']:
         headers['Authorization'] = f"Bearer {c['api_key']}"
 
+    # ★ URL 조립 보정: base_url에 /v1이 없으면 붙여서 표준 /v1/chat/completions 로 전송
+    base = c['base_url'].rstrip('/')
+    if not base.endswith('/v1'):
+        endpoint = f"{base}/v1/chat/completions"
+    else:
+        endpoint = f"{base}/chat/completions"
+
     req = urllib.request.Request(
-        f"{c['base_url']}/chat/completions",
+        endpoint,
         data=json.dumps(body).encode('utf-8'),
-        headers=headers, method='POST')
+        headers=headers, method='POST'
+    )
 
     try:
         with urllib.request.urlopen(req, timeout=c['timeout']) as r:
