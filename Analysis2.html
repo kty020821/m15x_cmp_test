@@ -356,36 +356,48 @@ async function postJSON(url, payload) {
  백그라운드 DB 구축 통신 (화면 멈춤 방지)
  ══════════════════════════════════════════════════ */
 async function startBuildDb(isCfg2) {
-  const operId = document.getElementById('src').value;
-  if (!operId) { alert("먼저 적재할 공정 데이터를 드롭박스에서 고르세요."); return; }
-  
-  if (!confirm(`[${operId}] 공정을 백그라운드에서 적재합니다 (Config${isCfg2 ? '2' : '1'}).\n계속하시겠습니까?`)) return;
-
-  const res = await postJSON(API.buildDb, { oper_id: operId, is_cfg2: isCfg2 });
-  if (!res.ok) { alert(res.error || '적재 시작 실패'); return; }
-
-  const statusDiv = document.getElementById('build-status');
-  statusDiv.style.display = 'flex';
-  document.getElementById('build-msg').textContent = '준비 중...';
-  
-  if (pollInterval) clearInterval(pollInterval);
-  
-  pollInterval = setInterval(async () => {
-    const statusRes = await postJSON(API.buildStatus, { task_id: res.task_id });
-    if (statusRes.ok && statusRes.state) {
-      const state = statusRes.state;
-      document.getElementById('build-progress').value = state.progress || 0;
-      document.getElementById('build-msg').textContent = state.msg || '적재 중...';
-      
-      if (state.status === 'done' || state.status === 'error') {
-        clearInterval(pollInterval);
-        if (state.status === 'done') {
-            alert("DB 구축이 완료되었습니다. 조회를 다시 진행하세요.");
-            loadSources();
-        }
-      }
+    const srcVal = document.getElementById('src').value;
+    if (!srcVal) { 
+        alert("먼저 적재할 공정 데이터를 드롭박스에서 고르세요."); 
+        return; 
     }
-  }, 3000); // 3초마다 폴링
+    
+    // 접미사(_CFG2 등) 제거하여 순수 공정 ID 추출
+    const operId = srcVal.replace(/_(CFG2|cfg2)$/i, '').trim().toUpperCase();
+    
+    if (!confirm(`[${operId}] 공정을 백그라운드에서 적재합니다 (Config${isCfg2 ? '2' : '1'}).\n계속하시겠습니까?`)) return;
+
+    const res = await postJSON(API.buildDb, { oper_id: operId, is_cfg2: isCfg2 });
+    if (!res.ok) { 
+        alert(res.error || '적재 시작 실패'); 
+        return; 
+    }
+
+    const statusDiv = document.getElementById('build-status');
+    statusDiv.style.display = 'flex';
+    document.getElementById('build-msg').textContent = '준비 중...';
+    document.getElementById('build-progress').value = 0;
+    
+    if (pollInterval) clearInterval(pollInterval);
+    
+    pollInterval = setInterval(async () => {
+        const statusRes = await postJSON(API.buildStatus, { task_id: res.task_id });
+        if (statusRes.ok && statusRes.state) {
+            const state = statusRes.state;
+            document.getElementById('build-progress').value = state.progress || 0;
+            document.getElementById('build-msg').textContent = state.msg || '적재 중...';
+            
+            if (state.status === 'done' || state.status === 'error') {
+                clearInterval(pollInterval);
+                if (state.status === 'done') {
+                    alert(`DB 구축 완료: ${state.msg}`);
+                    loadSources();
+                } else {
+                    alert(`DB 구축 실패: ${state.msg}`);
+                }
+            }
+        }
+    }, 2000); // 2초 주기 폴링
 }
 
 async function loadSources() {
