@@ -92,4 +92,8 @@ urlpatterns = [
     path('api/monitor/diag/',    vm.monitor_diag,    name='monitor-diag'),
     path('monitor/report/',      vm.monitor_report,  name='monitor-report'),
     path('api/monitor/detail/',  vm.monitor_detail,  name='monitor-detail'),
+    
+    # ★ 추가: DB 백그라운드 구축 및 상태 조회 API
+    path('api/monitor/build_db/', vm.monitor_build_db, name='monitor-build-db'),
+    path('api/monitor/build_status/', vm.monitor_build_status, name='monitor-build-status'),
 ]
