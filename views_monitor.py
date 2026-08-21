@@ -184,39 +184,61 @@ def monitor_report(request):
 def monitor_build_db(request):
     """DB 백그라운드 구축 시작 API"""
     if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'})
+        return JsonResponse({'error': 'POST only'}, status=405)
     
-    body = json.loads(request.body)
-    oper_id = body.get('oper_id')
-    is_cfg2 = body.get('is_cfg2', False)
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return JsonResponse({'ok': False, 'error': '요청 본문이 올바르지 않습니다.'})
+
+    raw_oper_id = body.get('oper_id', '')
+    is_cfg2 = bool(body.get('is_cfg2', False))
+    
+    # 접미사(_CFG2, _cfg2 등) 제거하여 순수 공정 ID 추출
+    oper_id = re.sub(r'_(CFG2|cfg2)$', '', str(raw_oper_id).strip(), flags=re.IGNORECASE).upper()
     
     if not oper_id or not _safe(oper_id):
         return JsonResponse({'ok': False, 'error': '올바른 oper_id가 필요합니다.'})
 
     task_id = f"db_build_{oper_id}_{'cfg2' if is_cfg2 else 'cfg1'}"
-    if cache.get(task_id):
-        return JsonResponse({'ok': False, 'error': '해당 공정의 DB 구축이 이미 진행 중입니다.'})
+    cur_state = cache.get(task_id)
+    if cur_state and cur_state.get('status') == 'running':
+        return JsonResponse({'ok': False, 'error': f'[{oper_id}] 공정의 DB 구축이 이미 진행 중입니다.'})
 
-    cache.set(task_id, {'status': 'starting', 'progress': 0, 'msg': '준비 중...'}, timeout=3600)
+    cache.set(task_id, {'status': 'starting', 'progress': 0, 'msg': '기준정보 확인 중...'}, timeout=3600)
 
     def background_task():
         try:
             lake = svc.get_lake()
             df_info = svc.get_config(is_cfg2=is_cfg2)
             
+            # 기준정보에 공정이 존재하는지 확인
+            if df_info is None or df_info.empty or oper_id not in df_info['OPER_ID'].astype(str).str.upper().values:
+                raise ValueError(f"기준정보(Config{'2' if is_cfg2 else '1'})에 등록되지 않은 공정({oper_id})입니다.")
+
             def update_progress(done, total, msg):
                 pct = int((done / total) * 100) if total else 0
                 cache.set(task_id, {'status': 'running', 'progress': pct, 'msg': msg}, timeout=3600)
-                
+            
+            update_progress(1, 10, f'{oper_id} Lake 조회 시작')
             df = svc.build_analysis_df(lake, df_info, oper_id, on_progress=update_progress, is_cfg2=is_cfg2)
+            
+            if df is None or df.empty:
+                cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': '조회된 데이터가 없습니다 (0행).'}, timeout=3600)
+                return
+
+            update_progress(9, 10, f'{len(df):,}행 저장 중...')
             svc.save_analysis_df(df, oper_id, is_cfg2=is_cfg2)
-            cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': '적재가 완료되었습니다.'}, timeout=3600)
+            cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': f'{len(df):,}행 적재 완료'}, timeout=3600)
         except Exception as e:
             traceback.print_exc()
-            cache.set(task_id, {'status': 'error', 'progress': 0, 'msg': f'에러 발생: {str(e)}'}, timeout=3600)
+            cache.set(task_id, {'status': 'error', 'progress': 0, 'msg': f'에러 발생: {e}'}, timeout=3600)
+
+        finally:
+            connections.close_all()
 
     threading.Thread(target=background_task, daemon=True).start()
-    return JsonResponse({'ok': True, 'task_id': task_id, 'note': '백그라운드 적재를 시작합니다.'})
+    return JsonResponse({'ok': True, 'task_id': task_id, 'note': f'[{oper_id}] 백그라운드 적재를 시작합니다.'})
 
 @csrf_exempt
 def monitor_build_status(request):
@@ -228,3 +250,4 @@ def monitor_build_status(request):
     
     state = cache.get(task_id) or {'status': 'none', 'msg': '진행 상태를 찾을 수 없습니다.'}
     return JsonResponse({'ok': True, 'state': state})
+  
