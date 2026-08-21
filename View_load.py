@@ -88,22 +88,11 @@ def load_status(request):
 
 @csrf_exempt
 def load_run(request):
-    """
-    적재 실행 (백그라운드).
-
-      opers      공정 목록. 비우면 등록된 전 공정
-      days       최근 며칠 (기본 45)
-      date_from/date_to  기간을 직접 지정할 때
-
-    ★ 요청 안에서 끝내지 않는다 — 공정 하나에 몇 분씩 걸린다.
-      스레드로 띄우고 화면이 status 를 폴링한다.
-    """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
     b = _body(request)
 
-    ids = [str(o).upper().strip() for o in (b.get('opers') or [])
-           if str(o).strip()]
+    ids = [str(o).upper().strip() for o in (b.get('opers') or []) if str(o).strip()]
     if not ids:
         ids = [o['oper_id'] for o in _opers()]
     bad = [i for i in ids if not _safe(i)]
@@ -118,22 +107,21 @@ def load_run(request):
     except (TypeError, ValueError):
         days = ls.DEFAULT_DAYS
 
-    # 이미 돌고 있는 공정은 미리 알려 준다 (실행은 건너뛴다)
+    is_cfg2 = bool(b.get('is_cfg2', False))  # ★ Config2 지원 추가
+
     st = ls.status(ids)
     busy = [{'oper_id': i, **(st.get(i, {}).get('running') or {})}
             for i in ids if st.get(i, {}).get('running')]
 
-    # 기간 직접 지정은 공정 하나일 때만 의미가 있다
-    #   (여러 공정을 같은 기간으로 돌릴 일은 드물고, 실수로 전 공정을
-    #    긴 기간으로 돌리면 메모리·시간이 크게 든다)
     date_from = str(b.get('date_from') or '').strip() or None
-    date_to   = str(b.get('date_to') or '').strip() or None
+    date_to = str(b.get('date_to') or '').strip() or None
     if (date_from or date_to) and len(ids) > 1:
         return _fail('기간을 직접 지정할 때는 공정을 하나만 선택하세요')
 
     try:
+        # ★ is_cfg2 파라미터 전달
         res = ls.run_async(ids, days=days, user=b.get('user', ''),
-                           date_from=date_from, date_to=date_to)
+                           date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)
         if not res.get('ok'):
             return _fail(res.get('error', '실행 실패'))
         return JsonResponse({'ok': True, 'opers': res['opers'],
