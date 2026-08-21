@@ -182,38 +182,38 @@ def monitor_report(request):
 # ══════════════════════════════════════════════════════════
 @csrf_exempt
 def monitor_build_db(request):
-    """DB 백그라운드 구축 시작 API"""
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
     
     try:
         body = json.loads(request.body)
     except Exception:
-        return JsonResponse({'ok': False, 'error': '요청 본문이 올바르지 않습니다.'})
+        return JsonResponse({'ok': False, 'error': '요청 형식이 올바르지 않습니다.'})
 
     raw_oper_id = body.get('oper_id', '')
     is_cfg2 = bool(body.get('is_cfg2', False))
     
-    # 접미사(_CFG2, _cfg2 등) 제거하여 순수 공정 ID 추출
+    # 순수 공정 ID 추출
     oper_id = re.sub(r'_(CFG2|cfg2)$', '', str(raw_oper_id).strip(), flags=re.IGNORECASE).upper()
     
     if not oper_id or not _safe(oper_id):
-        return JsonResponse({'ok': False, 'error': '올바른 oper_id가 필요합니다.'})
+        return JsonResponse({'ok': False, 'error': f'유효하지 않은 공정 ID입니다: {raw_oper_id}'})
 
     task_id = f"db_build_{oper_id}_{'cfg2' if is_cfg2 else 'cfg1'}"
-    cur_state = cache.get(task_id)
-    if cur_state and cur_state.get('status') == 'running':
-        return JsonResponse({'ok': False, 'error': f'[{oper_id}] 공정의 DB 구축이 이미 진행 중입니다.'})
-
-    cache.set(task_id, {'status': 'starting', 'progress': 0, 'msg': '기준정보 확인 중...'}, timeout=3600)
+    
+    cache.set(task_id, {'status': 'starting', 'progress': 0, 'msg': '적재 준비 중...'}, timeout=3600)
 
     def background_task():
         try:
             lake = svc.get_lake()
             df_info = svc.get_config(is_cfg2=is_cfg2)
             
-            # 기준정보에 공정이 존재하는지 확인
-            if df_info is None or df_info.empty or oper_id not in df_info['OPER_ID'].astype(str).str.upper().values:
+            # 기준정보에 해당 공정이 있는지 검증
+            if df_info is None or df_info.empty:
+                raise ValueError("기준정보 DB를 불러올 수 없습니다.")
+            
+            opers_in_cfg = set(df_info['OPER_ID'].astype(str).str.upper().unique())
+            if oper_id not in opers_in_cfg:
                 raise ValueError(f"기준정보(Config{'2' if is_cfg2 else '1'})에 등록되지 않은 공정({oper_id})입니다.")
 
             def update_progress(done, total, msg):
@@ -224,7 +224,7 @@ def monitor_build_db(request):
             df = svc.build_analysis_df(lake, df_info, oper_id, on_progress=update_progress, is_cfg2=is_cfg2)
             
             if df is None or df.empty:
-                cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': '조회된 데이터가 없습니다 (0행).'}, timeout=3600)
+                cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': '조회 결과가 없습니다 (0행).'}, timeout=3600)
                 return
 
             update_progress(9, 10, f'{len(df):,}행 저장 중...')
@@ -232,13 +232,12 @@ def monitor_build_db(request):
             cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': f'{len(df):,}행 적재 완료'}, timeout=3600)
         except Exception as e:
             traceback.print_exc()
-            cache.set(task_id, {'status': 'error', 'progress': 0, 'msg': f'에러 발생: {e}'}, timeout=3600)
-
+            cache.set(task_id, {'status': 'error', 'progress': 0, 'msg': f'에러: {e}'}, timeout=3600)
         finally:
             connections.close_all()
 
     threading.Thread(target=background_task, daemon=True).start()
-    return JsonResponse({'ok': True, 'task_id': task_id, 'note': f'[{oper_id}] 백그라운드 적재를 시작합니다.'})
+    return JsonResponse({'ok': True, 'task_id': task_id})
 
 @csrf_exempt
 def monitor_build_status(request):
