@@ -80,7 +80,6 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
     with _conn().cursor() as cur:
         cur.execute("SELECT to_regclass(%s) IS NOT NULL", [table])
         if not cur.fetchone()[0]:
-            # cfg2 테이블인지 확인
             table_cfg2 = f"{table}_cfg2"
             cur.execute("SELECT to_regclass(%s) IS NOT NULL", [table_cfg2])
             if cur.fetchone()[0]:
@@ -109,7 +108,6 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
         if lot_cd and 'LOT_CD' in names:
             where, wargs = '"LOT_CD" = %s', [lot_cd]
 
-        # ID는 소문자로 묶고 나머지는 대문자로 묶어서 쿼리 오류 방지
         sel = ", ".join('id' if c == 'ID' else f'"{c}"' for c in dict.fromkeys(keep))
         cur.execute(f'''
             SELECT {sel}, COALESCE({span_sql}, -1) AS __span
@@ -227,7 +225,7 @@ def feature_importance(oper_id, spans, lot_cd=None, span_a=0, top=20):
     df, num, cat = load_frame(oper_id, spans, lot_cd)
     y = (df['__span'] == span_a).astype(int)
     if y.sum() < 10 or (1 - y).sum() < 10:
-        return {'ok': False, 'error': f'표본이 부족합니다 (구간 {int(y.sum())}장 / 나머지 {int((1-y).sum())}장)'}
+        return {'ok': False, 'error': f'표본이 부족합니다 (구간 {int(y.sum())}장 / 나머지 {int((1-y).sum())}장 · 각각 10장 이상 필요)'}
 
     X = df[num].copy()
     for c in cat:
@@ -353,14 +351,11 @@ def anomaly_features(oper_id, spans, lot_cd=None, span_a=0, top=15):
     # 2. 범주형 데이터 (장비, 챔버 등): Lift(편중도) 계산
     for c in cat:
         for val in a[c].dropna().unique():
-            # 불량군에서의 해당 값 비율
             a_pct = (a[c] == val).mean()
-            # 정상군에서의 해당 값 비율
             b_pct = (b[c] == val).mean()
             
             if b_pct > 0:
                 lift = a_pct / b_pct
-                # 특정 챔버에 2배 이상 쏠렸고, 불량 웨이퍼가 2장 이상 겹칠 때
                 if lift > 2.0 and (a[c] == val).sum() >= 2:
                     items.append({
                         'feature': f"{c} = {val}", 
@@ -369,7 +364,6 @@ def anomaly_features(oper_id, spans, lot_cd=None, span_a=0, top=15):
                         'detail': f"구간 내 {a_pct*100:.1f}% 점유 vs 나머지 {b_pct*100:.1f}% (Lift: {lift:.1f}배)"
                     })
 
-    # 점수 기준으로 내림차순 정렬 (높은 편중도/거리 우선)
     items.sort(key=lambda x: x['score'], reverse=True)
     
     conf, note = _confidence(len(a), len(b))
