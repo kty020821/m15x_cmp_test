@@ -380,50 +380,49 @@ async function postJSON(url, payload) {
     }
 }
 
-async function startBuildDb(isCfg2) {
-    const srcVal = document.getElementById('src').value;
-    if (!srcVal) { 
-        alert("먼저 상단 데이터 드롭박스에서 공정을 선택하세요."); 
-        return; 
-    }
-    
-    // 접미사(_CFG2, adhoc_ 등) 제거하여 순수 공정 ID(예: 2300) 추출
-    const operId = srcVal.replace(/_(CFG2|cfg2)$/i, '').replace(/^adhoc_/i, '').trim().toUpperCase();
-    
-    if (!confirm(`[${operId}] 공정을 백그라운드에서 적재합니다 (Config${isCfg2 ? '2' : '1'}).\n계속하시겠습니까?`)) return;
+@csrf_exempt
+def load_run(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    b = _body(request)
 
-    const res = await postJSON(API.buildDb, { oper_id: operId, is_cfg2: isCfg2 });
-    if (!res.ok) { 
-        alert(`적재 시작 실패:\n${res.error}`); 
-        return; 
-    }
+    ids = [str(o).upper().strip() for o in (b.get('opers') or []) if str(o).strip()]
+    if not ids:
+        ids = [o['oper_id'] for o in _opers()]
+    bad = [i for i in ids if not _safe(i)]
+    if bad:
+        return _fail(f'공정 ID 형식 오류: {", ".join(bad[:3])}')
+    if not ids:
+        return _fail('등록된 공정이 없습니다. 기준정보를 먼저 등록하세요.')
 
-    const statusDiv = document.getElementById('build-status');
-    statusDiv.style.display = 'flex';
-    document.getElementById('build-msg').textContent = '적재 시작 중...';
-    document.getElementById('build-progress').value = 0;
-    
-    if (pollInterval) clearInterval(pollInterval);
-    
-    pollInterval = setInterval(async () => {
-        const statusRes = await postJSON(API.buildStatus, { task_id: res.task_id });
-        if (statusRes.ok && statusRes.state) {
-            const state = statusRes.state;
-            document.getElementById('build-progress').value = state.progress || 0;
-            document.getElementById('build-msg').textContent = state.msg || '적재 중...';
-            
-            if (state.status === 'done' || state.status === 'error') {
-                clearInterval(pollInterval);
-                if (state.status === 'done') {
-                    alert(`DB 구축 완료: ${state.msg}`);
-                    loadSources();
-                } else {
-                    alert(`DB 구축 실패:\n${state.msg}`);
-                }
-            }
-        }
-    }, 2500);
-}
+    days = b.get('days') or ls.DEFAULT_DAYS
+    try:
+        days = max(1, int(days))
+    except (TypeError, ValueError):
+        days = ls.DEFAULT_DAYS
+
+    is_cfg2 = bool(b.get('is_cfg2', False))  # ★ Config2 지원 추가
+
+    st = ls.status(ids)
+    busy = [{'oper_id': i, **(st.get(i, {}).get('running') or {})}
+            for i in ids if st.get(i, {}).get('running')]
+
+    date_from = str(b.get('date_from') or '').strip() or None
+    date_to = str(b.get('date_to') or '').strip() or None
+    if (date_from or date_to) and len(ids) > 1:
+        return _fail('기간을 직접 지정할 때는 공정을 하나만 선택하세요')
+
+    try:
+        # ★ is_cfg2 파라미터 전달
+        res = ls.run_async(ids, days=days, user=b.get('user', ''),
+                           date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)
+        if not res.get('ok'):
+            return _fail(res.get('error', '실행 실패'))
+        return JsonResponse({'ok': True, 'opers': res['opers'],
+                             'days': days, 'busy': busy,
+                             'date_from': date_from, 'date_to': date_to})
+    except Exception as e:
+        return _fail(f'적재 실행 실패: {e}', exc=e)
 
 async function loadSources() {
  const j = await postJSON(API.sources, {});
