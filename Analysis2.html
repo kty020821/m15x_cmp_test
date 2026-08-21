@@ -380,49 +380,71 @@ async function postJSON(url, payload) {
     }
 }
 
-@csrf_exempt
-def load_run(request):
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
-    b = _body(request)
+const API = {
+    sources: "{% url 'an2-sources' %}",
+    load: "{% url 'an2-load' %}",
+    chart: "{% url 'an2-chart' %}",
+    lots: "{% url 'an2-lots' %}",
+    ask: "{% url 'an2-ask' %}",
+    run: "{% url 'an2-run' %}",
+    llmInfo: "{% url 'an2-llm' %}",
+    // ★ 시스템 표준 적재 API 사용
+    loadRun: "{% url 'load-run' %}",
+    loadStatus: "{% url 'load-status' %}"
+};
 
-    ids = [str(o).upper().strip() for o in (b.get('opers') or []) if str(o).strip()]
-    if not ids:
-        ids = [o['oper_id'] for o in _opers()]
-    bad = [i for i in ids if not _safe(i)]
-    if bad:
-        return _fail(f'공정 ID 형식 오류: {", ".join(bad[:3])}')
-    if not ids:
-        return _fail('등록된 공정이 없습니다. 기준정보를 먼저 등록하세요.')
+async function startBuildDb(isCfg2) {
+    const srcVal = document.getElementById('src').value;
+    if (!srcVal) { 
+        alert("먼저 상단 데이터 드롭박스에서 공정을 선택하세요."); 
+        return; 
+    }
+    
+    // 접미사 제거하여 순수 공정 ID 추출
+    const operId = srcVal.replace(/_(CFG2|cfg2)$/i, '').replace(/^adhoc_/i, '').trim().toUpperCase();
+    const jobKey = isCfg2 ? `${operId}_CFG2` : operId;
+    
+    if (!confirm(`[${operId}] 공정을 백그라운드에서 적재합니다 (Config${isCfg2 ? '2' : '1'}).\n계속하시겠습니까?`)) return;
 
-    days = b.get('days') or ls.DEFAULT_DAYS
-    try:
-        days = max(1, int(days))
-    except (TypeError, ValueError):
-        days = ls.DEFAULT_DAYS
+    // 표준 load_run API 호출
+    const res = await postJSON(API.loadRun, { opers: [operId], is_cfg2: isCfg2, days: 45 });
+    if (!res.ok) { 
+        alert(`적재 시작 실패:\n${res.error || '알 수 없는 오류'}`); 
+        return; 
+    }
 
-    is_cfg2 = bool(b.get('is_cfg2', False))  # ★ Config2 지원 추가
-
-    st = ls.status(ids)
-    busy = [{'oper_id': i, **(st.get(i, {}).get('running') or {})}
-            for i in ids if st.get(i, {}).get('running')]
-
-    date_from = str(b.get('date_from') or '').strip() or None
-    date_to = str(b.get('date_to') or '').strip() or None
-    if (date_from or date_to) and len(ids) > 1:
-        return _fail('기간을 직접 지정할 때는 공정을 하나만 선택하세요')
-
-    try:
-        # ★ is_cfg2 파라미터 전달
-        res = ls.run_async(ids, days=days, user=b.get('user', ''),
-                           date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)
-        if not res.get('ok'):
-            return _fail(res.get('error', '실행 실패'))
-        return JsonResponse({'ok': True, 'opers': res['opers'],
-                             'days': days, 'busy': busy,
-                             'date_from': date_from, 'date_to': date_to})
-    except Exception as e:
-        return _fail(f'적재 실행 실패: {e}', exc=e)
+    const statusDiv = document.getElementById('build-status');
+    statusDiv.style.display = 'flex';
+    document.getElementById('build-msg').textContent = '적재 시작 중...';
+    document.getElementById('build-progress').value = 30;
+    
+    if (pollInterval) clearInterval(pollInterval);
+    
+    // load_status API로 상태 폴링
+    pollInterval = setInterval(async () => {
+        const stRes = await postJSON(API.loadStatus, {});
+        if (stRes.ok && stRes.opers) {
+            const row = stRes.opers.find(o => o.oper_id === operId);
+            if (row) {
+                if (row.running) {
+                    document.getElementById('build-progress').value = 60;
+                    document.getElementById('build-msg').textContent = `${row.running.message || '적재 진행 중...'} (${row.running.elapsed_min || 0}분 경과)`;
+                } else {
+                    clearInterval(pollInterval);
+                    document.getElementById('build-progress').value = 100;
+                    if (row.last_status === '완료') {
+                        document.getElementById('build-msg').textContent = '적재 완료';
+                        alert(`[${operId}] DB 적재가 완료되었습니다 (${(row.rows || 0).toLocaleString()}행).`);
+                        loadSources();
+                    } else {
+                        document.getElementById('build-msg').textContent = '적재 실패';
+                        alert(`[${operId}] 적재 실패: 상태를 확인하세요.`);
+                    }
+                }
+            }
+        }
+    }, 3000);
+}
 
 async function loadSources() {
  const j = await postJSON(API.sources, {});
