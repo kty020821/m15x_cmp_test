@@ -94,14 +94,63 @@ def clean_argv(argv):
 #   Lake 조회가 길어 다음 스케줄이 겹칠 수 있다.
 #   동시에 돌면 같은 테이블에 DELETE/INSERT 가 뒤엉킨다.
 # ══════════════════════════════════════════════════════════
-def acquire_lock():
+def _pid_alive(pid):
+    """
+    그 프로세스가 아직 살아 있나.
+
+    ★ 이게 없으면 비정상 종료로 남은 락에 6시간 동안 묶인다.
+      실제로 '이미 실행 중' 이라며 건너뛰는데 정작 아무것도 안 도는
+      상황이 나온다.
+    """
+    if not pid:
+        return False
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+
+    if os.name == 'nt':
+        # 윈도우 — tasklist 로 확인
+        try:
+            import subprocess
+            out = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                capture_output=True, text=True, timeout=10).stdout
+            return str(pid) in out
+        except Exception:
+            return True          # 확인 못 하면 살아 있다고 본다 (보수적)
+    else:
+        try:
+            os.kill(pid, 0)      # 신호 0 = 존재 확인만
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True          # 남의 프로세스지만 살아 있음
+        except Exception:
+            return True
+
+
+def acquire_lock(force=False):
     if LOCK_PATH.exists():
         age = time.time() - LOCK_PATH.stat().st_mtime
-        if age < LOCK_STALE_SEC:
-            pid = LOCK_PATH.read_text().strip()
-            logging.warning(f"이미 실행 중 (pid={pid}, {age/60:.0f}분 경과) → 이번 회차 건너뜀")
+        pid = LOCK_PATH.read_text().strip()
+
+        if force:
+            logging.warning(f"--force — 기존 락 무시 (pid={pid})")
+        elif not _pid_alive(pid):
+            # ★ 프로세스가 이미 죽었으면 락은 의미가 없다.
+            logging.warning(f"죽은 락 발견 (pid={pid}, {age/60:.0f}분 전) "
+                            f"→ 정리하고 진행합니다")
+        elif age < LOCK_STALE_SEC:
+            logging.warning(
+                f"이미 실행 중 (pid={pid}, {age/60:.0f}분 경과) → 이번 회차 건너뜀")
+            logging.warning(
+                f"  · 실제로 안 돌고 있다면: python run_analysis_load.py --force")
+            logging.warning(f"  · 또는 락 파일 삭제: {LOCK_PATH}")
             return False
-        logging.warning(f"오래된 락 발견 ({age/3600:.1f}시간) → 무시하고 진행")
+        else:
+            logging.warning(f"오래된 락 ({age/3600:.1f}시간) → 무시하고 진행")
 
     LOCK_PATH.write_text(str(os.getpid()))
     atexit.register(release_lock)
@@ -123,6 +172,8 @@ def main():
     ap.add_argument('--oper',    default=None,   help='특정 oper_id 만 처리')
     ap.add_argument('--days',    type=int, default=30, help='조회 기간(일)')
     ap.add_argument('--dry-run', action='store_true',  help='저장하지 않고 조회만')
+    ap.add_argument('--force',   action='store_true',
+                    help='남아 있는 락을 무시하고 실행')
 
     # ★ 걸러 낸 뒤 parse_known_args 로 받는다.
     #   그래도 모르는 인자가 남으면 무시하고 로그로만 알린다 —
@@ -143,7 +194,7 @@ def main():
     if unknown:
         logging.warning(f"모르는 인자 무시: {unknown}")
 
-    if not acquire_lock():
+    if not acquire_lock(force=args.force):
         return 0                      # 중복 실행은 실패가 아님
 
     # Django 초기화는 경로/락 설정 후에
