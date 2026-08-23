@@ -62,6 +62,89 @@ def _conn():
     return connections['analysis_db']
 
 
+def _span_case_local(spans, names, args):
+    """
+    이슈 구간 → SQL CASE. views_analysis2._span_case 의 사본.
+
+    ★ 규칙이 갈리면 차트에서 고른 구간과 분석 대상이 달라진다.
+      원본이 있으면 그쪽을 쓰고, 이건 없을 때만 쓰는 대비책이다.
+    """
+    parts = []
+    for i, sp in enumerate(spans or []):
+        c = _span_clause_local(sp, names, args)
+        if c:
+            parts.append(f'WHEN {c} THEN {i}')
+    if not parts:
+        return 'CAST(NULL AS INTEGER)'
+    return 'CASE ' + ' '.join(parts) + ' ELSE NULL END'
+
+
+def _span_clause_local(span, names, args):
+    """구간 하나 → 조건절 (기간 / 랏 / 웨이퍼)"""
+    mode = (span or {}).get('mode', 'range')
+
+    if mode == 'range':
+        d1, d2 = str(span.get('date_from') or ''), str(span.get('date_to') or '')
+        if not d1 or not d2:
+            return None
+        if d1 > d2:
+            d1, d2 = d2, d1
+        if len(d1) == 10:
+            d1 += ' 00:00:00'
+        if len(d2) == 10:
+            d2 += ' 23:59:59'
+        args += [d1, d2]
+        return '("DATE" >= %s AND "DATE" <= %s)'
+
+    if mode == 'lots':
+        vals = sorted({str(v).strip().upper()[:7]
+                       for v in (span.get('lot_ids') or []) if str(v).strip()})
+        if not vals or 'LOT_ID' not in names:
+            return None
+        args += vals
+        ph = ",".join(['%s'] * len(vals))
+        return f'(left(CAST("LOT_ID" AS VARCHAR), 7) IN ({ph}))'
+
+    if mode == 'wafers':
+        vals = []
+        for v in (span.get('wafers') or []):
+            t = str(v).strip().upper()
+            if not t:
+                continue
+            lot, _, wf = t.rpartition('.')
+            if not lot:
+                continue
+            vals.append(f'{lot[:7]}.{wf.zfill(2)}')
+        vals = sorted(set(vals))
+        if not vals or 'LOT_ID' not in names or 'WF_ID' not in names:
+            return None
+        args += vals
+        ph = ",".join(['%s'] * len(vals))
+        return (f"(left(CAST(\"LOT_ID\" AS VARCHAR), 7) || '.' || "
+                f"lpad(CAST(\"WF_ID\" AS VARCHAR), 2, '0') IN ({ph}))")
+
+    return None
+
+
+def _real_names(cur, table):
+    """
+    대문자 이름 → 실제 컬럼 이름.
+
+    ★ 비교는 대문자로 하지만 SQL 에는 실제 이름을 써야 한다.
+      테이블을 만들 때 id 만 따옴표 없이 써서 소문자로 저장됐고,
+      나머지는 "CU_THK_AVG" 처럼 따옴표라 대문자다.
+      그래서 "ID" 로 조회하면 column "ID" does not exist 가 난다.
+
+    ★ views_analysis2 에도 같은 함수가 있지만 여기 따로 둔다 —
+      한쪽 파일만 배포됐을 때 AttributeError 로 죽지 않게.
+    """
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = %s ORDER BY ordinal_position
+    """, [table])
+    return {c.upper(): c for (c,) in cur.fetchall()}
+
+
 def _table(oper_id):
     return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
 
@@ -80,7 +163,12 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
     각 행에 __span 열이 붙는다 — 0,1,2… 는 이슈 구간, -1 은 나머지.
     (views_analysis2 의 구간 판정과 같은 규칙을 쓴다)
     """
-    from . import views_analysis2 as v2
+    # 구간 판정은 차트와 같은 규칙을 쓰는 게 원칙이라 원본을 먼저 찾는다.
+    #   그 모듈이 없거나 예전 버전이어도 죽지 않게 감싼다.
+    try:
+        from . import views_analysis2 as v2
+    except Exception:
+        v2 = None
 
     table = _table(oper_id)
     with _conn().cursor() as cur:
@@ -98,7 +186,7 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
         # ★ SQL 에는 실제 컬럼 이름을 써야 한다.
         #   비교는 대문자로 하지만, 테이블에 소문자 id 로 들어 있는데
         #   "ID" 로 조회하면 column "ID" does not exist 가 난다.
-        real = v2._real_names(cur, table)
+        real = _real_names(cur, table)
 
         num = [c for c, d in cols if d in NUMERIC_TYPES and c not in META_COLS
                and not c.endswith(('_OFFSET', '_FORMULA'))][:max_cols]
@@ -110,7 +198,12 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
                 if c in names] + cat + num
 
         args = []
-        span_sql = v2._span_case(spans, names, args)
+        # ★ 구간 판정은 차트와 같은 규칙을 써야 한다 (다르면 화면에서 본 것과
+        #   분석 대상이 어긋난다). 다만 그 모듈이 예전 버전이면 함수가 없어
+        #   죽으므로, 없을 때는 여기 사본을 쓴다.
+        span_fn = (getattr(v2, '_span_case', None) if v2 else None) \
+                  or _span_case_local
+        span_sql = span_fn(spans, names, args)
         where, wargs = '1=1', []
         if lot_cd and 'LOT_CD' in names:
             where, wargs = f'"{real.get("LOT_CD", "LOT_CD")}" = %s', [lot_cd]
