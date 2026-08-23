@@ -472,9 +472,52 @@ def build_config_df(include_unused=False):
                 'RECIPE_ID': recipe or '', 'PARAM': prm or '',
                 'PARAM_TYPE': pt.resolve(prm, ptype),
             })
-    return pd.DataFrame(rows, columns=[
+    df = pd.DataFrame(rows, columns=[
         'FAB', 'LOT_CD', 'OPER_ID', 'OPER_DESC', 'EQ_MODEL', 'RECIPE_ID',
         'PARAM', 'PARAM_TYPE'])
+
+    # ★ v1(config_service)과 컬럼을 맞춘다.
+    #   적재 파이프라인(get_oper_cond)이 PRE_OPER_* 를 참조하므로
+    #   없으면 v2 로만 등록한 공정에서 KeyError 가 난다.
+    #   v2 는 사전공정을 '연계 공정' 으로 다루므로, 그중 첫 SRC 를
+    #   대표로 채워 기존 경로가 그대로 돌아가게 한다.
+    pre = _first_pre_oper()
+    df['PRE_OPER_ID'] = df['OPER_ID'].map(
+        lambda o: pre.get(o, ('', '', ''))[0])
+    df['PRE_OPER_DESC'] = df['OPER_ID'].map(
+        lambda o: pre.get(o, ('', '', ''))[1])
+    df['PRE_OPER_PARAM'] = df['OPER_ID'].map(
+        lambda o: pre.get(o, ('', '', ''))[2])
+    return df
+
+
+def _first_pre_oper():
+    """
+    공정별 대표 사전공정 — {oper_id: (link_id, alias, param)}
+
+    ★ v2 는 연계 공정을 여러 개 두므로 '사전공정' 이라는 단일 개념이 없다.
+      기존 파이프라인 호환을 위해 chamber 를 보는 첫 연계를 대표로 쓴다.
+      실제 연계 조회는 link_service 가 따로 하므로 여기 값은
+      기존 코드가 참조할 때만 쓰인다.
+    """
+    ensure_tables()
+    out = {}
+    try:
+        with _conn().cursor() as cur:
+            cur.execute(f'''
+                SELECT oper_id, link_id, alias, param
+                FROM {T_LINK}
+                WHERE COALESCE(use_yn,'Y') <> 'N'
+                ORDER BY oper_id, seq, id
+            ''')
+            for oid, link_id, alias, prm in cur.fetchall():
+                if oid in out:
+                    continue
+                out[oid] = (link_id or '', alias or '', prm or '')
+    except Exception as e:
+        print(f'[config2] 사전공정 대표값 조회 생략: '
+              f'{e.__class__.__name__}: {e}')
+    return out
 
 
 def all_columns(oper_id, scope=None):
