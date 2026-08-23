@@ -181,6 +181,17 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 .eqp-chip.hot { border-color: rgba(220,38,38,.5); color: var(--bad); }
 .empty { padding: 40px; text-align: center; color: var(--tx-muted);
   font-size: 13px; font-weight: 600; }
+.qt { width:100%; border-collapse:collapse; font-size:11px; }
+.qt th { color:var(--tx-muted); font-weight:800; text-align:left;
+  padding:4px 6px; border-bottom:1px solid var(--bd); white-space:nowrap; }
+.qt td { padding:5px 6px; border-bottom:1px solid rgba(128,128,128,.08);
+  color:var(--tx-1); }
+.qt .qm { color:var(--tx-2); font-size:10px; }
+.qs { font-size:10px; font-weight:800; border-radius:20px; padding:2px 8px; }
+.qs.run { color:#0f6e56; background:rgba(15,110,86,.13); }
+.qs.wait { color:#854f0b; background:rgba(133,79,11,.13); }
+.hint { font-size:11px; font-weight:600; color:var(--tx-muted);
+  line-height:1.6; }
 </style>
 {% endblock %}
 
@@ -229,7 +240,11 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
     <div style="padding:14px 16px;">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;
                   margin-bottom:12px;">
-        <label class="msg" style="font-weight:700;">기간
+        <label class="msg" style="font-weight:700;">
+          <input type="checkbox" id="load-inc" checked
+                 style="vertical-align:middle;">
+          증분 (마지막 적재일부터)</label>
+        <label class="msg" style="font-weight:700;">첫 적재 기간
           <select id="load-days" class="btn-clear" style="font-weight:700;">
             <option value="45" selected>45일 (기본)</option>
             <option value="30">30일</option>
@@ -242,6 +257,46 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
         <button class="btn-clear" onclick="selectAllOpers(false)">선택 해제</button>
         <button class="btn-clear" onclick="resetLoadLock()">멈춘 잠금 해제</button>
         <span class="msg" id="load-msg"></span>
+      </div>
+
+      <!-- 진행 상황 (누가 눌렀든, 어느 화면에서든 같은 내용) -->
+      <div style="border:1px solid var(--bd);border-radius:12px;
+                  padding:11px 13px;margin-bottom:12px;">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:7px;">
+          <b style="font-size:12px;color:var(--tx-1);">진행 상황</b>
+          <span class="msg" id="q-head" style="font-size:11px;"></span>
+          <button class="btn-clear" style="font-size:11px;margin-left:auto;"
+                  onclick="refreshQueue()">새로고침</button>
+        </div>
+        <div id="q-body"></div>
+        <div class="hint" style="margin-top:7px;">
+          적재는 서버에서 계속됩니다 — 이 페이지를 닫거나 다른 화면으로
+          옮겨도 멈추지 않고, 다른 사람도 같은 진행 상황을 봅니다.
+        </div>
+      </div>
+
+      <!-- 정기 예약 -->
+      <div style="border:1px solid var(--bd);border-radius:12px;
+                  padding:11px 13px;margin-bottom:12px;">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <b style="font-size:12px;color:var(--tx-1);">정기 적재</b>
+          <label class="msg" style="font-weight:700;">
+            <input type="checkbox" id="sc-on" style="vertical-align:middle;">
+            사용</label>
+          <label class="msg" style="font-weight:700;">매일
+            <input type="number" id="sc-hour" min="0" max="23" value="6"
+                   style="width:52px;" class="btn-clear">시
+            <input type="number" id="sc-min" min="0" max="59" value="0"
+                   style="width:52px;" class="btn-clear">분</label>
+          <label class="msg" style="font-weight:700;">
+            <input type="checkbox" id="sc-inc" checked
+                   style="vertical-align:middle;">증분</label>
+          <label class="msg" style="font-weight:700;">첫 적재
+            <input type="number" id="sc-days" min="1" max="365" value="45"
+                   style="width:60px;" class="btn-clear">일</label>
+          <button class="btn-clear" onclick="saveSchedule()">저장</button>
+        </div>
+        <div class="hint" id="sc-note" style="margin-top:6px;"></div>
       </div>
       <table class="mn">
         <thead><tr>
@@ -256,6 +311,8 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
       <div class="note" style="font-size:11px;color:var(--tx-muted);
            margin-top:10px;line-height:1.6;">
         공정 단위로 잠깁니다 — 같은 공정을 다른 사람이 적재 중이면 건너뜁니다.
+        증분은 마지막 적재일 3일 전부터 다시 받아 그 구간만 교체합니다 —
+        경계에 걸친 웨이퍼와 늦게 들어온 데이터를 놓치지 않기 위한 것입니다.
         여러 공정은 순차로 처리되어 메모리를 예측할 수 있습니다.
         창을 닫아도 계속 진행되며, 진행 상황은 이 표에서 확인하세요.
       </div>
@@ -300,6 +357,9 @@ const API_CLEAR   = "{% url 'monitor-clear' %}";
 const API_DIAG    = "{% url 'monitor-diag' %}";
 const API_LOAD_ST  = "{% url 'load-status' %}";
 const API_LOAD_RUN = "{% url 'load-run' %}";
+const API_LOAD_QUEUE = "{% url 'load-queue' %}";
+const API_LOAD_CANCEL = "{% url 'load-cancel' %}";
+const API_LOAD_SCHED = "{% url 'load-schedule' %}";
 const API_LOAD_RST = "{% url 'load-reset' %}";
 const URL_REPORT   = "{% url 'monitor-report' %}";
 const API_DETAIL  = "{% url 'monitor-detail' %}";
@@ -423,6 +483,113 @@ function openReport(download) {
 }
 
 /* ══════════════════════════════════════════════════
+   적재 큐 · 정기 예약
+
+   ★ 적재는 서버 워커가 처리한다. 요청한 사람이 페이지를 떠나도
+     계속 돌아가고, 다른 사람도 같은 진행 상황을 본다.
+   ★ 화면은 5초마다 상태만 물어본다. 브라우저를 닫아도 무관하다.
+   ══════════════════════════════════════════════════ */
+let qTimer = null;
+
+async function refreshQueue() {
+  clearTimeout(qTimer);
+  const j = await postJSON(API_LOAD_QUEUE, {});
+  const el = document.getElementById('q-body');
+  if (!el) return;
+
+  if (!j || !j.ok) {
+    el.innerHTML = '<div class="hint">큐 상태를 읽지 못했습니다.</div>';
+    qTimer = setTimeout(refreshQueue, 15000);
+    return;
+  }
+
+  const busy = (j.running || 0) + (j.waiting || 0);
+  const head = document.getElementById('q-head');
+  if (head) {
+    head.textContent = busy
+      ? `실행 ${j.running} · 대기 ${j.waiting}`
+      : '진행 중인 적재 없음';
+    head.style.color = busy ? 'var(--accent)' : 'var(--tx-muted)';
+  }
+
+  if (!busy) {
+    el.innerHTML = '<div class="hint">진행 중인 적재가 없습니다.</div>';
+  } else {
+    el.innerHTML = `
+      <table class="qt">
+        <thead><tr>
+          <th>공정</th><th>상태</th><th>진행</th><th>요청</th><th></th>
+        </tr></thead>
+        <tbody>${(j.items || []).map(it => `
+          <tr>
+            <td><b>${esc(it.oper_id)}</b></td>
+            <td><span class="qs ${it.status === '실행중' ? 'run' : 'wait'}">
+                ${esc(it.status)}</span></td>
+            <td class="qm">${esc(it.message)}</td>
+            <td class="qm">${esc(it.by || '')}
+              ${it.started_at ? '· ' + esc(it.started_at.slice(11)) : ''}</td>
+            <td>${it.status === '대기'
+              ? `<button class="btn-clear" style="font-size:10px;"
+                   onclick="cancelJob('${esc(it.oper_id)}')">취소</button>` : ''}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+      ${j.waiting > 1 ? `<button class="btn-clear" style="font-size:11px;
+          margin-top:6px;" onclick="cancelJob(null, true)">대기 전부 취소</button>` : ''}`;
+  }
+
+  // 진행 중이면 자주, 아니면 뜸하게
+  qTimer = setTimeout(refreshQueue, busy ? 4000 : 15000);
+}
+
+async function cancelJob(operId, all) {
+  if (!confirm(all ? '대기 중인 적재를 전부 취소할까요?'
+                   : `${operId} 적재를 취소할까요?`)) return;
+  const j = await postJSON(API_LOAD_CANCEL,
+                           all ? {all: true} : {oper_id: operId});
+  if (j && j.ok) loadMsg(`취소됨 — ${(j.canceled || []).join(', ')}`);
+  refreshQueue();
+}
+
+/* ── 정기 예약 ─────────────────────────────── */
+async function loadSchedule() {
+  const j = await postJSON(API_LOAD_SCHED, {});
+  if (!j || !j.ok) return;
+  const s = j.schedule || {};
+  const set = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) { if (el.type === 'checkbox') el.checked = v; else el.value = v; }
+  };
+  set('sc-on', s.enabled === 'Y');
+  set('sc-hour', s.hour);
+  set('sc-min', s.minute);
+  set('sc-inc', s.incremental === 'Y');
+  set('sc-days', s.days);
+
+  const note = document.getElementById('sc-note');
+  if (note) {
+    note.textContent = s.enabled === 'Y'
+      ? `매일 ${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')} 실행`
+        + (s.last_run_at ? ` · 마지막 ${s.last_run_at}` : ' · 아직 실행 전')
+      : '꺼짐 — 켜면 매일 정해진 시각에 전 공정을 적재합니다';
+  }
+}
+
+async function saveSchedule() {
+  const v = id => {
+    const el = document.getElementById(id);
+    return el ? (el.type === 'checkbox' ? el.checked : el.value) : null;
+  };
+  const j = await postJSON(API_LOAD_SCHED, {
+    save: true,
+    enabled: v('sc-on'), hour: v('sc-hour'), minute: v('sc-min'),
+    incremental: v('sc-inc'), days: v('sc-days'),
+  });
+  if (j && j.ok) { loadMsg('예약을 저장했습니다'); loadSchedule(); }
+  else { loadMsg((j && j.error) || '예약 저장 실패', true); }
+}
+
+
+/* ══════════════════════════════════════════════════
    DB 만들기 (적재)
 
    ★ 실행 전에 공정별 상태를 먼저 보여준다 —
@@ -442,6 +609,8 @@ function loadMsg(t, err) {
 async function openLoad() {
   document.getElementById('loadbox').style.display = 'block';
   await refreshLoad();
+  refreshQueue();       // 진행 상황 (다른 사람이 돌린 것도 보인다)
+  loadSchedule();       // 정기 예약 설정
   document.getElementById('loadbox').scrollIntoView({behavior:'smooth',
                                                     block:'nearest'});
 }
@@ -512,11 +681,17 @@ async function runLoad() {
     ? `\n\n최근 1시간 안에 적재된 공정이 ${recent.length}개 있습니다:\n` +
       recent.map(o => `  ${o.oper_id} (${o.last_at}, ${o.last_by || '-'})`).join('\n')
     : '';
-  if (!confirm(`공정 ${ids.length}개를 최근 ${days}일로 적재할까요?${warn}`)) return;
+  const spanTxt = document.getElementById('load-inc').checked
+    ? '마지막 적재일부터 지금까지 (처음이면 최근 ' + days + '일)'
+    : '최근 ' + days + '일';
+  if (!confirm(`공정 ${ids.length}개를 ${spanTxt} 로 적재할까요?${warn}`)) return;
 
-  const j = await postJSON(API_LOAD_RUN, {opers: ids, days: days});
+  const inc = document.getElementById('load-inc').checked;
+  const j = await postJSON(API_LOAD_RUN,
+                           {opers: ids, days: days, incremental: inc});
   if (!j.ok) { loadMsg(j.error || '실행 실패', true); return; }
-  loadMsg(`적재 시작 — 공정 ${j.opers.length}개 · 최근 ${j.days}일`
+  loadMsg(`적재 시작 — 공정 ${j.opers.length}개 · `
+    + (j.incremental ? '증분' : `최근 ${j.days}일`)
     + ((j.busy || []).length ? ` (이미 적재 중 ${j.busy.length}개는 건너뜀)` : ''));
   loadSel = new Set();
   refreshLoad();
