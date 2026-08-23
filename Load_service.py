@@ -28,6 +28,7 @@ equipment/load_service.py
 
 import json
 import re
+import time
 import traceback
 from datetime import datetime, timedelta
 
@@ -35,17 +36,31 @@ from django.db import connections
 
 T_JOB = 'cmp_load_job'
 
+# 기본 적재 기간 — 처음 적재하는 공정에만 적용된다
 DEFAULT_DAYS = 45
+
+# 증분 적재 시 겹쳐서 다시 가져올 기간 (일)
+#   ★ 마지막 적재 시각 정각부터 받으면 경계에 걸친 웨이퍼를 놓친다.
+#     Lake 는 뒤늦게 들어오는 데이터도 있어 며칠 겹쳐 받는 편이 안전하다.
+#     겹친 구간은 저장할 때 그만큼만 지우고 다시 넣으므로 중복이 안 생긴다.
+OVERLAP_DAYS = 3
+
+# '실행중' 인데 이 시간이 지나면 멈춘 것으로 본다
 STALE_MINUTES = 120
+
+# 한 번에 돌릴 수 있는 공정 수 — 메모리 보호
+#   ★ 동시에 여러 공정을 적재하면 DataFrame 이 그만큼 함께 메모리에 올라온다.
+#     순차로 돌리면 최대 사용량이 '가장 큰 공정 하나' 로 유지된다.
 MAX_CONCURRENT = 1
 
 
 def _conn():
     return connections['analysis_db']
 
-def _an_table(oper_id, is_cfg2=False):
-    base = f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
-    return f"{base}_cfg2" if is_cfg2 else base
+
+def _an_table(oper_id):
+    return f"cmp_analysis_{re.sub(r'[^0-9A-Za-z_]', '_', str(oper_id)).lower()}"
+
 
 def ensure_tables():
     with _conn().cursor() as cur:
@@ -65,15 +80,27 @@ def ensure_tables():
               finished_at  TIMESTAMP
             )
         ''')
-        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{T_JOB}_oper ON {T_JOB} (oper_id, status)')
+        cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{T_JOB}_oper '
+                    f'ON {T_JOB} (oper_id, status)')
+        # ★ 같은 공정에 '실행중' 행은 하나만 존재할 수 있다.
+        #   두 요청이 동시에 들어와도 DB 가 두 번째를 거절한다.
         cur.execute(f'''
             CREATE UNIQUE INDEX IF NOT EXISTS idx_{T_JOB}_running
             ON {T_JOB} (oper_id) WHERE status = '실행중'
         ''')
 
+
+# ══════════════════════════════════════════════════════════
+# 상태 조회 — 화면이 버튼을 누르기 전에 본다
+# ══════════════════════════════════════════════════════════
 def status(oper_ids=None):
     """
-    공정별 적재 상태. Config1과 Config2 상태를 모두 반환합니다.
+    공정별 적재 상태.
+      running     지금 실행 중인지 (+ 누가 언제 시작했는지)
+      last_at     마지막으로 적재를 끝낸 시각
+      last_by     그 적재를 요청한 사람
+      data_max    적재 테이블의 최신 데이터 날짜
+      rows        마지막 적재 행수
     """
     ensure_tables()
     out = {}
@@ -84,22 +111,23 @@ def status(oper_ids=None):
             SELECT oper_id, requested_by, started_at, message, days
             FROM {T_JOB} WHERE status = '실행중'
         ''')
-        for job_oper_id, by, started, msg, days in cur.fetchall():
-            out.setdefault(job_oper_id, {})['running'] = {
+        for oper_id, by, started, msg, days in cur.fetchall():
+            out.setdefault(oper_id, {})['running'] = {
                 'by': by or '', 'started_at': str(started)[:19] if started else '',
                 'message': msg or '', 'days': days,
-                'elapsed_min': int((datetime.now() - started).total_seconds() // 60) if started else 0,
+                'elapsed_min': int((datetime.now() - started).total_seconds() // 60)
+                               if started else 0,
             }
 
-        # 마지막으로 끝난 것
+        # 마지막으로 끝난 것 (공정별 1건)
         cur.execute(f'''
             SELECT DISTINCT ON (oper_id)
                    oper_id, finished_at, requested_by, rows, status, days
             FROM {T_JOB} WHERE status IN ('완료', '실패')
             ORDER BY oper_id, finished_at DESC
         ''')
-        for job_oper_id, fin, by, rows, st, days in cur.fetchall():
-            d = out.setdefault(job_oper_id, {})
+        for oper_id, fin, by, rows, st, days in cur.fetchall():
+            d = out.setdefault(oper_id, {})
             d['last_at'] = str(fin)[:19] if fin else ''
             d['last_by'] = by or ''
             d['last_rows'] = rows or 0
@@ -107,90 +135,169 @@ def status(oper_ids=None):
             d['last_days'] = days
 
         # 적재 테이블의 실제 최신 데이터 날짜
-        cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE %s", ['cmp_analysis_%'])
+        cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE %s",
+                    ['cmp_analysis_%'])
         tables = {r[0] for r in cur.fetchall()}
 
         ids = oper_ids or list(out.keys())
         for oper_id in ids:
-            for is_cfg2 in [False, True]:
-                job_key = f"{oper_id}_CFG2" if is_cfg2 else oper_id
-                t = _an_table(oper_id, is_cfg2=is_cfg2)
-                d = out.setdefault(job_key, {})
-                if t not in tables:
-                    d['data_max'] = None
-                    d['loaded'] = False
-                    continue
-                d['loaded'] = True
-                try:
-                    cur.execute(f'SELECT MAX("DATE"), COUNT(*) FROM {t}')
-                    mx, n = cur.fetchone()
-                    d['data_max'] = str(mx)[:19] if mx else None
-                    d['rows'] = n or 0
-                except Exception:
-                    d['data_max'] = None
+            t = _an_table(oper_id)
+            d = out.setdefault(oper_id, {})
+            if t not in tables:
+                d['data_max'] = None
+                d['loaded'] = False
+                continue
+            d['loaded'] = True
+            try:
+                cur.execute(f'SELECT MAX("DATE"), COUNT(*) FROM {t}')
+                mx, n = cur.fetchone()
+                d['data_max'] = str(mx)[:19] if mx else None
+                d['rows'] = n or 0
+            except Exception:
+                d['data_max'] = None
 
     return out
 
+
 def any_running():
+    """지금 돌고 있는 적재 목록 — 화면 경고용"""
     ensure_tables()
     with _conn().cursor() as cur:
         cur.execute(f'''
             SELECT oper_id, requested_by, started_at, message
             FROM {T_JOB} WHERE status = '실행중' ORDER BY started_at
         ''')
-        return [{'oper_id': r[0], 'by': r[1] or '', 'started_at': str(r[2])[:19] if r[2] else '', 'message': r[3] or ''} for r in cur.fetchall()]
+        return [{'oper_id': r[0], 'by': r[1] or '',
+                 'started_at': str(r[2])[:19] if r[2] else '',
+                 'message': r[3] or ''} for r in cur.fetchall()]
 
 
-def claim(job_oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None):
+# ══════════════════════════════════════════════════════════
+# 요청 / 잠금
+# ══════════════════════════════════════════════════════════
+def claim(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None):
+    """
+    공정 하나를 '실행중' 으로 잡는다.
+
+    ★ INSERT 가 유니크 인덱스에 걸리면 이미 누군가 돌고 있는 것이다.
+      조회 후 삽입하면 그 사이에 끼어들 수 있으므로 DB 제약으로 막는다.
+
+    반환: (성공여부, 정보) — 실패하면 정보에 누가 돌리는 중인지 담긴다
+    """
     ensure_tables()
     now = datetime.now()
     try:
         with _conn().cursor() as cur:
             cur.execute(f'''
-                INSERT INTO {T_JOB} (oper_id, status, days, date_from, date_to, message, requested_by, requested_at, started_at)
-                VALUES (%s, '실행중', %s, %s, %s, %s, %s, %s, %s) RETURNING id
-            ''', [job_oper_id, int(days or DEFAULT_DAYS), date_from, date_to, '적재 준비 중', str(user)[:100], now, now])
+                INSERT INTO {T_JOB} (oper_id, status, days, date_from, date_to,
+                       message, requested_by, requested_at, started_at)
+                VALUES (%s, '실행중', %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            ''', [oper_id, int(days or DEFAULT_DAYS), date_from, date_to,
+                  '적재 준비 중', str(user)[:100], now, now])
             return True, {'job_id': cur.fetchone()[0]}
     except Exception as e:
+        # 유니크 위반 — 이미 실행 중
         cur_info = None
         try:
             with _conn().cursor() as cur:
-                cur.execute(f"SELECT requested_by, started_at, message FROM {T_JOB} WHERE oper_id = %s AND status = '실행중'", [job_oper_id])
+                cur.execute(f'''
+                    SELECT requested_by, started_at, message FROM {T_JOB}
+                    WHERE oper_id = %s AND status = '실행중'
+                ''', [oper_id])
                 r = cur.fetchone()
-                if r: cur_info = {'by': r[0] or '(알 수 없음)', 'started_at': str(r[1])[:19] if r[1] else '', 'message': r[2] or ''}
-        except Exception: pass
-        if cur_info: return False, {'error': f'{job_oper_id} 는 이미 적재 중입니다', 'running': cur_info}
+                if r:
+                    cur_info = {'by': r[0] or '(알 수 없음)',
+                                'started_at': str(r[1])[:19] if r[1] else '',
+                                'message': r[2] or ''}
+        except Exception:
+            pass
+        if cur_info:
+            return False, {'error': f'{oper_id} 는 이미 적재 중입니다',
+                           'running': cur_info}
         return False, {'error': f'적재 요청 실패: {e}'}
+
 
 def finish(job_id, status, rows=0, message=''):
     with _conn().cursor() as cur:
         cur.execute(f'''
-            UPDATE {T_JOB} SET status=%s, rows=%s, message=%s, finished_at=%s WHERE id=%s
-        ''', [status, int(rows or 0), str(message)[:2000], datetime.now(), int(job_id)])
+            UPDATE {T_JOB} SET status=%s, rows=%s, message=%s, finished_at=%s
+            WHERE id=%s
+        ''', [status, int(rows or 0), str(message)[:2000], datetime.now(),
+              int(job_id)])
+
 
 def progress(job_id, message):
     with _conn().cursor() as cur:
-        cur.execute(f'UPDATE {T_JOB} SET message=%s WHERE id=%s', [str(message)[:2000], int(job_id)])
+        cur.execute(f'UPDATE {T_JOB} SET message=%s WHERE id=%s',
+                    [str(message)[:2000], int(job_id)])
+
 
 def reset_stale(minutes=STALE_MINUTES):
+    """워커가 죽어 '실행중' 으로 굳은 것을 풀어 준다"""
     ensure_tables()
     cutoff = datetime.now() - timedelta(minutes=minutes)
     with _conn().cursor() as cur:
         cur.execute(f'''
-            UPDATE {T_JOB} SET status='실패', finished_at=%s, message='실행이 중단되어 잠금을 해제했습니다 (재실행 가능)'
-            WHERE status='실행중' AND COALESCE(started_at, requested_at) < %s RETURNING oper_id
+            UPDATE {T_JOB} SET status='실패', finished_at=%s,
+                   message='실행이 중단되어 잠금을 해제했습니다 (재실행 가능)'
+            WHERE status='실행중' AND COALESCE(started_at, requested_at) < %s
+            RETURNING oper_id
         ''', [datetime.now(), cutoff])
         ids = [r[0] for r in cur.fetchall()]
-    if ids: print(f'[load] 멈춘 적재 {len(ids)}건 잠금 해제: {ids}')
+    if ids:
+        print(f'[load] 멈춘 적재 {len(ids)}건 잠금 해제: {ids}')
     return ids
+
 
 # ══════════════════════════════════════════════════════════
 # 실행
 # ══════════════════════════════════════════════════════════
-def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None, lake=None, is_cfg2=False):
-    job_oper_id = f"{oper_id}_CFG2" if is_cfg2 else oper_id
-    ok, info = claim(job_oper_id, days=days, user=user, date_from=date_from, date_to=date_to)
-    if not ok: return {'ok': False, **info}
+def incremental_range(oper_id, overlap_days=OVERLAP_DAYS):
+    """
+    증분 적재 기간을 정한다.
+
+      적재 이력이 있으면  마지막 데이터 날짜 - overlap_days ~ 지금
+      없으면              None (처음이므로 기본 기간을 쓴다)
+
+    ★ 매일 45일치를 다시 받는 건 낭비다. 하루치가 새로 쌓였으면
+      그 하루(+겹침)만 받으면 된다.
+    ★ 겹쳐 받는 이유는 두 가지다 — 경계에 걸친 웨이퍼를 놓치지 않기 위해,
+      그리고 Lake 에 늦게 들어온 데이터를 반영하기 위해.
+    """
+    t = _an_table(oper_id)
+    try:
+        with _conn().cursor() as cur:
+            cur.execute("SELECT to_regclass(%s) IS NOT NULL", [t])
+            if not cur.fetchone()[0]:
+                return None                  # 테이블 없음 = 첫 적재
+            cur.execute(f'SELECT MAX("DATE") FROM {t}')
+            mx = cur.fetchone()[0]
+    except Exception as e:
+        print(f'[load] {oper_id} 마지막 적재일 조회 실패 — 기본 기간 사용: '
+              f'{e.__class__.__name__}: {e}')
+        return None
+
+    if not mx:
+        return None                          # 테이블은 있는데 비어 있음
+
+    start = mx - timedelta(days=int(overlap_days))
+    return (start.strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d'),
+            str(mx)[:19])
+
+
+def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
+             lake=None, incremental=False):
+    """
+    공정 하나 적재. 정기 배치와 같은 파이프라인을 탄다.
+
+    ★ 잠금을 잡고 시작하며, 어떤 경로로 끝나든 반드시 푼다(finally).
+      풀지 못하면 그 공정은 영영 적재할 수 없게 된다.
+    """
+    ok, info = claim(oper_id, days=days, user=user,
+                     date_from=date_from, date_to=date_to)
+    if not ok:
+        return {'ok': False, **info}
 
     job_id = info['job_id']
     try:
@@ -201,18 +308,52 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None, 
             lake = svc.get_lake()
 
         progress(job_id, '기준정보 조회 중')
-        df_info = svc.get_config(is_cfg2=is_cfg2)
+        df_info = svc.get_config()
 
-        span = (f'{date_from} ~ {date_to}' if (date_from and date_to) else f'최근 {days}일')
+        # ── 증분 적재 ────────────────────────────────────
+        #   마지막 데이터 날짜부터 지금까지만 받는다.
+        #   처음 적재하는 공정이면 기본 기간(45일)을 그대로 쓴다.
+        last_at = None
+        if incremental and not date_from and not date_to:
+            rng = incremental_range(oper_id)
+            if rng:
+                date_from, date_to, last_at = rng
+                print(f'[load] {oper_id} 증분 — 마지막 데이터 {last_at} · '
+                      f'{date_from} ~ {date_to} 조회')
+            else:
+                print(f'[load] {oper_id} 첫 적재 — 최근 {days}일 조회')
+
+        span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
+                else f'최근 {days}일')
         progress(job_id, f'{oper_id} 조회 중 ({span})')
-        df = svc.build_analysis_df(lake, df_info, oper_id, days=int(days), date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)
+        df = svc.build_analysis_df(lake, df_info, oper_id, days=int(days),
+                                   date_from=date_from, date_to=date_to)
 
         if df is None or df.empty:
             finish(job_id, '완료', 0, '조회 결과가 없습니다')
             return {'ok': True, 'rows': 0}
 
+        # ── 연계 공정 (기준정보 v2 에 등록된 것만) ──────
+        #   ★ 정기 적재는 '모니터링·둘다' 만 붙인다.
+        #     분석 전용까지 매일 붙이면 적재가 무거워진다.
+        #   ★ 등록이 없으면 그대로 통과한다 — 연계 없이도
+        #     기존 병합 테이블은 완성돼야 한다.
+        try:
+            from . import link_service as lks
+            progress(job_id, '연계 공정 조회 중')
+            df = lks.merge_links(df, lake, oper_id, svc.run_query,
+                                 scope='mon', days=int(days),
+                                 date_from=date_from, date_to=date_to)
+        except Exception as e:
+            traceback.print_exc()
+            print(f'[load] {oper_id} 연계 공정 병합 실패 — 본공정만 저장합니다: '
+                  f'{e.__class__.__name__}: {e}')
+
         progress(job_id, f'{len(df):,}행 저장 중')
-        svc.save_analysis_df(df, oper_id, is_cfg2=is_cfg2)
+        # ★ 증분으로 받았으면 그 구간만 교체한다.
+        #   LOT_CD 전체를 지우면 조회하지 않은 이전 기간이 사라진다.
+        svc.save_analysis_df(df, oper_id,
+                             date_from=date_from if last_at else None)
 
         finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})')
         return {'ok': True, 'rows': len(df)}
@@ -222,39 +363,440 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None, 
         finish(job_id, '실패', 0, f'{e.__class__.__name__}: {e}')
         return {'ok': False, 'error': str(e)}
 
-def run_many(oper_ids, days=DEFAULT_DAYS, user='', date_from=None, date_to=None, is_cfg2=False):
+
+def run_many(oper_ids, days=DEFAULT_DAYS, user='',
+             date_from=None, date_to=None, incremental=False):
+    """
+    여러 공정을 순차로 적재한다.
+
+    ★ 순차인 이유: 동시에 돌리면 DataFrame 이 공정 수만큼 함께 메모리에
+      올라온다. 순차면 최대 사용량이 '가장 큰 공정 하나' 로 유지되어
+      메모리를 예측할 수 있다.
+    ★ 이미 다른 사람이 잡고 있는 공정은 건너뛴다 — 전체가 멈추지 않게.
+    """
     from . import analysis_service as svc
+
     results, skipped = [], []
     lake = None
     for oper_id in oper_ids:
-        job_oper_id = f"{oper_id}_CFG2" if is_cfg2 else oper_id
         with _conn().cursor() as cur:
-            cur.execute(f"SELECT requested_by FROM {T_JOB} WHERE oper_id=%s AND status='실행중'", [job_oper_id])
+            cur.execute(f"SELECT requested_by FROM {T_JOB} "
+                        f"WHERE oper_id=%s AND status='실행중'", [oper_id])
             r = cur.fetchone()
         if r:
-            skipped.append({'oper_id': job_oper_id, 'by': r[0] or ''})
+            skipped.append({'oper_id': oper_id, 'by': r[0] or ''})
             continue
 
-        if lake is None: lake = svc.get_lake()
-        print(f'[load] {job_oper_id} 적재 시작 (최근 {days}일)')
-        results.append({'oper_id': oper_id, **run_oper(oper_id, days=days, user=user, lake=lake, date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)})
+        if lake is None:
+            lake = svc.get_lake()
+        print(f'[load] {oper_id} 적재 시작 (최근 {days}일)')
+        results.append({'oper_id': oper_id,
+                        **run_oper(oper_id, days=days, user=user, lake=lake,
+                                   date_from=date_from, date_to=date_to,
+                                   incremental=incremental)})
 
     return {'done': len(results), 'results': results, 'skipped': skipped}
 
-def run_async(oper_ids, days=DEFAULT_DAYS, user='', date_from=None, date_to=None, is_cfg2=False):
-    import threading
-    from django.db import connections as _conns
 
+# ══════════════════════════════════════════════════════════
+# 작업 큐 + 백그라운드 워커
+#
+#   ★ 예전엔 요청마다 스레드를 띄웠다. 그러면 gunicorn 워커가
+#     재활용되거나 타임아웃될 때 그 스레드가 같이 죽어, 사용자가
+#     페이지를 옮기면 적재가 멈춘 것처럼 보였다.
+#
+#   ★ 지금은 '대기' 상태로 DB 에 넣기만 하고 즉시 응답한다.
+#     실행은 워커 루프가 맡으므로 요청과 수명이 분리된다.
+#     진행 상황도 DB 에 있으니 다른 사람이 다른 화면에서도 볼 수 있다.
+#
+#   ★ 워커는 프로세스당 하나만 돈다. gunicorn 워커가 여러 개여도
+#     '실행중' 유니크 인덱스가 같은 공정의 중복 실행을 막는다.
+# ══════════════════════════════════════════════════════════
+import threading
+
+_worker_lock = threading.Lock()
+_worker_thread = None
+
+POLL_SEC = 5                 # 큐 확인 주기 (초)
+T_SCHED = 'cmp_load_schedule'
+
+
+def enqueue(oper_ids, days=DEFAULT_DAYS, user='', date_from=None,
+            date_to=None, incremental=False, source='web'):
+    """
+    적재 요청을 큐에 넣는다. 실행은 워커가 한다.
+
+    ★ 이미 대기·실행 중인 공정은 다시 넣지 않는다 —
+      버튼을 두 번 눌러도 두 번 돌지 않게.
+    """
+    ensure_tables()
     ids = [str(o).upper().strip() for o in (oper_ids or []) if str(o).strip()]
-    if not ids: return {'ok': False, 'error': '적재할 공정이 없습니다'}
+    if not ids:
+        return {'ok': False, 'error': '적재할 공정이 없습니다'}
 
-    def _worker():
-        try: run_many(ids, days=days, user=user, date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)
-        except Exception: traceback.print_exc()
-        finally: _conns.close_all()
+    now = datetime.now()
+    tag = '대기 중 · 증분' if incremental else f'대기 중 ({source})'
+    queued, skipped = [], []
 
-    threading.Thread(target=_worker, name='load-db', daemon=True).start()
-    return {'ok': True, 'opers': ids, 'days': days}
+    with _conn().cursor() as cur:
+        cur.execute(
+            "SELECT oper_id, status FROM " + T_JOB +
+            " WHERE status IN ('대기', '실행중')")
+        busy = {r[0]: r[1] for r in cur.fetchall()}
+
+        for oper_id in ids:
+            if oper_id in busy:
+                skipped.append({'oper_id': oper_id, 'status': busy[oper_id]})
+                continue
+            cur.execute(
+                "INSERT INTO " + T_JOB +
+                " (oper_id, status, days, date_from, date_to, message,"
+                "  requested_by, requested_at)"
+                " VALUES (%s, '대기', %s, %s, %s, %s, %s, %s)",
+                [oper_id, int(days or DEFAULT_DAYS), date_from, date_to,
+                 tag, str(user)[:100], now])
+            queued.append(oper_id)
+
+    ensure_worker()
+    return {'ok': True, 'queued': queued, 'skipped': skipped,
+            'days': days, 'incremental': bool(incremental)}
+
+
+def ensure_worker():
+    """
+    워커가 없으면 띄운다.
+
+    ★ 프로세스가 재시작되면 워커도 사라지므로, 요청이 들어올 때마다
+      확인해 되살린다. 대기 중인 작업이 남아 있으면 이어서 처리한다.
+    """
+    global _worker_thread
+    with _worker_lock:
+        if _worker_thread and _worker_thread.is_alive():
+            return False
+        _worker_thread = threading.Thread(target=_worker_loop,
+                                          name='cmp-load-worker', daemon=True)
+        _worker_thread.start()
+        print('[load] 적재 워커 시작')
+        return True
+
+
+def worker_alive():
+    return bool(_worker_thread and _worker_thread.is_alive())
+
+
+def _worker_loop():
+    """
+    큐를 확인하며 하나씩 처리한다.
+
+    ★ 순차 처리다. 동시에 여러 공정을 돌리면 DataFrame 이 그만큼
+      함께 메모리에 올라온다. 순차면 최대 사용량이
+      '가장 큰 공정 하나' 로 유지되어 예측할 수 있다.
+    ★ 어떤 예외가 나도 루프는 죽지 않는다 — 워커가 죽으면
+      큐에 쌓인 나머지가 전부 멈춘다.
+    """
+    from django.db import connections as _conns
+    idle = 0
+
+    while True:
+        try:
+            reset_stale()                 # 굳은 잠금 정리
+            due = _due_schedule()         # 예약된 정기 적재
+            if due:
+                _enqueue_schedule(due)
+
+            job = _take_next()
+            if not job:
+                idle += 1
+                time.sleep(POLL_SEC)
+                continue
+
+            idle = 0
+            _run_job(job)
+
+        except Exception:
+            traceback.print_exc()
+            time.sleep(POLL_SEC)
+        finally:
+            # 스레드에서는 Django 가 커넥션을 정리해 주지 않는다
+            try:
+                if idle == 0 or idle % 12 == 0:
+                    _conns.close_all()
+            except Exception:
+                pass
+
+
+def _take_next():
+    """대기 중인 것 하나를 집는다 (오래 기다린 것부터)"""
+    with _conn().cursor() as cur:
+        cur.execute(
+            "SELECT id, oper_id, days, date_from, date_to, requested_by,"
+            " message FROM " + T_JOB +
+            " WHERE status = '대기' ORDER BY requested_at, id LIMIT 1")
+        r = cur.fetchone()
+    if not r:
+        return None
+    return {'id': r[0], 'oper_id': r[1], 'days': r[2],
+            'date_from': r[3], 'date_to': r[4], 'user': r[5],
+            'incremental': '증분' in (r[6] or '')}
+
+
+def _run_job(job):
+    """
+    대기 → 실행중 → 완료/실패.
+
+    ★ 같은 공정이 이미 실행 중이면 유니크 인덱스가 막는다.
+      그 경우 이유를 남기고 이 작업은 취소한다.
+    """
+    oper_id = job['oper_id']
+
+    try:
+        with _conn().cursor() as cur:
+            cur.execute(
+                "UPDATE " + T_JOB +
+                " SET status='실행중', started_at=%s, message='적재 준비 중'"
+                " WHERE id=%s AND status='대기'",
+                [datetime.now(), job['id']])
+            if not cur.rowcount:
+                return                  # 다른 워커가 먼저 집었다
+    except Exception as e:
+        finish(job['id'], '실패', 0, f'같은 공정이 이미 적재 중입니다: {e}')
+        return
+
+    span = '증분' if job['incremental'] else f"최근 {job['days']}일"
+    print(f'[load] {oper_id} 적재 시작 ({span})')
+
+    try:
+        _do_load(job)
+    except Exception as e:
+        traceback.print_exc()
+        finish(job['id'], '실패', 0, f'{e.__class__.__name__}: {e}')
+
+
+def _do_load(job):
+    """실제 적재 — run_oper 과 같은 흐름이되 큐 항목을 쓴다"""
+    from . import analysis_service as svc
+
+    job_id, oper_id = job['id'], job['oper_id']
+    days = int(job['days'] or DEFAULT_DAYS)
+    date_from, date_to = job['date_from'], job['date_to']
+
+    progress(job_id, 'Lake 연결 중')
+    lake = svc.get_lake()
+
+    progress(job_id, '기준정보 조회 중')
+    df_info = svc.get_config()
+
+    last_at = None
+    if job['incremental'] and not date_from and not date_to:
+        rng = incremental_range(oper_id)
+        if rng:
+            date_from, date_to, last_at = rng
+
+    span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
+            else f'최근 {days}일')
+    progress(job_id, f'{oper_id} 조회 중 ({span})')
+
+    df = svc.build_analysis_df(lake, df_info, oper_id, days=days,
+                               date_from=date_from, date_to=date_to)
+
+    if df is None or df.empty:
+        finish(job_id, '완료', 0, f'조회 결과가 없습니다 ({span})')
+        return
+
+    # 연계 공정 (기준정보 v2) — 실패해도 본공정은 저장한다
+    try:
+        from . import link_service as lks
+        progress(job_id, '연계 공정 조회 중')
+        df = lks.merge_links(df, lake, oper_id, svc.run_query,
+                             scope='mon', days=days,
+                             date_from=date_from, date_to=date_to)
+    except Exception as e:
+        traceback.print_exc()
+        print(f'[load] {oper_id} 연계 병합 실패 — 본공정만 저장: {e}')
+
+    progress(job_id, f'{len(df):,}행 저장 중')
+    svc.save_analysis_df(df, oper_id,
+                         date_from=date_from if last_at else None)
+    finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})')
+
+
+def run_async(oper_ids, days=DEFAULT_DAYS, user='',
+              date_from=None, date_to=None, incremental=False):
+    """예전 이름 — 이제 큐에 넣는다"""
+    res = enqueue(oper_ids, days=days, user=user, date_from=date_from,
+                  date_to=date_to, incremental=incremental)
+    if res.get('ok'):
+        res['opers'] = res.get('queued', [])
+    return res
+
+
+def queue_status():
+    """큐 상태 — 어느 화면에서든 진행 상황을 볼 수 있게 한다"""
+    ensure_tables()
+    with _conn().cursor() as cur:
+        cur.execute(
+            "SELECT status, COUNT(*) FROM " + T_JOB +
+            " WHERE status IN ('대기', '실행중') GROUP BY status")
+        cnt = dict(cur.fetchall())
+
+        cur.execute(
+            "SELECT oper_id, status, message, requested_by, started_at,"
+            " requested_at FROM " + T_JOB +
+            " WHERE status IN ('대기', '실행중')"
+            " ORDER BY CASE status WHEN '실행중' THEN 0 ELSE 1 END,"
+            " requested_at")
+        items = [{'oper_id': r[0], 'status': r[1], 'message': r[2] or '',
+                  'by': r[3] or '',
+                  'started_at': str(r[4])[:19] if r[4] else '',
+                  'requested_at': str(r[5])[:19] if r[5] else ''}
+                 for r in cur.fetchall()]
+
+    return {'waiting': cnt.get('대기', 0), 'running': cnt.get('실행중', 0),
+            'items': items, 'worker': worker_alive()}
+
+
+def cancel(oper_id=None, all_waiting=False):
+    """대기 중인 작업을 취소한다 (실행 중인 것은 멈출 수 없다)"""
+    ensure_tables()
+    with _conn().cursor() as cur:
+        if all_waiting:
+            cur.execute(
+                "UPDATE " + T_JOB +
+                " SET status='실패', finished_at=%s,"
+                " message='사용자가 취소했습니다'"
+                " WHERE status='대기' RETURNING oper_id", [datetime.now()])
+        else:
+            cur.execute(
+                "UPDATE " + T_JOB +
+                " SET status='실패', finished_at=%s,"
+                " message='사용자가 취소했습니다'"
+                " WHERE status='대기' AND oper_id=%s RETURNING oper_id",
+                [datetime.now(), str(oper_id).upper()])
+        return [r[0] for r in cur.fetchall()]
+
+
+# ══════════════════════════════════════════════════════════
+# 정기 적재 예약
+#
+#   ★ 웹에서 켜고 끄는 하루 1회 예약이다. 워커가 큐를 확인하는
+#     김에 시각도 함께 보므로 별도 스케줄러가 필요 없다.
+#   ★ 사내 스케줄러(run_analysis_load.py)와 병행해도 된다 —
+#     같은 공정이 겹치면 큐가 중복을 막는다.
+# ══════════════════════════════════════════════════════════
+def ensure_sched_table():
+    with _conn().cursor() as cur:
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS " + T_SCHED + " ("
+            "  id BIGSERIAL PRIMARY KEY,"
+            "  name        VARCHAR(100),"
+            "  enabled     VARCHAR(1) DEFAULT 'N',"
+            "  hour        INTEGER DEFAULT 6,"
+            "  minute      INTEGER DEFAULT 0,"
+            "  incremental VARCHAR(1) DEFAULT 'Y',"
+            "  days        INTEGER DEFAULT 45,"
+            "  last_run_at TIMESTAMP,"
+            "  updated_by  VARCHAR(100),"
+            "  updated_at  TIMESTAMP DEFAULT NOW())")
+
+
+def get_schedule():
+    """예약 설정 — 없으면 기본값(꺼짐)을 만들어 돌려준다"""
+    ensure_sched_table()
+    with _conn().cursor() as cur:
+        cur.execute(
+            "SELECT id, name, enabled, hour, minute, incremental, days,"
+            " last_run_at FROM " + T_SCHED + " ORDER BY id LIMIT 1")
+        r = cur.fetchone()
+        if not r:
+            cur.execute(
+                "INSERT INTO " + T_SCHED + " (name, enabled)"
+                " VALUES ('전체 공정 정기 적재', 'N') RETURNING id")
+            return {'id': cur.fetchone()[0], 'name': '전체 공정 정기 적재',
+                    'enabled': 'N', 'hour': 6, 'minute': 0,
+                    'incremental': 'Y', 'days': 45, 'last_run_at': None}
+    return {'id': r[0], 'name': r[1] or '', 'enabled': r[2] or 'N',
+            'hour': r[3], 'minute': r[4], 'incremental': r[5] or 'Y',
+            'days': r[6], 'last_run_at': str(r[7])[:19] if r[7] else None}
+
+
+def _yn(v, default='N'):
+    return 'Y' if str(v).upper() in ('Y', 'TRUE', '1', 'ON') else default
+
+
+def save_schedule(d, user=''):
+    ensure_sched_table()
+    cur_s = get_schedule()
+    with _conn().cursor() as cur:
+        cur.execute(
+            "UPDATE " + T_SCHED +
+            " SET enabled=%s, hour=%s, minute=%s, incremental=%s, days=%s,"
+            " updated_by=%s, updated_at=NOW() WHERE id=%s",
+            [_yn(d.get('enabled')),
+             max(0, min(23, int(d.get('hour', 6) or 0))),
+             max(0, min(59, int(d.get('minute', 0) or 0))),
+             _yn(d.get('incremental', 'Y'), 'Y'),
+             max(1, int(d.get('days', 45) or 45)),
+             str(user)[:100], cur_s['id']])
+    ensure_worker()
+    return get_schedule()
+
+
+def _due_schedule():
+    """
+    지금 돌려야 할 예약이 있나.
+
+    ★ 오늘 이미 돌았으면 건너뛴다. 워커가 몇 초마다 확인하므로
+      그 검사가 없으면 예약 시각 1분 내내 큐에 넣게 된다.
+    """
+    try:
+        s = get_schedule()
+    except Exception:
+        return None
+    if s['enabled'] != 'Y':
+        return None
+
+    now = datetime.now()
+    if now.hour != s['hour'] or now.minute != s['minute']:
+        return None
+    if s.get('last_run_at') and \
+            str(s['last_run_at'])[:10] == now.strftime('%Y-%m-%d'):
+        return None
+    return s
+
+
+def _sched_opers():
+    """예약 적재 대상 — v1·v2 기준정보를 합친다"""
+    out = []
+    for mod in ('config_service', 'config2_service'):
+        try:
+            m = __import__(f'{__package__}.{mod}', fromlist=[mod])
+            for o in m.list_opers():
+                if str(o.get('use_yn') or 'Y').upper() == 'N':
+                    continue
+                if o['oper_id'] not in out:
+                    out.append(o['oper_id'])
+        except Exception as e:
+            print(f'[load] {mod} 공정 목록 조회 생략: '
+                  f'{e.__class__.__name__}: {e}')
+    return out
+
+
+def _enqueue_schedule(s):
+    """예약된 전 공정 적재를 큐에 넣는다"""
+    opers = _sched_opers()
+    if not opers:
+        print('[load] 정기 적재 — 대상 공정이 없습니다')
+        return
+
+    res = enqueue(opers, days=s['days'], user='schedule',
+                  incremental=(s['incremental'] == 'Y'), source='정기')
+    print(f"[load] 정기 적재 시작 — 대상 {len(opers)}개 중 "
+          f"{len(res.get('queued', []))}개 큐 등록")
+
+    with _conn().cursor() as cur:
+        cur.execute("UPDATE " + T_SCHED + " SET last_run_at=%s WHERE id=%s",
+                    [datetime.now(), s['id']])
+
 
 def history(limit=50):
     ensure_tables()
