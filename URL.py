@@ -82,6 +82,9 @@ urlpatterns = [
     path('api/load/run/',      vl.load_run,      name='load-run'),
     path('api/load/reset/',    vl.load_reset,    name='load-reset'),
     path('api/load/history/',  vl.load_history,  name='load-history'),
+    path('api/load/queue/',    vl.load_queue,    name='load-queue'),
+    path('api/load/cancel/',   vl.load_cancel,   name='load-cancel'),
+    path('api/load/schedule/', vl.load_schedule, name='load-schedule'),
 
     # Inline Monitoring (신규)
     path('monitor/',             vm.monitor_page,    name='monitor'),
@@ -92,8 +95,4 @@ urlpatterns = [
     path('api/monitor/diag/',    vm.monitor_diag,    name='monitor-diag'),
     path('monitor/report/',      vm.monitor_report,  name='monitor-report'),
     path('api/monitor/detail/',  vm.monitor_detail,  name='monitor-detail'),
-    
-    # ★ 추가: DB 백그라운드 구축 및 상태 조회 API
-    path('api/monitor/build_db/', vm.monitor_build_db, name='monitor-build-db'),
-    path('api/monitor/build_status/', vm.monitor_build_status, name='monitor-build-status'),
 ]
