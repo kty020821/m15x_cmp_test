@@ -88,11 +88,23 @@ def load_status(request):
 
 @csrf_exempt
 def load_run(request):
+    """
+    적재 실행 (백그라운드).
+
+      opers        공정 목록. 비우면 등록된 전 공정
+      days         최근 며칠 (첫 적재에만 적용, 기본 45)
+      incremental  마지막 적재일부터 지금까지만 (매일 돌리는 배치용)
+      date_from/date_to  기간을 직접 지정할 때
+
+    ★ 요청 안에서 끝내지 않는다 — 공정 하나에 몇 분씩 걸린다.
+      스레드로 띄우고 화면이 status 를 폴링한다.
+    """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST only'}, status=405)
     b = _body(request)
 
-    ids = [str(o).upper().strip() for o in (b.get('opers') or []) if str(o).strip()]
+    ids = [str(o).upper().strip() for o in (b.get('opers') or [])
+           if str(o).strip()]
     if not ids:
         ids = [o['oper_id'] for o in _opers()]
     bad = [i for i in ids if not _safe(i)]
@@ -107,25 +119,31 @@ def load_run(request):
     except (TypeError, ValueError):
         days = ls.DEFAULT_DAYS
 
-    is_cfg2 = bool(b.get('is_cfg2', False))  # ★ Config2 지원 추가
-
+    # 이미 돌고 있는 공정은 미리 알려 준다 (실행은 건너뛴다)
     st = ls.status(ids)
     busy = [{'oper_id': i, **(st.get(i, {}).get('running') or {})}
             for i in ids if st.get(i, {}).get('running')]
 
+    # 기간 직접 지정은 공정 하나일 때만 의미가 있다
+    #   (여러 공정을 같은 기간으로 돌릴 일은 드물고, 실수로 전 공정을
+    #    긴 기간으로 돌리면 메모리·시간이 크게 든다)
     date_from = str(b.get('date_from') or '').strip() or None
-    date_to = str(b.get('date_to') or '').strip() or None
+    date_to   = str(b.get('date_to') or '').strip() or None
     if (date_from or date_to) and len(ids) > 1:
         return _fail('기간을 직접 지정할 때는 공정을 하나만 선택하세요')
 
+    # 증분 — 마지막 적재일부터만. 기간을 직접 지정하면 그쪽이 우선한다.
+    incremental = bool(b.get('incremental')) and not (date_from or date_to)
+
     try:
-        # ★ is_cfg2 파라미터 전달
         res = ls.run_async(ids, days=days, user=b.get('user', ''),
-                           date_from=date_from, date_to=date_to, is_cfg2=is_cfg2)
+                           date_from=date_from, date_to=date_to,
+                           incremental=incremental)
         if not res.get('ok'):
             return _fail(res.get('error', '실행 실패'))
         return JsonResponse({'ok': True, 'opers': res['opers'],
                              'days': days, 'busy': busy,
+                             'incremental': incremental,
                              'date_from': date_from, 'date_to': date_to})
     except Exception as e:
         return _fail(f'적재 실행 실패: {e}', exc=e)
@@ -148,3 +166,55 @@ def load_history(request):
         return JsonResponse({'ok': True, 'jobs': ls.history()})
     except Exception as e:
         return _fail(f'이력 조회 실패: {e}', {'jobs': []}, exc=e)
+
+
+@csrf_exempt
+def load_queue(request):
+    """
+    적재 큐 상태 — 어느 화면에서든 진행 상황을 볼 수 있다.
+
+    ★ 적재는 요청과 수명이 분리된 워커가 처리하므로,
+      요청한 사람이 페이지를 떠나도 계속 돌아간다.
+    """
+    try:
+        return JsonResponse({'ok': True, **ls.queue_status()})
+    except Exception as e:
+        return _fail(f'큐 조회 실패: {e}', {'items': []}, exc=e)
+
+
+@csrf_exempt
+def load_cancel(request):
+    """대기 중인 작업 취소 (실행 중인 것은 멈출 수 없다)"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    b = _body(request)
+    try:
+        done = ls.cancel(oper_id=b.get('oper_id'),
+                         all_waiting=bool(b.get('all')))
+        return JsonResponse({'ok': True, 'canceled': done})
+    except Exception as e:
+        return _fail(f'취소 실패: {e}', exc=e)
+
+
+@csrf_exempt
+def load_schedule(request):
+    """
+    정기 적재 예약 조회·저장.
+
+    ★ 하루 1회다. 켜 두면 워커가 시각을 확인해 전 공정을 큐에 넣는다.
+      사내 스케줄러와 병행해도 큐가 중복을 막는다.
+    """
+    if request.method != 'POST':
+        try:
+            return JsonResponse({'ok': True, 'schedule': ls.get_schedule()})
+        except Exception as e:
+            return _fail(f'예약 조회 실패: {e}', exc=e)
+
+    b = _body(request)
+    try:
+        if b.get('save'):
+            s = ls.save_schedule(b, user=b.get('user', ''))
+            return JsonResponse({'ok': True, 'schedule': s})
+        return JsonResponse({'ok': True, 'schedule': ls.get_schedule()})
+    except Exception as e:
+        return _fail(f'예약 저장 실패: {e}', exc=e)
