@@ -92,11 +92,28 @@ def _exists(cur, t):
 
 
 def _cols(cur, table):
+    """
+    컬럼 목록. 비교하기 쉽게 대문자로 바꿔 돌려준다.
+
+    ★ 하지만 SQL 에 쓸 때는 원래 이름이어야 한다 —
+      PostgreSQL 은 따옴표 안 이름을 그대로 찾으므로
+      실제가 소문자 id 인데 "ID" 로 쓰면 없다고 한다.
+      원래 이름이 필요하면 _real_name() 을 쓸 것.
+    """
     cur.execute("""
         SELECT column_name, data_type FROM information_schema.columns
         WHERE table_name = %s ORDER BY ordinal_position
     """, [table])
     return [(c.upper(), d.lower()) for c, d in cur.fetchall()]
+
+
+def _real_names(cur, table):
+    """대문자 이름 → 실제 컬럼 이름 (SQL 에 쓸 때 필요)"""
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = %s ORDER BY ordinal_position
+    """, [table])
+    return {c.upper(): c for (c,) in cur.fetchall()}
 
 
 def analysis2_page(request):
@@ -412,10 +429,12 @@ def an2_chart(request):
             if lot_cd and 'LOT_CD' in names:
                 where, wargs = '"LOT_CD" = %s', [lot_cd]
 
-            # ★ ID 컬럼이 없는 테이블이 있다.
-            #   차트 간 선택 연동에 점 식별자가 필요하므로,
-            #   없으면 행 번호를 만들어 쓴다.
-            idsel = ('"ID"' if 'ID' in names
+            # ★ 식별자 컬럼은 실제 이름 그대로 써야 한다.
+            #   테이블에 소문자 id 로 들어 있는데 "ID" 로 쓰면
+            #   column "ID" does not exist 가 난다.
+            #   아예 없는 테이블도 있어 그때는 행 번호를 만든다.
+            real = _real_names(cur, table)
+            idsel = (f'"{real["ID"]}"' if 'ID' in real
                      else 'ROW_NUMBER() OVER (ORDER BY "DATE")')
 
             xsel = '"DATE"' if is_date_x else f'"{x_col}"::double precision'
