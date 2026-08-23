@@ -74,17 +74,35 @@ SYSTEM_PROMPT = """\
   · EQP_ID, EQP_CH_ID, RECIPE_ID, PRE_EQP_ID, PRE_EQP_CH  본공정 설비 정보
   · REWORK_N  1보다 크면 재작업된 웨이퍼입니다
 
-[도구 사용]
-· 먼저 compare_groups 로 후보를 좁히고, feature_importance 로 순위를 보고,
-  상위 변수에 대해 interaction 을 확인하는 순서를 권합니다.
-· 장비·챔버 차이가 의심되면 distribution 을, 언제부터 달라졌는지는
-  timeline 을 씁니다.
+[도구 사용 — 이슈 웨이퍼 수에 따라 다르게]
+
+★ 반도체 공정의 이상은 대개 산발적입니다. 30일치에서 몇 장만 튀는 일이
+  흔하고, 그 몇 장이 분석 대상입니다. 표본이 적다고 분석을 포기하지 마세요.
+  적은 표본에 맞는 도구가 따로 있습니다.
+
+· 이슈 웨이퍼가 적을 때 (대략 30장 미만) — 이 순서로 쓰세요
+    ① common_traits    그 몇 장이 공유하는 조건 (같은 챔버? 시간대?)
+    ② wafer_fingerprint 한 장씩 어느 파라미터에서 벗어났나
+    ③ rule_search       조건 조합에서 이상률이 튀는 지점
+  이 셋은 평균 비교가 아니라 '몰림' 과 '개별 이탈' 을 보므로
+  표본이 적어도 유효합니다. 5장이 전부 같은 챔버면 그건 강한 신호입니다.
+
+· 이슈 웨이퍼가 많을 때 (대략 30장 이상)
+    ① compare_groups → ② feature_importance → ③ interaction
+
+· 장비·챔버 차이는 distribution, 언제부터 달라졌는지는 timeline.
 · 한 번에 필요한 도구만 부르고, 결과를 본 뒤 다음을 정하세요.
+· compare_groups 나 feature_importance 가 '표본이 부족하다' 고 하면
+  실패로 보지 말고 common_traits / wafer_fingerprint 로 바꿔 부르세요.
 
 [답변 규칙]
 · 도구 결과에 없는 수치는 절대 말하지 마세요. 숫자를 지어내면 안 됩니다.
-· 표본이 적거나(confidence 낮음) 모델 성능이 낮으면(model_quality 낮음)
-  그 사실을 먼저 알리고, 단정하지 말고 '참고 수준' 으로 표현하세요.
+· 표본이 적다는 이유만으로 '분석할 수 없다' 고 하지 마세요.
+  소표본 도구(common_traits·wafer_fingerprint·rule_search)의 결과는
+  장수가 적어도 유효합니다. 그 도구들이 낸 lift·p·q 를 근거로 말하세요.
+· 다만 소표본에서는 '가능성' 의 수준으로 표현하고, 확인 방법을 함께
+  제안하세요 (예: 해당 챔버의 다음 랏을 지켜보기).
+· 모델 성능이 낮으면(confidence 낮음, AUC 낮음) 그 사실을 먼저 알리세요.
 · significant 가 False 인 항목은 '통계적으로 확인되지 않았다' 고 하세요.
 · 상관은 인과가 아닙니다. '원인' 이라고 단정하지 말고
   '가능성이 높다', '함께 움직인다' 처럼 쓰세요.
@@ -150,12 +168,19 @@ def config_info():
 
 
 def _post(messages, tools=None):
+    """
+    OpenAI 호환 chat/completions 호출.
+
+    ★ requests 는 사내망에서 프록시 설정이 걸릴 수 있어
+      urllib 로 직접 부른다 (표준 라이브러리라 의존이 없다).
+    """
     import urllib.request
     import urllib.error
 
     c = _cfg()
     if not c['base_url']:
-        raise RuntimeError('LLM 주소가 없습니다 — settings.py 의 LLM_URL 을 확인하세요')
+        raise RuntimeError('LLM 주소가 없습니다 — settings.py 의 LLM_URL 을 '
+                           '확인하세요')
 
     body = {'model': c['model'], 'messages': messages, 'temperature': 0.2}
     if tools:
@@ -163,21 +188,14 @@ def _post(messages, tools=None):
         body['tool_choice'] = 'auto'
 
     headers = {'Content-Type': 'application/json'}
+    # 사내 게이트웨이는 키 없이 열려 있는 경우도 있어 조건부로 넣는다
     if c['api_key']:
         headers['Authorization'] = f"Bearer {c['api_key']}"
 
-    # ★ URL 조립 보정: base_url에 /v1이 없으면 붙여서 표준 /v1/chat/completions 로 전송
-    base = c['base_url'].rstrip('/')
-    if not base.endswith('/v1'):
-        endpoint = f"{base}/v1/chat/completions"
-    else:
-        endpoint = f"{base}/chat/completions"
-
     req = urllib.request.Request(
-        endpoint,
+        f"{c['base_url']}/chat/completions",
         data=json.dumps(body).encode('utf-8'),
-        headers=headers, method='POST'
-    )
+        headers=headers, method='POST')
 
     try:
         with urllib.request.urlopen(req, timeout=c['timeout']) as r:
@@ -367,6 +385,44 @@ def summarize_evidence(evidence):
                     out.append(f"     {lv.get('level')}: 평균 {lv.get('mean')} "
                                f"({lv.get('n')}장)")
 
+        elif tool == 'common_traits':
+            out.append(f"■ 공통 조건 — 이상 {r.get('n_wafer', 0)}장 / "
+                       f"전체 {r.get('n_total', 0)}장 · "
+                       f"유의 {r.get('n_significant', 0)}건")
+            if r.get('note'):
+                out.append(f"   {r['note']}")
+            for it in (r.get('items') or [])[:6]:
+                mark = '유의' if it.get('significant') else '참고'
+                out.append(f"   [{mark}] {it.get('key')}={it.get('level')}  "
+                           f"{it.get('k')}/{it.get('n')}장 "
+                           f"(전체 비중 {it.get('base_ratio')}) "
+                           f"lift {it.get('lift')}배 · q={it.get('q')}")
+
+        elif tool == 'wafer_fingerprint':
+            out.append(f"■ 웨이퍼 지문 — {r.get('n_wafer', 0)}장 "
+                       f"(기준 {r.get('n_base', 0)}장)")
+            if r.get('note'):
+                out.append(f"   {r['note']}")
+            for it in (r.get('shared') or [])[:5]:
+                out.append(f"   공통: {it.get('param')} — "
+                           f"{it.get('n_wafer')}장에서 {it.get('direction')} "
+                           f"(평균 z {it.get('avg_z')})")
+            for w in (r.get('wafers') or [])[:3]:
+                tops = ', '.join(f"{h.get('param')} z={h.get('z')}"
+                                 for h in (w.get('top') or [])[:3])
+                out.append(f"   {w.get('wafer')}: {tops or '뚜렷한 이탈 없음'}")
+
+        elif tool == 'rule_search':
+            out.append(f"■ 조건 조합 — 이상 {r.get('n_wafer', 0)}장 · "
+                       f"기본 이상률 {r.get('base_rate')}")
+            if r.get('note'):
+                out.append(f"   {r['note']}")
+            for it in (r.get('items') or [])[:5]:
+                mark = '유의' if it.get('significant') else '참고'
+                out.append(f"   [{mark}] {it.get('rule')}  "
+                           f"이상률 {it.get('rate')} (lift {it.get('lift')}배) · "
+                           f"{it.get('k')}/{it.get('K')}장")
+
         elif tool == 'timeline':
             out.append(f"■ 시간 추이 — {r.get('param')} · {r.get('n', 0)}점")
 
@@ -381,12 +437,22 @@ def run_without_llm(oper_id, spans, lot_cd=None, span_a=0):
     LLM 없이 기본 분석 3종을 돌린다.
     설정이 없을 때도 화면에서 쓸 수 있게 하는 경로다.
     """
+    # ★ 이슈 웨이퍼가 적으면 소표본 도구를 쓴다.
+    #   평균 비교·트리 모델은 몇 장짜리 구간에서 '표본 부족' 만 내놓는다.
+    n_in = _span_size(oper_id, spans, lot_cd, span_a)
+    small = (n_in is not None and n_in < 30)
+
+    if small:
+        plan = (('common_traits', {'span_a': span_a}),
+                ('wafer_fingerprint', {'span_a': span_a}),
+                ('rule_search', {'span_a': span_a}))
+    else:
+        plan = (('compare_groups', {'span_a': span_a}),
+                ('feature_importance', {'span_a': span_a}),
+                ('interaction', {'span_a': span_a}))
+
     evidence = []
-    for name, args in (
-        ('compare_groups', {'span_a': span_a}),
-        ('feature_importance', {'span_a': span_a}),
-        ('interaction', {'span_a': span_a}),
-    ):
+    for name, args in plan:
         a = dict(args)
         a['oper_id'] = oper_id
         if lot_cd:
@@ -398,10 +464,29 @@ def run_without_llm(oper_id, spans, lot_cd=None, span_a=0):
             out = {'ok': False, 'error': f'{e.__class__.__name__}: {e}'}
         evidence.append({'tool': name, 'args': a, 'result': out})
 
+    head = ''
+    if small:
+        head = (f'이슈 웨이퍼가 {n_in}장으로 적어 소표본 분석을 했습니다 — '
+                f'평균 비교 대신 "공통 조건" 과 "개별 이탈" 을 봅니다.\n\n')
+
     return {
         'ok': True,
-        'answer': summarize_evidence(evidence),
+        'answer': head + summarize_evidence(evidence),
         'evidence': evidence,
         'llm': False,
+        'n_in': n_in,
         'note': 'LLM 설정이 없어 계산 결과만 표시합니다.',
     }
+
+
+def _span_size(oper_id, spans, lot_cd=None, span_a=0):
+    """
+    지정 구간의 웨이퍼 수 — 어떤 분석을 쓸지 정하는 데 쓴다.
+    실패하면 None 을 돌려 기존 경로를 타게 한다.
+    """
+    try:
+        df, _num, _cat = ins.load_frame(oper_id, spans, lot_cd)
+        return int((df['__span'] == span_a).sum())
+    except Exception as e:
+        print(f'[llm] 구간 크기 확인 실패: {e.__class__.__name__}: {e}')
+        return None
