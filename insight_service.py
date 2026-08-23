@@ -95,24 +95,30 @@ def load_frame(oper_id, spans, lot_cd=None, max_cols=400):
         cols = [(c.upper(), d.lower()) for c, d in cur.fetchall()]
         names = {c for c, _ in cols}
 
+        # ★ SQL 에는 실제 컬럼 이름을 써야 한다.
+        #   비교는 대문자로 하지만, 테이블에 소문자 id 로 들어 있는데
+        #   "ID" 로 조회하면 column "ID" does not exist 가 난다.
+        real = v2._real_names(cur, table)
+
         num = [c for c, d in cols if d in NUMERIC_TYPES and c not in META_COLS
                and not c.endswith(('_OFFSET', '_FORMULA'))][:max_cols]
         cat = [c for c, _ in cols
                if c in names and (c in CAT_HINTS or c.endswith(('_EQP', '_CH')))]
-        keep = ['ID', 'DATE'] + \
-               [c for c in ('LOT_ID', 'WF_ID', 'LOT_CD') if c in names] + \
-               cat + num
+
+        # ID 가 없는 테이블도 있으므로 있을 때만 넣는다
+        keep = [c for c in ('ID', 'DATE', 'LOT_ID', 'WF_ID', 'LOT_CD')
+                if c in names] + cat + num
 
         args = []
         span_sql = v2._span_case(spans, names, args)
         where, wargs = '1=1', []
         if lot_cd and 'LOT_CD' in names:
-            where, wargs = '"LOT_CD" = %s', [lot_cd]
+            where, wargs = f'"{real.get("LOT_CD", "LOT_CD")}" = %s', [lot_cd]
 
-        sel = ", ".join(f'"{c}"' for c in dict.fromkeys(keep))
+        sel = ", ".join(f'"{real.get(c, c)}"' for c in dict.fromkeys(keep))
         cur.execute(f'''
             SELECT {sel}, COALESCE({span_sql}, -1) AS __span
-            FROM {table} WHERE {where} ORDER BY "DATE"
+            FROM {table} WHERE {where} ORDER BY "{real.get('DATE', 'DATE')}"
         ''', args + wargs)
         rows = cur.fetchall()
         colnames = [d[0].upper() for d in cur.description]
