@@ -257,10 +257,18 @@ def fetch_link(lake, link, lot_cds, mt_s, mt_e, run_query, on_progress=None):
             print('─' * 58)
         try:
             d = run_query(lake, query)
-        except Exception:
-            print(f"\n[{kind}:{link['alias']}] 조회 실패 — 아래 쿼리를 확인하세요")
+        except Exception as e:
+            # ★ LOT_CD 하나가 실패해도 나머지는 계속 조회한다
+            print(f"\n[{kind}:{link['alias']}] {lot_cd} 조회 실패 — "
+                  f"아래 쿼리를 확인하세요")
             print(query.strip())
-            raise
+            try:
+                from . import analysis_service as _svc
+                _svc.note_fail(f"{kind}:{link['alias']}", lot_cd, e)
+            except Exception:
+                pass
+            done += 1
+            continue
 
         if d is not None and not d.empty:
             dfs.append(d)
