@@ -59,6 +59,20 @@ def an2_llm(request):
 
 
 @csrf_exempt
+def an2_llm_check(request):
+    """
+    LLM 연결 진단 — 배포 환경에서 안 될 때 어디가 막혔는지 본다.
+
+    ★ 설정 / DNS / 네트워크 / API 를 순서대로 확인해
+      '설정이 없다' 와 '나갈 수 없다' 를 구분해 준다.
+    """
+    try:
+        return JsonResponse({'ok': True, **llm.check_connection()})
+    except Exception as e:
+        return _fail(f'진단 실패: {e.__class__.__name__}: {e}', exc=e)
+
+
+@csrf_exempt
 def an2_run(request):
     """
     LLM 없이 기본 분석만 실행.
