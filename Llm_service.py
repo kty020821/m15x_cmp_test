@@ -46,6 +46,7 @@ equipment/llm_service.py
 """
 
 import json
+import os
 import time
 import traceback
 
@@ -162,8 +163,6 @@ def config_info():
       컨테이너에서 그 주소로 나갈 수 없거나(방화벽), 둘 중 하나다.
       어느 쪽인지 화면에서 바로 알 수 있게 출처까지 낸다.
     """
-    import os as _os
-
     c = _cfg()
     key = c['api_key']
 
@@ -176,14 +175,14 @@ def config_info():
         src.append('settings.CMP_LLM')
 
     env = [k for k in ('LLM_URL', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL')
-           if _s(_os.environ.get(k))]
+           if _s(os.environ.get(k))]
 
     # llm_config.py 가 실제로 읽혔는지 — 배포에서 파일 누락이 흔하다
     #   settings 모듈 경로는 환경변수에 있다 (예: 'config.settings')
     cfg_file = '없음'
     try:
         import importlib
-        pkg = _os.environ.get('DJANGO_SETTINGS_MODULE', '')
+        pkg = os.environ.get('DJANGO_SETTINGS_MODULE', '')
         if pkg and '.' in pkg:
             importlib.import_module(pkg.rsplit('.', 1)[0] + '.llm_config')
             cfg_file = '있음'
