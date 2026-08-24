@@ -154,9 +154,42 @@ def available():
 
 
 def config_info():
-    """설정 상태 확인용 (키는 가린다)"""
+    """
+    설정 상태 확인용 (키는 가린다).
+
+    ★ 로컬은 되는데 배포에서 안 되는 경우가 대부분 여기서 갈린다.
+      settings 에는 값이 있는데 환경변수가 안 넘어와 빈 문자열이 되거나,
+      컨테이너에서 그 주소로 나갈 수 없거나(방화벽), 둘 중 하나다.
+      어느 쪽인지 화면에서 바로 알 수 있게 출처까지 낸다.
+    """
+    import os as _os
+
     c = _cfg()
     key = c['api_key']
+
+    # 어디서 읽었는지 — 환경변수인지 llm_config.py 인지
+    src = []
+    for name in ('LLM_URL', 'LLM_BASE_URL'):
+        if _s(getattr(settings, name, '')):
+            src.append(f'settings.{name}')
+    if getattr(settings, 'CMP_LLM', None):
+        src.append('settings.CMP_LLM')
+
+    env = [k for k in ('LLM_URL', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL')
+           if _s(_os.environ.get(k))]
+
+    # llm_config.py 가 실제로 읽혔는지 — 배포에서 파일 누락이 흔하다
+    #   settings 모듈 경로는 환경변수에 있다 (예: 'config.settings')
+    cfg_file = '없음'
+    try:
+        import importlib
+        pkg = _os.environ.get('DJANGO_SETTINGS_MODULE', '')
+        if pkg and '.' in pkg:
+            importlib.import_module(pkg.rsplit('.', 1)[0] + '.llm_config')
+            cfg_file = '있음'
+    except Exception:
+        pass
+
     return {
         'base_url': c['base_url'] or '(없음)',
         'model': c['model'],
@@ -164,7 +197,68 @@ def config_info():
                    else ('설정됨' if key else '(없음)'),
         'timeout': c['timeout'],
         'ready': bool(c['base_url']),
+        'source': ', '.join(src) or '(없음)',
+        'env_vars': ', '.join(env) or '(없음)',
+        'config_file': cfg_file,
     }
+
+
+def check_connection():
+    """
+    실제로 연결이 되는지 확인한다.
+
+    ★ 설정이 있어도 컨테이너에서 그 주소로 못 나가는 경우가 있다
+      (방화벽·프록시·DNS). 설정 문제와 통신 문제를 구분해야
+      어디를 고칠지 알 수 있다.
+    """
+    import socket
+    import urllib.parse
+
+    c = _cfg()
+    out = {'config': config_info()}
+
+    if not c['base_url']:
+        out['stage'] = '설정'
+        out['error'] = ('LLM_URL 이 비어 있습니다 — 배포 환경에 환경변수가 '
+                        '전달됐는지 확인하세요 (docker-compose 의 environment, '
+                        '또는 .env 파일)')
+        return out
+
+    u = urllib.parse.urlparse(c['base_url'])
+    host = u.hostname or ''
+    port = u.port or (443 if u.scheme == 'https' else 80)
+
+    # ① DNS
+    try:
+        ip = socket.gethostbyname(host)
+        out['dns'] = f'{host} → {ip}'
+    except Exception as e:
+        out['stage'] = 'DNS'
+        out['error'] = (f'{host} 주소를 찾을 수 없습니다 — 컨테이너의 DNS 를 '
+                        f'확인하세요: {e}')
+        return out
+
+    # ② TCP 연결
+    try:
+        sock = socket.create_connection((host, port), timeout=8)
+        sock.close()
+        out['tcp'] = f'{host}:{port} 연결됨'
+    except Exception as e:
+        out['stage'] = '네트워크'
+        out['error'] = (f'{host}:{port} 에 연결할 수 없습니다 — 컨테이너에서 '
+                        f'외부로 나가는 경로(방화벽·프록시)를 확인하세요: {e}')
+        return out
+
+    # ③ 실제 호출
+    try:
+        res = _post([{'role': 'user', 'content': 'ping'}])
+        msg = ((res.get('choices') or [{}])[0].get('message') or {})
+        out['stage'] = 'OK'
+        out['reply'] = (msg.get('content') or '')[:80]
+    except Exception as e:
+        out['stage'] = 'API'
+        out['error'] = str(e)
+    return out
 
 
 def _post(messages, tools=None):
