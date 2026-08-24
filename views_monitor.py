@@ -15,31 +15,28 @@ Inline Monitoring 페이지 + API
     api/monitor/run/         공정 1건 점검 (POST oper_id)
     api/monitor/results/     저장된 최근 결과
     api/monitor/clear/       저장된 결과 초기화
-    api/monitor/diag/        적재·점검 상태 진단
+    api/monitor/diag/        적재·점검 상태 진단 (shell 대신 화면에서 확인)
     monitor/report/          점검 결과를 한 파일 HTML 리포트로
-    api/monitor/detail/      웨이퍼 상세
-    
-    [★ 추가 기능: 백그라운드 DB 구축 API]
-    api/monitor/build_db/    비동기 스레드를 활용해 백그라운드에서 DB 적재 진행
-    api/monitor/build_status/ 적재 진행률 확인(폴링용)
+                             (브라우저에서 Ctrl+P 하면 PDF 로 저장된다)
+    api/monitor/detail/      웨이퍼 상세 (POST oper_id, lot_cd, param)
+
+  ※ 읽기 API 는 500 을 내지 않는다 — 200 + error 필드로 응답해
+    화면이 팝업 없이 계속 동작하게 한다 (분석 페이지와 동일 방침)
 ════════════════════════════════════════════════════════════
 """
 
 import json
 import re
 import traceback
-import threading
 
 from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db import connections
-from django.core.cache import cache
 
 from . import tech_map
 from . import monitor_service as ms
 from . import param_types as pt
-from equipment import analysis_service as svc
 
 
 def _fail(msg, payload=None, exc=None):
@@ -50,16 +47,54 @@ def _fail(msg, payload=None, exc=None):
     out['error'] = msg
     return JsonResponse(out, status=200)
 
+
 def _safe(v):
     return bool(v) and bool(re.match(r'^[0-9A-Za-z_\-]+$', str(v)))
 
+
 # ══════════════════════════════════════════════════════════
+def is_dev(request=None):
+    """
+    개발 환경인가 — 적재 조작을 개발자에게만 열기 위한 판정.
+
+    ★ DEBUG 가 켜져 있으면 개발이다. 운영 배포는 DEBUG=False 이므로
+      일반 사용자에게는 버튼이 아예 안 보인다.
+    ★ 로컬에서 접속한 경우도 개발로 본다 (runserver 를 DEBUG=False 로
+      띄우는 경우가 있어서).
+    """
+    from django.conf import settings
+
+    if getattr(settings, 'DEBUG', False):
+        return True
+    if request is not None:
+        host = (request.get_host() or '').split(':')[0]
+        if host in ('127.0.0.1', 'localhost', '::1'):
+            return True
+    return False
+
+
 def monitor_page(request):
+    # 타입 필터 항목은 param_types.py 에서 온다 (분류 규칙과 같은 소재지)
     return render(request, 'equipment/monitor.html',
-                  {'type_options': pt.options()})
+                  {'type_options': pt.options(),
+                   'is_dev': is_dev(request)})
+
 
 @csrf_exempt
 def monitor_opers(request):
+    """
+    점검 대상 공정 = 등록된 OPER_ID 중 적재 테이블이 실제로 있는 것.
+
+    ★ 1순위는 기준정보(config_service.list_opers)다.
+      기준정보를 자체 DB 로 옮긴 뒤에도 여기가 tech_map.OPER_NAME_MAP 만
+      보고 있어서, 기준정보에 8개를 등록해도 tech_map 에 5개만 있으면
+      5개만 점검되는 문제가 있었다. 등록 창구가 하나면 목록도 하나여야 한다.
+
+    ★ 2순위 tech_map, 3순위 적재 테이블 그대로 — 어느 단계에서도
+      목록이 비어 화면이 멈추지 않게 한다.
+      (테이블명에서 OPER_ID 를 역산하는 건 마지막 폴백에서만.
+       특수문자가 '_' 로 바뀌어 원래 ID 로 돌아오지 않는다)
+    """
     try:
         with connections['analysis_db'].cursor() as cur:
             cur.execute(
@@ -67,37 +102,52 @@ def monitor_opers(request):
                 ['cmp_analysis_%'])
             tables = {r[0] for r in cur.fetchall()}
 
+        # ── 1순위: 기준정보 ──────────────────────────────
         out, source = [], ''
         try:
             from . import config_service as cs
             for o in cs.list_opers():
-                if str(o.get('use_yn') or 'Y').upper() == 'N': continue
+                if str(o.get('use_yn') or 'Y').upper() == 'N':
+                    continue                       # 미사용 공정은 제외
                 oid = o['oper_id']
                 if ms._table(oid) in tables:
                     desc = o.get('oper_desc') or ''
-                    out.append({'oper_id': oid, 'label': f'{desc} ({oid})' if desc else oid})
-            if out: source = '기준정보'
+                    out.append({'oper_id': oid,
+                                'label': f'{desc} ({oid})' if desc else oid})
+            if out:
+                source = '기준정보'
         except Exception as e:
-            pass
+            print(f'[monitor] 기준정보 공정 목록 조회 실패: '
+                  f'{e.__class__.__name__}: {e}')
 
+        # ── 2순위: tech_map ──────────────────────────────
         if not out:
             names = {}
-            try: names = tech_map.oper_names()
-            except Exception: pass
+            try:
+                names = tech_map.oper_names()
+            except AttributeError:
+                print('[monitor] tech_map.oper_names() 가 없습니다 (동작은 계속)')
+            except Exception as e:
+                print(f'[monitor] 공정명 조회 실패: {e.__class__.__name__}: {e}')
             for oid, desc in names.items():
                 if ms._table(oid) in tables:
-                    out.append({'oper_id': oid, 'label': f'{desc} ({oid})' if desc else oid})
-            if out: source = 'tech_map'
+                    out.append({'oper_id': oid,
+                                'label': f'{desc} ({oid})' if desc else oid})
+            if out:
+                source = 'tech_map'
 
         if out:
             out.sort(key=lambda o: o['label'])
             res = {'opers': out, 'source': source}
+            # 등록에 없는데 테이블만 남은 것 — 점검에서 빠지므로 알려준다
             known = {ms._table(o['oper_id']) for o in out}
             orphan = sorted(t for t in tables if t not in known)
             if orphan:
-                res['note'] = (f'{source} 에 없어 점검에서 제외된 테이블 {len(orphan)}개')
+                res['note'] = (f'{source} 에 없어 점검에서 제외된 테이블 '
+                               f'{len(orphan)}개: {", ".join(orphan[:8])}')
             return JsonResponse(res)
 
+        # ── 3순위: 적재 테이블 그대로 ────────────────────
         return JsonResponse({
             'opers': [{'oper_id': t.replace('cmp_analysis_', '').upper(),
                        'label':   t.replace('cmp_analysis_', '').upper()}
@@ -108,55 +158,110 @@ def monitor_opers(request):
     except Exception as e:
         return _fail(f'공정 목록 조회 실패: {e}', {'opers': []}, exc=e)
 
+
 @csrf_exempt
 def monitor_run(request):
-    if request.method != 'POST': return JsonResponse({'error': 'POST only'}, status=405)
-    try: body = json.loads(request.body)
-    except Exception: return _fail('요청 형식 오류', {'results': []})
+    """공정 1건 점검"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _fail('요청 형식 오류', {'results': []})
 
     oper_id = body.get('oper_id')
     label   = body.get('label', '')
-    if not _safe(oper_id): return _fail('oper_id 형식 오류', {'results': []})
+    if not _safe(oper_id):
+        return _fail('oper_id 형식 오류', {'results': []})
 
-    try: return JsonResponse(ms.run_check(oper_id, label))
-    except Exception as e: return _fail(f'{oper_id} 점검 실패: {e}', {'oper_id': oper_id, 'results': []}, exc=e)
+    try:
+        return JsonResponse(ms.run_check(oper_id, label))
+    except Exception as e:
+        return _fail(f'{oper_id} 점검 실패: {e}',
+                     {'oper_id': oper_id, 'results': []}, exc=e)
+
 
 @csrf_exempt
 def monitor_results(request):
-    try: return JsonResponse(ms.load_results())
-    except Exception as e: return _fail(f'결과 조회 실패: {e}', {'run_ts': None, 'results': []}, exc=e)
+    """저장된 최근 점검 결과"""
+    try:
+        return JsonResponse(ms.load_results())
+    except Exception as e:
+        return _fail(f'결과 조회 실패: {e}',
+                     {'run_ts': None, 'results': []}, exc=e)
+
 
 @csrf_exempt
 def monitor_clear(request):
-    if request.method != 'POST': return JsonResponse({'error': 'POST only'}, status=405)
-    try: body = json.loads(request.body) if request.body else {}
-    except Exception: body = {}
+    """
+    저장된 점검 결과 초기화.
+
+    점검 대상 규칙을 바꾼 뒤에는 옛 결과가 남아 혼동을 주므로,
+    화면에서 비우고 다시 점검할 수 있게 한다.
+    연속일수 이력(cmp_monitor_history)은 남긴다 — 지우면 '며칠 연속'
+    정보가 사라진다. 이력까지 지우려면 shell 에서
+    monitor_service.clear_results(with_history=True) 를 쓴다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except Exception:
+        body = {}
+
     oper_id = body.get('oper_id')
-    if oper_id and not _safe(oper_id): return _fail('oper_id 형식 오류', {'deleted': 0})
+    if oper_id and not _safe(oper_id):
+        return _fail('oper_id 형식 오류', {'deleted': 0})
+
     try:
         n = ms.clear_results(oper_id or None)
         return JsonResponse({'deleted': n})
-    except Exception as e: return _fail(f'초기화 실패: {e}', {'deleted': 0}, exc=e)
+    except Exception as e:
+        return _fail(f'초기화 실패: {e}', {'deleted': 0}, exc=e)
+
 
 @csrf_exempt
 def monitor_diag(request):
-    try: return JsonResponse(dict(ms.diagnose(), ok=True))
-    except Exception as e: return _fail(f'진단 실패: {e}', {'items': [], 'orphans': []}, exc=e)
+    """
+    적재·점검 상태 진단.
+    테이블 존재 / 행수 / 최근 DATE / 점검 대상 수 / 선정 방식을 한 번에 본다.
+    """
+    try:
+        return JsonResponse(dict(ms.diagnose(), ok=True))
+    except Exception as e:
+        return _fail(f'진단 실패: {e}', {'items': [], 'orphans': []}, exc=e)
+
 
 @csrf_exempt
 def monitor_detail(request):
-    if request.method != 'POST': return JsonResponse({'error': 'POST only'}, status=405)
-    try: body = json.loads(request.body)
-    except Exception: return _fail('요청 형식 오류', {'points': []})
+    """웨이퍼 단위 상세"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        return _fail('요청 형식 오류', {'points': []})
+
     oper_id = body.get('oper_id')
     lot_cd  = body.get('lot_cd')
     param   = body.get('param')
-    if not (_safe(oper_id) and _safe(param)): return _fail('요청 값 형식 오류', {'points': []})
-    try: return JsonResponse(ms.wafer_detail(oper_id, lot_cd, param))
-    except Exception as e: return _fail(f'상세 조회 실패: {e}', {'points': []}, exc=e)
+    if not (_safe(oper_id) and _safe(param)):
+        return _fail('요청 값 형식 오류', {'points': []})
+
+    try:
+        return JsonResponse(ms.wafer_detail(oper_id, lot_cd, param))
+    except Exception as e:
+        return _fail(f'상세 조회 실패: {e}', {'points': []}, exc=e)
+
 
 @csrf_exempt
 def monitor_report(request):
+    """
+    점검 결과 리포트 (HTML 문서를 그대로 반환).
+
+    ★ 점검을 다시 돌리지 않는다 — 저장된 최근 결과를 문서로 옮긴다.
+      다시 돌리면 화면에서 본 것과 내용이 달라진다.
+    """
     from datetime import datetime
     from . import monitor_report as mr
 
@@ -166,7 +271,8 @@ def monitor_report(request):
     oper_id = g.get('oper_id') or None
 
     try:
-        html = mr.build_report(only_issue=only, oper_id=oper_id, title=g.get('title') or '')
+        html = mr.build_report(only_issue=only, oper_id=oper_id,
+                               title=g.get('title') or '')
     except Exception as e:
         traceback.print_exc()
         html = f'<h3>리포트 생성 실패</h3><p>{e.__class__.__name__}: {e}</p>'
@@ -176,77 +282,3 @@ def monitor_report(request):
         name = f'monitor_report_{datetime.now():%Y%m%d_%H%M}.html'
         resp['Content-Disposition'] = f'attachment; filename="{name}"'
     return resp
-
-# ══════════════════════════════════════════════════════════
-# 백그라운드 DB 구축 및 진행률 확인 (신규 추가)
-# ══════════════════════════════════════════════════════════
-@csrf_exempt
-def monitor_build_db(request):
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'}, status=405)
-    
-    try:
-        body = json.loads(request.body)
-    except Exception:
-        return JsonResponse({'ok': False, 'error': '요청 형식이 올바르지 않습니다.'})
-
-    raw_oper_id = body.get('oper_id', '')
-    is_cfg2 = bool(body.get('is_cfg2', False))
-    
-    # 순수 공정 ID 추출
-    oper_id = re.sub(r'_(CFG2|cfg2)$', '', str(raw_oper_id).strip(), flags=re.IGNORECASE).upper()
-    
-    if not oper_id or not _safe(oper_id):
-        return JsonResponse({'ok': False, 'error': f'유효하지 않은 공정 ID입니다: {raw_oper_id}'})
-
-    task_id = f"db_build_{oper_id}_{'cfg2' if is_cfg2 else 'cfg1'}"
-    
-    cache.set(task_id, {'status': 'starting', 'progress': 0, 'msg': '적재 준비 중...'}, timeout=3600)
-
-    def background_task():
-        try:
-            lake = svc.get_lake()
-            df_info = svc.get_config(is_cfg2=is_cfg2)
-            
-            # 기준정보에 해당 공정이 있는지 검증
-            if df_info is None or df_info.empty:
-                raise ValueError("기준정보 DB를 불러올 수 없습니다.")
-            
-            opers_in_cfg = set(df_info['OPER_ID'].astype(str).str.upper().unique())
-            if oper_id not in opers_in_cfg:
-                raise ValueError(f"기준정보(Config{'2' if is_cfg2 else '1'})에 등록되지 않은 공정({oper_id})입니다.")
-
-            def update_progress(done, total, msg):
-                pct = int((done / total) * 100) if total else 0
-                cache.set(task_id, {'status': 'running', 'progress': pct, 'msg': msg}, timeout=3600)
-            
-            update_progress(1, 10, f'{oper_id} Lake 조회 시작')
-            df = svc.build_analysis_df(lake, df_info, oper_id, on_progress=update_progress, is_cfg2=is_cfg2)
-            
-            if df is None or df.empty:
-                cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': '조회 결과가 없습니다 (0행).'}, timeout=3600)
-                return
-
-            update_progress(9, 10, f'{len(df):,}행 저장 중...')
-            svc.save_analysis_df(df, oper_id, is_cfg2=is_cfg2)
-            cache.set(task_id, {'status': 'done', 'progress': 100, 'msg': f'{len(df):,}행 적재 완료'}, timeout=3600)
-        except Exception as e:
-            traceback.print_exc()
-            cache.set(task_id, {'status': 'error', 'progress': 0, 'msg': f'에러: {e}'}, timeout=3600)
-        finally:
-            connections.close_all()
-
-    threading.Thread(target=background_task, daemon=True).start()
-    return JsonResponse({'ok': True, 'task_id': task_id})
-
-@csrf_exempt
-def monitor_build_status(request):
-    """현재 DB 구축 진행률 조회 API (프론트엔드 폴링용)"""
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST only'})
-    body = json.loads(request.body)
-    task_id = body.get('task_id')
-    
-    state = cache.get(task_id) or {'status': 'none', 'msg': '진행 상태를 찾을 수 없습니다.'}
-    return JsonResponse({'ok': True, 'state': state})
-  
