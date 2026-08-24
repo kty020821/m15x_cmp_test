@@ -149,10 +149,12 @@ def status(oper_ids=None):
                 continue
             d['loaded'] = True
             try:
-                cur.execute(f'SELECT MAX("DATE"), COUNT(*) FROM {t}')
-                mx, n = cur.fetchone()
+                # ★ COUNT(*) 는 테이블을 통째로 훑는다. 공정이 20개면
+                #   20번 훑어 패널이 열릴 때마다 버벅였다.
+                #   행수는 마지막 적재 기록(last_rows)으로 충분하다.
+                cur.execute(f'SELECT MAX("DATE") FROM {t}')
+                mx = cur.fetchone()[0]
                 d['data_max'] = str(mx)[:19] if mx else None
-                d['rows'] = n or 0
             except Exception:
                 d['data_max'] = None
 
@@ -733,7 +735,7 @@ def save_schedule(d, user=''):
             " updated_by=%s, updated_at=NOW() WHERE id=%s",
             [_yn(d.get('enabled')),
              max(0, min(23, int(d.get('hour', 6) or 0))),
-             max(0, min(59, int(d.get('minute', 0) or 0))),
+             0,                     # 분은 쓰지 않는다 (시 단위 예약)
              _yn(d.get('incremental', 'Y'), 'Y'),
              max(1, int(d.get('days', 45) or 45)),
              str(user)[:100], cur_s['id']])
@@ -745,8 +747,8 @@ def _due_schedule():
     """
     지금 돌려야 할 예약이 있나.
 
-    ★ 오늘 이미 돌았으면 건너뛴다. 워커가 몇 초마다 확인하므로
-      그 검사가 없으면 예약 시각 1분 내내 큐에 넣게 된다.
+    ★ 시 단위다. 분까지 맞추면 서버가 그 1분에 안 떠 있으면 건너뛴다.
+      '그 시각대에 들어섰고 오늘 아직 안 돌았으면 실행' 이 더 튼튼하다.
     """
     try:
         s = get_schedule()
@@ -756,11 +758,11 @@ def _due_schedule():
         return None
 
     now = datetime.now()
-    if now.hour != s['hour'] or now.minute != s['minute']:
+    if now.hour != s['hour']:
         return None
     if s.get('last_run_at') and \
             str(s['last_run_at'])[:10] == now.strftime('%Y-%m-%d'):
-        return None
+        return None                 # 오늘 이미 돌았다
     return s
 
 
