@@ -67,6 +67,29 @@ def _up(v):
     return _s(v).upper()
 
 
+def alias_from(desc, fallback_id):
+    """
+    연계 공정의 별칭(영문 공정명)을 만든다.
+
+    ★ oper_desc 가 한글이면 slug 가 전부 지워 빈 별칭이 된다.
+      그러면 컬럼 이름이 SRC__THK 처럼 망가진다.
+    ★ 한글이 섞인 경우도 문제다 — 'M1 폴리 연마' 가 'M1' 로 잘려
+      무슨 공정인지 알 수 없게 된다. 영문이 절반도 안 남으면
+      공정 ID 를 쓰는 편이 낫다.
+    """
+    raw = _s(desc)
+    a = slug(raw)[:20].strip('_')
+
+    if not a or not any(c.isalpha() for c in a):
+        return slug(fallback_id)[:20]
+
+    # 원문에서 영숫자·공백이 아닌 글자(한글 등)의 비중
+    drop = sum(1 for c in raw if not (c.isascii() and (c.isalnum() or c in ' _-')))
+    if raw and drop / len(raw) > 0.3:
+        return slug(fallback_id)[:20]
+    return a
+
+
 def slug(v):
     """컬럼명에 쓸 수 있게 — 영숫자·_ 만 남기고 대문자로"""
     out = re.sub(r'[^0-9A-Za-z_]+', '_', _s(v).upper())
@@ -562,7 +585,7 @@ def import_from_v1(oper_id=None, overwrite=False):
         #   가져오는 것이다. 그 정보는 측정값 테이블이 아니라
         #   wafer-history 에 있고, 조회처는 param 이 가른다.
         if _s(src.get('pre_oper_id')):
-            alias = slug(src.get('pre_oper_desc') or src['pre_oper_id'])[:20]
+            alias = alias_from(src.get('pre_oper_desc'), src['pre_oper_id'])
             # 사전공정을 등록한 목적은 입고 장비·챔버다 → param 을 CHAMBER 로
             links.append({
                 'kind': 'SRC',
@@ -587,7 +610,7 @@ def import_from_v1(oper_id=None, overwrite=False):
                     continue
                 links.append({
                     'kind': kind,
-                    'alias': slug(r.get('step_desc') or r.get('step_id'))[:20],
+                    'alias': alias_from(r.get('step_desc'), r.get('step_id')),
                     'link_id': _up(r.get('step_id')),
                     'lot_cd': _up(r.get('lot_cd')),
                     'param': _up(r.get('param')),
