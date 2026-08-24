@@ -238,9 +238,10 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
               onclick="document.getElementById('loadbox').style.display='none'">닫기</button>
     </div>
     <div style="padding:14px 16px;">
-      <!-- 적재 실행 — 한 줄로 -->
+      <!-- 적재 실행 — 표가 길어도 항상 보이게 위에 붙여 둔다 -->
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;
-                  margin-bottom:10px;">
+                  margin-bottom:10px;position:sticky;top:0;z-index:5;
+                  background:var(--bg-3);padding:6px 0;">
         <button class="btn-clear" id="btn-load-run" onclick="runLoad()"
                 style="font-weight:800;">선택 공정 적재</button>
         <button class="btn-clear" onclick="selectAllOpers(true)">전체 선택</button>
@@ -282,16 +283,18 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
         </div>
         <div id="q-body"></div>
       </div>
+      <div style="max-height:46vh;overflow-y:auto;">
       <table class="mn">
         <thead><tr>
           <th style="width:34px;"><input type="checkbox" id="load-all"
               onchange="selectAllOpers(this.checked)"></th>
           <th>공정</th><th class="num">device</th><th class="num">param</th>
           <th class="num">resp</th><th class="num">defect</th>
-          <th>데이터 최신일</th><th class="num">행수</th><th>마지막 적재</th>
+          <th>데이터 최신일</th><th>마지막 적재</th>
           <th>상태</th></tr></thead>
         <tbody id="load-body"></tbody>
       </table>
+      </div>
       <div class="note" style="font-size:11px;color:var(--tx-muted);
            margin-top:10px;line-height:1.6;">
         공정 단위로 잠깁니다 — 같은 공정을 다른 사람이 적재 중이면 건너뜁니다.
@@ -629,12 +632,11 @@ async function refreshLoad() {
       <td class="num">${o.n_lot}</td><td class="num">${o.n_param}</td>
       <td class="num">${o.n_resp || 0}</td><td class="num">${o.n_defect || 0}</td>
       <td class="mono">${esc(o.data_max || '-')}</td>
-      <td class="num">${o.rows ? o.rows.toLocaleString() : '-'}</td>
       <td class="mono">${esc(o.last_at || '-')}
         ${o.last_by ? `<br><span style="color:var(--tx-muted);">${esc(o.last_by)}</span>` : ''}</td>
       <td>${state}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="10" class="empty">등록된 공정이 없습니다.</td></tr>';
+  }).join('') || '<tr><td colspan="9" class="empty">등록된 공정이 없습니다.</td></tr>';
 
   // 적재 중인 게 있으면 자주, 없으면 뜸하게 갱신
   clearTimeout(loadTimer);
