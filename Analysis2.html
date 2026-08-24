@@ -312,6 +312,7 @@ const API = {
   ask:     "{% url 'an2-ask' %}",
   run:     "{% url 'an2-run' %}",
   llmInfo: "{% url 'an2-llm' %}",
+ llmCheck: "{% url 'an2-llm-check' %}",
 };
 const A2_FONT = "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', " +
                 "'Segoe UI', 'Noto Sans KR', sans-serif";
@@ -1126,12 +1127,60 @@ async function checkLlm() {
   const c = (j && j.config) || {};
   if (llmOn) {
     // 주소를 잘못 넣었을 때 화면에서 바로 알 수 있게 한다
-    note.textContent = `AI 연결 — ${c.model || ''} · ${c.base_url || ''}`;
-    note.title = `API 키: ${c.api_key || '(없음)'}`;
+    note.innerHTML = `AI 연결 — ${esc(c.model || '')} `
+      + `<a href="#" onclick="llmDiag();return false" `
+      + `style="color:var(--tx-muted);">진단</a>`;
+    note.title = `${c.base_url || ''} · 키 ${c.api_key || '(없음)'}`;
   } else {
-    note.textContent = 'AI 미설정 — 계산 결과만 표시됩니다 '
-                     + '(settings.py 의 LLM_URL)';
+    note.innerHTML = 'AI 미설정 — 계산 결과만 표시됩니다 '
+      + '<a href="#" onclick="llmDiag();return false" '
+      + 'style="color:var(--accent);">연결 진단</a>';
   }
+}
+
+/* ══════════════════════════════════════════════════
+   LLM 연결 진단
+
+   ★ 로컬은 되는데 배포에서 안 되는 경우가 대부분이다.
+     설정이 안 넘어왔는지, 컨테이너에서 못 나가는지를 구분해 준다.
+   ══════════════════════════════════════════════════ */
+async function llmDiag() {
+  aiLog(`<div class="u">LLM 연결 진단</div>
+         <div class="a" id="ai-wait" style="color:var(--tx-muted);">
+           <div class="ai-name">🤖 분석 AI</div>확인 중…</div>`);
+
+  const j = await postJSON(API.llmCheck, {});
+  const wait = document.getElementById('ai-wait');
+  if (wait) wait.remove();
+
+  if (!j || !j.ok) {
+    aiLog(`<div class="a" style="color:var(--bad);">
+             <div class="ai-name">🤖 분석 AI</div>
+             ${esc((j && j.error) || '진단 실패')}</div>`);
+    return;
+  }
+
+  const cf = j.config || {};
+  const rows = [
+    ['설정 출처', cf.source], ['환경변수', cf.env_vars],
+    ['llm_config.py', cf.config_file],
+    ['주소', cf.base_url], ['모델', cf.model], ['API 키', cf.api_key],
+    ['DNS', j.dns], ['TCP', j.tcp],
+  ];
+  const ok = j.stage === 'OK';
+
+  aiLog(`<div class="a">
+    <div class="ai-name">🤖 분석 AI</div>
+    <b style="color:${ok ? 'var(--good)' : 'var(--bad)'};">
+      ${ok ? '연결 정상' : esc(j.stage || '?') + ' 단계에서 막힘'}</b>
+    ${j.error ? `<div style="color:var(--bad);margin-top:6px;">
+                   ${esc(j.error)}</div>` : ''}
+    <table class="evt" style="margin-top:8px;">
+      <tbody>${rows.map(([k, v]) =>
+        `<tr><th style="width:92px;">${esc(k)}</th>
+             <td>${esc(v || '-')}</td></tr>`).join('')}</tbody>
+    </table>
+  </div>`);
 }
 
 function aiLog(html) {
