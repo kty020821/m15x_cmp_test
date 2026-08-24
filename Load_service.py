@@ -619,7 +619,22 @@ def _do_load(job):
     progress(job_id, f'{len(df):,}행 저장 중')
     svc.save_analysis_df(df, oper_id,
                          date_from=date_from if last_at else None)
-    finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})')
+
+    # ★ 일부 LOT_CD 가 실패했으면 그 사실을 결과에 남긴다.
+    #   '완료' 로만 표시하면 빠진 데이터를 모르고 지나친다.
+    try:
+        fails = svc.get_fails()
+    except Exception:
+        fails = []
+
+    if fails:
+        keys = ', '.join(f['key'] for f in fails[:4])
+        more = f' 외 {len(fails) - 4}건' if len(fails) > 4 else ''
+        finish(job_id, '완료', len(df),
+               f'{len(df):,}행 적재 ({span}) · 조회 실패 {len(fails)}건 '
+               f'[{keys}{more}] — 그 부분은 빠져 있습니다')
+    else:
+        finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})')
 
 
 def run_async(oper_ids, days=DEFAULT_DAYS, user='',
