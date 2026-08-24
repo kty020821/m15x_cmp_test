@@ -259,6 +259,9 @@ const PTYPES = [{% for v, l in type_options %}["{{ v }}","{{ l }}"],{% endfor %}
 
 let opers = [], cur = null;
 
+/* 저장 안 된 변경이 있는지 */
+let dirty = false;
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"'`]/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',
@@ -350,6 +353,10 @@ async function loadOpers() {
 }
 
 async function openOper(id) {
+  if (dirty && !confirm('저장하지 않은 변경이 있습니다. 버리고 이동할까요?')) {
+    return;
+  }
+  dirty = false;
   const j = await postJSON(API.oper, {oper_id: id});
   if (!j.ok) { msg(j.error || '조회 실패', true); return; }
   cur = j.oper;
@@ -435,8 +442,6 @@ function renderEditor() {
         <span class="sub">${esc(c.oper_id || '')}</span>
         <span class="right">
           <button class="btn pri sm" onclick="saveOper()">저장</button>
-          <span class="hint" style="align-self:center;">
-            바꾼 내용은 저장을 눌러야 반영됩니다</span>
           ${c._new ? '' :
             `<button class="btn sm danger" onclick="delOper()">공정 삭제</button>`}
         </span></div>
@@ -488,6 +493,15 @@ function renderEditor() {
 
   renderLinks(); renderLots(); renderParams();
   renderSteps(); showStep();
+
+  /* ★ 칸마다 markDirty 를 붙이면 누락이 생긴다.
+     편집 영역 전체에서 입력을 한 번에 잡는다. */
+  const ed = document.getElementById('editor');
+  if (ed && !ed._dirtyBound) {
+    ed._dirtyBound = true;
+    ed.addEventListener('input', markDirty);
+    ed.addEventListener('change', markDirty);
+  }
   document.getElementById('mk').style.display = cur._new ? 'none' : 'block';
   if (!cur._new) refreshLoadState();
 }
@@ -503,7 +517,9 @@ function section(key, title, sub, head, tbody, secId) {
           <button class="btn sm danger" onclick="delSel('${key}')">선택 삭제</button>
           <button class="btn sm" onclick="openPaste('${key}')">붙여넣기</button>
           <button class="btn sm" onclick="addRow('${key}')">+ 추가</button>
+          <button class="btn pri sm" onclick="saveOper()">저장</button>
         </span></div>
+      <div class="msg sec-msg" style="margin-bottom:6px;"></div>
       ${key === 'links' ? `<div class="hint" style="margin-bottom:8px;">
         <b>공정명(별칭)</b> 은 영문으로 — 생성 컬럼 이름에 그대로 들어갑니다
         (예: M1_POLY → SRC_M1_POLY_THK).<br>
@@ -638,6 +654,7 @@ function renderParams() {
 
 function rerender(key) {
   ({lots: renderLots, params: renderParams, links: renderLinks})[key]();
+  markDirty();
 }
 
 /* ══════════════════════════════════════════════════
@@ -729,10 +746,25 @@ function openPaste(key) {
    저장 / 검증
    ══════════════════════════════════════════════════ */
 function edMsg(t, err) {
-  const el = document.getElementById('ed-msg');
-  if (!el) return;
-  el.className = 'msg ' + (err ? 'err' : 'ok');
-  el.textContent = t;
+  // ★ 저장 버튼이 섹션마다 있으므로 결과도 모든 자리에 보여 준다.
+  //   어느 버튼을 눌렀든 그 자리에서 결과를 확인할 수 있어야 한다.
+  const cls = 'msg ' + (err ? 'err' : 'ok');
+  const main = document.getElementById('ed-msg');
+  if (main) { main.className = cls; main.textContent = t; }
+  document.querySelectorAll('.sec-msg').forEach(el => {
+    el.className = cls + ' sec-msg';
+    el.textContent = t;
+  });
+}
+
+/* 저장 안 된 변경이 있음을 알린다 — 버튼 색만으로는 모른다 */
+function markDirty() {
+  dirty = true;
+  document.querySelectorAll('.sec-msg').forEach(el => {
+    el.className = 'msg sec-msg';
+    el.style.color = 'var(--warn)';
+    el.textContent = '저장하지 않은 변경이 있습니다';
+  });
 }
 
 function collect() {
@@ -764,6 +796,8 @@ async function saveOper() {
   if (!j.ok) { edMsg(j.error || '저장 실패', true); return; }
 
   const s = j.saved;
+  dirty = false;
+  document.querySelectorAll('.sec-msg').forEach(el => { el.style.color = ''; });
   edMsg(`저장 완료 — device ${s.lots} · param ${s.params} · ` +
         `연계 ${s.links}개(${s.link_params}행)`);
   cur._new = false;
