@@ -186,7 +186,8 @@ tr.sel td { background: rgba(125,125,125,.06); }
       <!-- DB 만들기 -->
       <div class="sec" id="mk" style="display:none;">
         <div class="sec-h"><h3>DB 만들기</h3>
-          <span class="sub">이 공정의 데이터를 적재합니다</span>
+          <span class="sub">모니터링 DB(cmp_analysis_*)에 적재합니다 —
+            모니터링 화면의 적재와 같은 곳입니다</span>
           <span class="sub" id="mk-state" style="margin-left:auto;"></span></div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <label class="hint" style="font-weight:800;">기간
@@ -200,8 +201,11 @@ tr.sel td { background: rgba(125,125,125,.06); }
           <span class="msg" id="mk-msg"></span>
         </div>
         <div class="hint" style="margin-top:8px;">
-          적재는 백그라운드로 진행됩니다. 같은 공정을 다른 사람이 적재 중이면
-          거절되고 누가 언제 시작했는지 알려 줍니다.
+          <b>1회성 조회가 아닙니다</b> — 상시 쓰는 모니터링 DB 를 갱신합니다.
+          증분이면 마지막 적재일 이후 구간만 교체하고, 그 앞 데이터는
+          그대로 둡니다.<br>
+          적재는 서버에서 계속되므로 이 페이지를 떠나도 멈추지 않습니다.
+          같은 공정을 다른 사람이 적재 중이면 건너뜁니다.
         </div>
       </div>
     </div>
@@ -431,6 +435,8 @@ function renderEditor() {
         <span class="sub">${esc(c.oper_id || '')}</span>
         <span class="right">
           <button class="btn pri sm" onclick="saveOper()">저장</button>
+          <span class="hint" style="align-self:center;">
+            바꾼 내용은 저장을 눌러야 반영됩니다</span>
           ${c._new ? '' :
             `<button class="btn sm danger" onclick="delOper()">공정 삭제</button>`}
         </span></div>
@@ -469,14 +475,14 @@ function renderEditor() {
 
     ${section('links', '4단계 · 연계 공정',
       `최대 ${MAX_LINKS}개 · 파라미터 1개당 1행`,
-      `<th style="width:76px;">타입</th>
-       <th style="width:96px;">별칭 *</th>
-       <th style="width:116px;">공정·스텝 *</th>
-       <th style="width:88px;">LOT_CD</th>
-       <th style="width:130px;">관리 PARAM</th>
-       <th>생성 컬럼</th>
-       <th style="width:88px;">용도</th>
-       <th style="width:72px;">사용</th><th style="width:28px;"></th>`,
+      `<th style="width:72px;">타입</th>
+       <th style="width:150px;">공정명(별칭) *</th>
+       <th style="width:112px;">공정·스텝 *</th>
+       <th style="width:104px;">LOT_CD</th>
+       <th style="width:126px;">관리 PARAM</th>
+       <th style="width:180px;">생성 컬럼</th>
+       <th style="width:84px;">용도</th>
+       <th style="width:68px;">사용</th><th style="width:26px;"></th>`,
       'ktbody', 'sec-4')}
   `;
 
@@ -499,9 +505,12 @@ function section(key, title, sub, head, tbody, secId) {
           <button class="btn sm" onclick="addRow('${key}')">+ 추가</button>
         </span></div>
       ${key === 'links' ? `<div class="hint" style="margin-bottom:8px;">
+        <b>공정명(별칭)</b> 은 영문으로 — 생성 컬럼 이름에 그대로 들어갑니다
+        (예: M1_POLY → SRC_M1_POLY_THK).<br>
         관리 PARAM 에 <b>CHAMBER</b> 를 넣으면 장비·챔버 이력에서,
-        그 외 값은 타입에 맞는 측정 테이블에서 가져옵니다.
-        LOT_CD 를 비우면 본공정 것을 그대로 씁니다.</div>` : ''}
+        그 외 값은 타입에 맞는 측정 테이블에서 가져옵니다.<br>
+        <b>LOT_CD</b> 는 이 연계가 어느 device 에 해당하는지입니다 —
+        '전체' 면 본공정에 등록된 device 를 모두 조회합니다.</div>` : ''}
       <div class="tbl-scroll">
         <table class="et">
           <thead><tr>
@@ -529,13 +538,16 @@ function renderLinks() {
         ${KINDS.map(([v, l]) => `<option value="${v}"
           ${r.kind === v ? 'selected' : ''}>${esc(v)}</option>`).join('')}
       </select></td>
-      <td><input value="${esc(r.alias)}" placeholder="M1CU"
+      <td><input value="${esc(r.alias)}" placeholder="M1_POLY"
+                 title="영문 공정명 — 생성 컬럼 이름에 들어갑니다"
                  oninput="cur.links[${i}].alias=this.value.toUpperCase();refreshCol(${i})"></td>
       <td><input value="${esc(r.link_id)}" placeholder="T5515000C"
                  oninput="cur.links[${i}].link_id=this.value.toUpperCase();refreshCol(${i})"></td>
-      <td><input value="${esc(r.lot_cd || '')}"
-                 title="비우면 본공정의 LOT_CD 를 그대로 씁니다"
-                 oninput="cur.links[${i}].lot_cd=this.value.toUpperCase()"></td>
+      <td><select onchange="cur.links[${i}].lot_cd=this.value;renderLinks()"
+                  title="이 연계 공정이 어느 device 에 해당하는지">
+        <option value="">전체</option>
+        ${lotOptions(r.lot_cd)}
+      </select></td>
       <td><input value="${esc(r.param)}" placeholder="CHAMBER 또는 CU_THK_AVG"
                  title="CHAMBER 를 넣으면 장비·챔버 이력에서, 그 외에는 측정값 테이블에서 가져옵니다"
                  oninput="cur.links[${i}].param=this.value.toUpperCase();refreshCol(${i})"></td>
@@ -555,6 +567,19 @@ function renderLinks() {
   }).join('') ||
     `<tr><td colspan="10" class="none-row">연계 공정이 없습니다.
       추가하거나 기존 기준정보에서 가져오세요.</td></tr>`;
+}
+
+/* 이 공정에 등록된 device 목록 — 연계 공정이 어느 device 에
+   해당하는지 고르게 한다.
+   ★ 비워 두면 본공정의 device 를 전부 대상으로 조회한다. */
+function lotOptions(cur_val) {
+  const lots = (cur && cur.lots || [])
+    .map(l => (l.lot_cd || '').trim())
+    .filter(Boolean);
+  const uniq = [...new Set(lots)];
+  return uniq.map(v =>
+    `<option value="${esc(v)}" ${cur_val === v ? 'selected' : ''}>${esc(v)}</option>`
+  ).join('');
 }
 
 /* 이름을 칠 때마다 표 전체를 다시 그리면 포커스가 날아간다 —
