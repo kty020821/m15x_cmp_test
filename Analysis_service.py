@@ -79,6 +79,58 @@ def run_query(lake, query):
     return lake.get_rst().toPandas()
 
 
+# ══════════════════════════════════════════════════════════
+# 조회 실패 기록
+#
+#   ★ LOT_CD 하나가 실패해도 나머지는 계속 조회한다.
+#     그 대신 무엇이 실패했는지 남겨 두어야 '일부만 적재된' 상태를
+#     모르고 지나치지 않는다.
+#   ★ 반환값 형태를 바꾸면 호출부를 전부 고쳐야 하므로
+#     모듈 수준에 모으고 build_analysis_df 가 마지막에 읽는다.
+# ══════════════════════════════════════════════════════════
+_FETCH_FAILS = []
+
+
+def clear_fails():
+    _FETCH_FAILS.clear()
+
+
+def note_fail(stage, key, err):
+    _FETCH_FAILS.append({
+        'stage': stage, 'key': str(key),
+        'error': f'{err.__class__.__name__}: {err}',
+    })
+    print(f'  [{stage}] {key} 조회 실패 — 건너뜁니다: '
+          f'{err.__class__.__name__}: {err}')
+
+
+def get_fails():
+    return list(_FETCH_FAILS)
+
+
+def _full_range(days=30, date_from=None, date_to=None):
+    """
+    조회 기간 전체를 한 덩어리로 — (dt_s, dt_e, mt_s, mt_e).
+
+    ★ 예전엔 30일씩 잘라 여러 번 조회했다. Lake 는 대용량이라
+      나눠 던져도 이득이 없고, 왕복 횟수만 늘어 오히려 느렸다.
+      한 번에 던지는 편이 빠르고 코드도 단순하다.
+    ★ 아주 긴 기간(수백 일)을 조회할 일이 생기면 그때 다시 검토한다.
+    """
+    if date_from or date_to:
+        d2 = pd.to_datetime(date_to).date() if date_to else date.today()
+        d1 = (pd.to_datetime(date_from).date() if date_from
+              else d2 - timedelta(days=days))
+        if d1 > d2:
+            d1, d2 = d2, d1
+    else:
+        d2 = date.today()
+        d1 = d2 - timedelta(days=days)
+
+    return (d1.strftime('%Y%m%d'), d2.strftime('%Y%m%d'),
+            d1.strftime('%Y%m'), d2.strftime('%Y%m'))
+
+
 def _date_chunks(days=30, freq='30D', date_from=None, date_to=None):
     """
     조회 기간을 (dt_start, dt_end, mt_start, mt_end) 단위로 분할.
@@ -373,7 +425,8 @@ def fetch_apc(lake, cond, days=30, date_from=None, date_to=None,
     fab = cond['fab']
     dfs = []
 
-    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    # ★ 기간을 나누지 않고 한 번에 던진다
+    chunks = [_full_range(days, date_from=date_from, date_to=date_to)]
     total, done = max(1, len(chunks)), 0
 
     for dt_s, dt_e, mt_s, mt_e in chunks:
@@ -446,7 +499,8 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
     if not use_pre and VERBOSE:
         print('  [SRC] 사전공정 미지정 — wafer-history 조인 생략 (조회가 빨라집니다)')
 
-    chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    # ★ 기간을 나누지 않고 한 번에 던진다
+    chunks = [_full_range(days, date_from=date_from, date_to=date_to)]
     total  = max(1, len(cond['lot_cd_list']) * len(chunks))
     done   = 0
 
@@ -540,9 +594,15 @@ from (
 ) t
 where rn = 1
 """
-            df = run_query(lake, query)
-            if df is not None and not df.empty:
-                dfs.append(df)
+            # ★ 한 LOT_CD 가 실패해도 나머지는 계속 조회한다.
+            #   예전엔 여기서 예외가 나면 공정 전체가 멈춰
+            #   앞서 받은 것까지 버려졌다.
+            try:
+                df = run_query(lake, query)
+                if df is not None and not df.empty:
+                    dfs.append(df)
+            except Exception as e:
+                note_fail('SRC', lot_code, e)
 
             done += 1
             n = sum(len(d) for d in dfs)
@@ -652,7 +712,8 @@ def fetch_mes(lake, cond, df_src, days=30, date_from=None, date_to=None,
     eqp_in = "'" + "','".join(map(str, eqp_ids)) + "'"
 
     dfs = []
-    _mes_chunks = _date_chunks(days, date_from=date_from, date_to=date_to)
+    # ★ 기간을 나누지 않고 한 번에 던진다
+    _mes_chunks = [_full_range(days, date_from=date_from, date_to=date_to)]
     _mes_total, _mes_done = max(1, len(_mes_chunks)), 0
 
     for dt_s, dt_e, _, _ in _mes_chunks:
@@ -664,9 +725,12 @@ where dt between '{dt_s}' and '{dt_e}'
   and eqp_id in ({eqp_in})
   and event_cd = 'JobStart'
 """
-        d = run_query(lake, query)
-        if d is not None and not d.empty:
-            dfs.append(d)
+        try:
+            d = run_query(lake, query)
+            if d is not None and not d.empty:
+                dfs.append(d)
+        except Exception as e:
+            note_fail('MES', f'{dt_s}~{dt_e}', e)
 
         _mes_done += 1
         if on_progress:
@@ -845,10 +909,13 @@ def fetch_steps(lake, cond, kind, days=30, date_from=None, date_to=None,
                 d = run_query(lake, query)
             except Exception as e:
                 _log_query(label, query, error=e)
-                # 실패하면 쿼리를 그대로 보여준다 (Lake 에 붙여 넣어 확인)
-                print(f'\n[{label}] 조회 실패 — 아래 쿼리를 확인하세요')
+                # ★ 여기서 raise 하면 공정 전체가 멈춰 앞서 받은 것까지
+                #   버려진다. 이 LOT_CD 만 건너뛰고 계속한다.
+                print(f'\n[{label}] {lot_cd} 조회 실패 — 아래 쿼리를 확인하세요')
                 print(query.strip())
-                raise
+                note_fail(label, f"{st['step_id']}/{lot_cd}", e)
+                done += 1
+                continue
 
             _log_query(label, query, rows=(0 if d is None else len(d)))
             if d is not None and not d.empty:
@@ -1914,6 +1981,9 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
     date_from/date_to 를 주면 그 기간을, 없으면 오늘부터 days 일 전까지.
     (분석 화면에서 기간을 직접 고르는 경우에 쓴다)
     """
+    # ★ 이번 조회의 실패 기록을 새로 시작한다
+    clear_fails()
+
     rng = {'date_from': date_from, 'date_to': date_to}
     def _n(tag, d):
         if VERBOSE:
@@ -1940,5 +2010,21 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
 
     df_def = _n('fetch_def', fetch_steps(lake, cond, 'def', days, **rng))
     m = _n('merge_def',      merge_steps(m, df_def, 'def'))
+
+    # ── 조회 실패 정리 ───────────────────────────────────
+    #   ★ 일부 LOT_CD 가 실패해도 나머지는 적재된다.
+    #     다만 '일부만 적재됐다' 는 사실을 모르고 지나치면 안 되므로
+    #     로그에 분명히 남긴다. 호출부는 get_fails() 로 읽어
+    #     적재 결과에 함께 표시한다.
+    fails = get_fails()
+    if fails:
+        print(f'\n{"!" * 58}')
+        print(f'[{oper_id}] 조회 실패 {len(fails)}건 — 그 부분은 빠진 채 '
+              f'적재됩니다')
+        for f in fails[:10]:
+            print(f'  · {f["stage"]} {f["key"]}: {f["error"]}')
+        if len(fails) > 10:
+            print(f'  · 외 {len(fails) - 10}건')
+        print('!' * 58 + '\n')
 
     return m
