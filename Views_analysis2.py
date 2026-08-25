@@ -160,12 +160,7 @@ def an2_sources(request):
         # 공정 코드 → 공정명. 1회성 결과에도 이름을 붙이기 위한 것.
         #   ★ 코드만 보여 주면 무슨 공정인지 알 수 없다.
         name_of = {o['oper_id']: (o.get('oper_desc') or '') for o in opers}
-        try:
-            from . import config2_service as cfg2
-            for o in cfg2.list_opers():
-                name_of.setdefault(o['oper_id'], o.get('oper_desc') or '')
-        except Exception:
-            pass
+
         for o in opers:
             t = _table(o['oper_id'])
             if t not in info:
