@@ -345,13 +345,42 @@ def _expand_chamber_params(param_list, model):
 
 
 def get_oper_cond(df_info, oper_id):
-    """한 공정의 조회 조건 묶음"""
+    """
+    한 공정의 조회 조건 묶음.
+
+    ★ LOT_CD(device)마다 레시피·파라미터·사전공정이 다르다.
+      예전에는 전부 합쳐서 조회했다 — 5E2 를 조회하면서 5E9 의
+      레시피·파라미터까지 조건에 넣었고, 사전공정은 첫 행 것만 써서
+      나머지 device 의 사전공정은 통째로 무시됐다.
+      이제 by_lot 에 device 별 조건을 따로 담는다.
+
+    ★ 위쪽(lot_cd_list·param_list 등)은 예전 형태를 유지한다 —
+      화면 목록이나 컬럼 이름 계산처럼 '전체' 가 필요한 곳이 있어서다.
+      실제 조회는 by_lot 을 쓴다.
+    """
     sub   = df_info[df_info['OPER_ID'] == oper_id]
     first = sub.iloc[0]
 
     # 챔버 파라미터 자동 확장 (EBARA: PA/PB→PC/PD, KCT: PL→PR)
     param_list = _expand_chamber_params(
         sub['PARAM'].unique().tolist(), first['EQ_MODEL'])
+
+    # ── device 별 조건 ───────────────────────────────────
+    by_lot = {}
+    for lot_cd, g in sub.groupby('LOT_CD'):
+        gf = g.iloc[0]
+        by_lot[str(lot_cd)] = {
+            'lot_cd':         str(lot_cd),
+            'recipe_list':    [r for r in g['RECIPE_ID'].unique().tolist()
+                               if str(r).strip()],
+            'param_list':     _expand_chamber_params(
+                                  g['PARAM'].unique().tolist(),
+                                  gf['EQ_MODEL']),
+            'eq_model':       gf['EQ_MODEL'],
+            'pre_oper_id':    gf.get('PRE_OPER_ID', ''),
+            'pre_oper_desc':  gf.get('PRE_OPER_DESC', ''),
+            'pre_oper_param': gf.get('PRE_OPER_PARAM', ''),
+        }
 
     return {
         'fab':            str(first['FAB']).lower(),      # 테이블명에 소문자로 들어감
@@ -364,6 +393,8 @@ def get_oper_cond(df_info, oper_id):
         'pre_oper_id':    first['PRE_OPER_ID'],
         'pre_oper_desc':  first['PRE_OPER_DESC'],
         'pre_oper_param': first['PRE_OPER_PARAM'],
+        # ★ device 별 조건 — 실제 조회는 이것을 쓴다
+        'by_lot':         by_lot,
         # Inline 계측 — 등록돼 있을 수도, 없을 수도 있다.
         # 없으면 빈 목록이고 조회 자체를 건너뛴다.
         'resp_steps':     _step_cond(oper_id, 'resp'),
@@ -483,20 +514,19 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
               on_progress=None):
     fab      = cond['fab']
     oper_id  = cond['oper_id']
-    pre_oper = str(cond.get('pre_oper_id') or '')
-    param_in = _param_tuple(cond['param_list'])
 
-    recipe_list = [r for r in cond['recipe_list'] if r]
-    # 챔버 확장(_AB/_CD) 등 여러 레시피를 모두 조회한다
-    recipe_cond = _recipe_like_cond(recipe_list, 'c.eqp_recipe_id')
-    pre_oper_r1 = pre_oper[:-1] if pre_oper else ''
+    # ★ 조건은 LOT_CD(device)마다 다르다. 여기서는 기본값만 잡고,
+    #   실제 값은 아래 루프에서 device 별로 다시 정한다.
+    #   예전엔 여기서 한 번 정해 전 device 에 같은 조건을 썼다 —
+    #   5E2 를 조회하면서 5E9 의 레시피·파라미터가 섞였고,
+    #   사전공정은 첫 device 것만 쓰였다.
+    by_lot = cond.get('by_lot') or {}
 
     # ★ 사전공정이 없으면 wafer-history 조인을 통째로 건너뛴다.
     #   이 조인은 m10/m11/m14/m15 4개 테이블을 UNION 하는 가장 무거운 부분인데,
     #   pre_oper 가 비면 operation_id like '%' 가 되어 전체를 훑는다.
-    #   붙일 정보(pre_eqp_id/pre_eqp_ch)도 없으므로 돌릴 이유가 없다.
-    use_pre = bool(pre_oper)
-    if not use_pre and VERBOSE:
+    #   (use_pre 는 device 별로 루프 안에서 정한다)
+    if not any(v.get('pre_oper_id') for v in by_lot.values()) and VERBOSE:
         print('  [SRC] 사전공정 미지정 — wafer-history 조인 생략 (조회가 빨라집니다)')
 
     # ★ 기간을 나누지 않고 한 번에 던진다
@@ -506,6 +536,22 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
 
     dfs = []
     for lot_code in cond['lot_cd_list']:
+        # ── 이 device 의 조건 ────────────────────────────
+        lc = by_lot.get(str(lot_code), {})
+        param_in = _param_tuple(lc.get('param_list') or cond['param_list'])
+        recipe_list = [r for r in (lc.get('recipe_list')
+                                   or cond['recipe_list']) if r]
+        recipe_cond = _recipe_like_cond(recipe_list, 'c.eqp_recipe_id')
+
+        pre_oper = str(lc.get('pre_oper_id') or cond.get('pre_oper_id') or '')
+        pre_oper_r1 = pre_oper[:-1] if pre_oper else ''
+        use_pre = bool(pre_oper)
+
+        if VERBOSE:
+            print(f'  [SRC] {lot_code} — param {len(param_in.split(chr(44)))}개 · '
+                  f'recipe {len(recipe_list)}개 · '
+                  f'사전공정 {pre_oper or "(없음)"}')
+
         for dt_s, dt_e, mt_s, mt_e in chunks:
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
