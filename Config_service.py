@@ -238,6 +238,8 @@ def get_oper(oper_id):
         'use_yn': row[7] or 'Y',
         'lots': lots, 'params': params, 'defects': defects,
         'resps': resps,
+        # ★ 연계 공정 — 사전공정 chamber·측정값을 device 단위로 담는다
+        'links': links_of_oper(oper_id),
     }
 
 
@@ -438,15 +440,30 @@ def save_oper(d, user=''):
                             f'VALUES (%s,%s,%s,%s,%s,%s)',
                             [oper_id, lot, step, desc, prm, use])
 
+    # ★ 연계 공정은 표가 따로라 별도 함수로 저장한다.
+    #   화면이 links 를 안 보내면 건드리지 않는다 —
+    #   payload 누락으로 등록이 통째로 날아가는 일을 막기 위해서다.
+    n_link = 0
+    if 'links' in d:
+        n_link = save_links(oper_id, d.get('links') or [])
+
     return {'oper_id': oper_id, 'lots': len(lots),
             'params': len(params), 'defects': len(defects),
-            'resps': len(resps)}
+            'resps': len(resps), 'links': n_link}
 
 
 def delete_oper(oper_id):
+    """
+    공정 1건 삭제.
+
+    ★ 하위 표를 빠짐없이 지운다 — T_RESP 와 T_LINK 가 빠져 있어
+      공정을 지워도 Response·연계 행이 남던 문제가 있었다.
+      그 행들은 어느 화면에도 안 보이면서 조회에는 섞인다.
+    """
     ensure_tables()
+    ensure_link_table()
     with _conn().cursor() as cur:
-        for t in (T_LOT, T_PARAM, T_DEFECT, T_OPER):
+        for t in (T_LOT, T_PARAM, T_DEFECT, T_RESP, T_LINK, T_OPER):
             cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
     return True
 
@@ -877,3 +894,284 @@ def suggest_lots(oper_id):
         cur.execute(f'SELECT DISTINCT "LOT_CD" FROM {table} '
                     f'WHERE "LOT_CD" IS NOT NULL ORDER BY 1')
         return [str(r[0]) for r in cur.fetchall()]
+
+
+# ══════════════════════════════════════════════════════════
+# 연계 공정 (cmp_cfg_link)
+#
+#   본공정에 붙일 다른 공정의 값을 등록한다.
+#   사전공정 chamber, 사전공정 측정값, Response, Defect 를 한 표에서 다룬다.
+#
+#   ★ LOT_CD(device) 단위다.
+#     5E2 와 5E9 가 서로 다른 사전공정을 쓰는 일이 흔한데,
+#     예전 구조는 사전공정이 공정 단위라 그걸 표현할 수 없었다.
+#     LOT_CD 를 비우면 그 공정의 모든 device 에 적용된다.
+#
+#   ★ 조회처는 타입이 아니라 PARAM 이 가른다.
+#       param 이 chamber → apc_sk_wafer_hst_r2r_all_*  (장비·챔버 이력)
+#       그 외             → 타입에 맞는 측정 테이블
+#     한 공정이 chamber 와 측정값을 동시에 가져올 수 있다.
+# ══════════════════════════════════════════════════════════
+T_LINK = 'cmp_cfg_link'
+
+# 연계 타입 — '어느 측정 테이블을 볼지' 만 정한다
+LINK_KINDS = ['SRC', 'REP', 'DEF']
+LINK_KIND_LABEL = {'SRC': 'SRC (측정값)', 'REP': 'REP (Response)',
+                   'DEF': 'DEF (Defect)'}
+
+# 용도 — 정기 적재는 mon/both 만 조회한다
+LINK_SCOPES = [('both', '둘 다'), ('mon', '모니터링'), ('ana', '분석 전용')]
+
+# chamber 로 볼 PARAM 이름
+CHAMBER_PARAMS = {'CHAMBER', 'CH', 'CHM', 'EQP_CH', 'MODULE', 'MODULE_ID',
+                  '챔버'}
+
+# 한 공정에 등록할 수 있는 연계 공정 수 (별칭 기준)
+MAX_LINKS = 5
+
+
+def is_chamber_param(param):
+    """빈 param 도 chamber 로 본다 — 사전공정은 대개 챔버가 목적이다"""
+    return _slug_name(param).upper() in CHAMBER_PARAMS or not _slug_name(param)
+
+
+def link_column(kind, alias, param):
+    """
+    연계 측정값이 들어갈 컬럼 이름.
+      link_column('SRC', 'M1_POLY', 'THK') -> 'SRC_M1_POLY_THK'
+
+    ★ chamber 는 여기서 다루지 않는다 — chm_columns() 가 맡는다.
+    """
+    k = _up(kind) if _up(kind) in LINK_KINDS else 'SRC'
+    a, p = _slug_name(alias), _slug_name(param)
+    if is_chamber_param(param) or not p:
+        return ''
+    return f'{k}_{a}_{p}' if a else f'{k}_{p}'
+
+
+def chm_columns(alias):
+    """chamber 가 만드는 컬럼 두 개 — 장비와 챔버"""
+    a = _slug_name(alias)
+    return [f'{a}_EQP', f'{a}_CH'] if a else []
+
+
+# 웨이퍼 번호 자릿수 — 조인 키 형태를 여기서 고정한다
+WF_PAD = 2
+
+
+def wafer_key(alias_lot_id, wf_id):
+    """
+    병합 키. wf_id 는 반드시 0 패딩된 문자열로 만든다.
+
+    ★ Lake 가 '01' 로 주더라도 중간에 정수로 바뀌면 '1' 이 되어
+      다른 데이터와 안 붙는다. 양쪽 모두 이 함수를 거쳐야 한다.
+    """
+    w = _s(wf_id)
+    if w.isdigit():
+        w = w.zfill(WF_PAD)
+    return f'{_s(alias_lot_id)}.{w}'
+
+
+def lots_of(oper_id):
+    """
+    기준정보에 등록된 LOT_CD 목록.
+
+    ★ 조회 조건은 반드시 여기서 나와야 한다.
+      적재 테이블에서 긁어오면 샘플 랏처럼 등록하지 않은 device 가
+      섞여 엉뚱한 쿼리가 나간다.
+    """
+    ensure_tables()
+    with _conn().cursor() as cur:
+        cur.execute(f"""
+            SELECT DISTINCT lot_cd FROM {T_LOT}
+            WHERE oper_id = %s AND COALESCE(use_yn,'Y') <> 'N'
+              AND lot_cd IS NOT NULL AND lot_cd <> ''
+            ORDER BY 1
+        """, [_up(oper_id)])
+        return [r[0] for r in cur.fetchall()]
+
+
+def ensure_link_table():
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {T_LINK} (
+              id BIGSERIAL PRIMARY KEY,
+              oper_id  VARCHAR(100),
+              lot_cd   VARCHAR(50),
+              kind     VARCHAR(10) DEFAULT 'SRC',
+              alias    VARCHAR(100),
+              link_id  VARCHAR(100),
+              param    VARCHAR(200),
+              scope    VARCHAR(10) DEFAULT 'both',
+              seq      INTEGER DEFAULT 0,
+              use_yn   VARCHAR(1) DEFAULT 'Y'
+            )
+        ''')
+        cur.execute(f'CREATE INDEX IF NOT EXISTS ix_{T_LINK}_oper '
+                    f'ON {T_LINK}(oper_id)')
+
+
+def links_of_oper(oper_id):
+    """편집 화면용 — 등록된 연계 행 그대로"""
+    ensure_link_table()
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT lot_cd, kind, alias, link_id, param, scope, use_yn
+            FROM {T_LINK} WHERE oper_id = %s
+            ORDER BY seq, lot_cd, alias, id
+        ''', [_up(oper_id)])
+        return [{'lot_cd': r[0] or '', 'kind': r[1] or 'SRC',
+                 'alias': r[2] or '', 'link_id': r[3] or '',
+                 'param': r[4] or '', 'scope': r[5] or 'both',
+                 'use_yn': r[6] or 'Y'} for r in cur.fetchall()]
+
+
+def links_for_query(oper_id, lot_cd=None, scope=None):
+    """
+    조회용 — 같은 연계 공정끼리 묶는다.
+
+    ★ lot_cd 를 주면 그 device 에 해당하는 것만 돌려준다.
+      LOT_CD 가 빈 행은 모든 device 에 적용된다.
+    ★ 한 묶음이 chamber 와 측정값을 함께 가질 수 있다 —
+      want_chm 과 params 를 따로 담는다.
+    """
+    ensure_link_table()
+    where = ["oper_id = %s", "COALESCE(use_yn,'Y') <> 'N'"]
+    args = [_up(oper_id)]
+
+    if lot_cd:
+        where.append("(COALESCE(lot_cd,'') = '' OR lot_cd = %s)")
+        args.append(_up(lot_cd))
+    if scope:
+        where.append("(COALESCE(scope,'both') = 'both' OR scope = %s)")
+        args.append(scope)
+
+    with _conn().cursor() as cur:
+        cur.execute(f'''
+            SELECT lot_cd, kind, alias, link_id, param, scope
+            FROM {T_LINK} WHERE {" AND ".join(where)}
+            ORDER BY seq, alias, id
+        ''', args)
+        rows = cur.fetchall()
+
+    out = {}
+    for lc, kind, alias, link_id, prm, sc in rows:
+        if not str(alias or '').strip() or not str(link_id or '').strip():
+            continue
+        k = (_slug_name(alias), _up(link_id), _up(kind) or 'SRC')
+        g = out.setdefault(k, {
+            'lot_cd': lc or '', 'kind': k[2], 'alias': _slug_name(alias),
+            'link_id': k[1], 'params': [], 'want_chm': False,
+            'columns': [], 'scope': sc or 'both',
+        })
+        if is_chamber_param(prm):
+            g['want_chm'] = True
+        else:
+            p = _slug_name(prm)
+            if p and p not in g['params']:
+                g['params'].append(p)
+
+    for g in out.values():
+        cols = chm_columns(g['alias']) if g['want_chm'] else []
+        cols += [link_column(g['kind'], g['alias'], p) for p in g['params']]
+        g['columns'] = [c for c in cols if c]
+
+    return list(out.values())
+
+
+def all_link_columns(oper_id):
+    """이 공정이 만드는 연계 컬럼 전체 — 화면 미리보기용"""
+    cols = []
+    for g in links_for_query(oper_id):
+        for c in g['columns']:
+            if c not in cols:
+                cols.append(c)
+    return cols
+
+
+def save_links(oper_id, rows):
+    """
+    연계 공정 저장 — 기존 행을 지우고 새로 넣는다.
+
+    ★ 별칭과 공정·스텝이 모두 있어야 유효한 행이다.
+      빈 행은 화면에서 '추가' 만 누르고 안 채운 경우라 조용히 버린다.
+    """
+    ensure_link_table()
+    oper_id = _up(oper_id)
+    keep = []
+    for i, r in enumerate(rows or []):
+        alias = _slug_name(r.get('alias'))
+        link_id = _up(r.get('link_id'))
+        if not alias or not link_id:
+            continue
+        kind = _up(r.get('kind'))
+        keep.append((
+            oper_id, _up(r.get('lot_cd')),
+            kind if kind in LINK_KINDS else 'SRC',
+            alias, link_id, _up(r.get('param')),
+            (r.get('scope') or 'both'), i,
+            'N' if str(r.get('use_yn', 'Y')).upper() == 'N' else 'Y',
+        ))
+
+    with _conn().cursor() as cur:
+        cur.execute(f'DELETE FROM {T_LINK} WHERE oper_id = %s', [oper_id])
+        for t in keep:
+            cur.execute(f'''
+                INSERT INTO {T_LINK}
+                  (oper_id, lot_cd, kind, alias, link_id, param,
+                   scope, seq, use_yn)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ''', list(t))
+    return len(keep)
+
+
+def validate_links(oper_id):
+    """
+    등록 상태 점검 — 저장 전에 문제를 알려 준다.
+
+    ★ 컬럼 이름이 겹치면 나중 값이 앞 값을 덮어써 조용히 사라진다.
+      그게 가장 찾기 어려운 문제라 먼저 본다.
+    """
+    rows = links_of_oper(oper_id)
+    issues = []
+
+    seen = {}
+    aliases = {}
+    for i, r in enumerate(rows, start=1):
+        if str(r.get('use_yn', 'Y')).upper() == 'N':
+            continue
+        alias, link_id = _slug_name(r['alias']), _up(r['link_id'])
+        if not alias:
+            issues.append(f'{i}행: 공정명(별칭)이 없습니다')
+            continue
+        if not link_id:
+            issues.append(f'{i}행: 공정·스텝이 없습니다')
+            continue
+
+        aliases.setdefault(alias, set()).add(link_id)
+
+        if is_chamber_param(r['param']):
+            cols = chm_columns(alias)
+        else:
+            c = link_column(r['kind'], alias, r['param'])
+            cols = [c] if c else []
+            if not c:
+                issues.append(f'{i}행: PARAM 이 없어 컬럼을 만들 수 없습니다')
+
+        for c in cols:
+            if c in seen and seen[c] != (alias, link_id):
+                issues.append(f'{i}행: 컬럼 {c} 이(가) 겹칩니다 — '
+                              f'별칭을 다르게 지으세요')
+            seen[c] = (alias, link_id)
+
+    for alias, ids in aliases.items():
+        if len(ids) > 1:
+            issues.append(f'별칭 {alias} 이(가) 여러 공정에 쓰였습니다: '
+                          f'{", ".join(sorted(ids))}')
+
+    if len(aliases) > MAX_LINKS:
+        issues.append(f'연계 공정이 {len(aliases)}개입니다 — '
+                      f'{MAX_LINKS}개 이하를 권합니다 (조회가 느려집니다)')
+
+    return {'ok': not issues, 'issues': issues,
+            'n_alias': len(aliases), 'columns': sorted(seen.keys())}
