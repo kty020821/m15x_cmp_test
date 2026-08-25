@@ -123,6 +123,8 @@ table.et th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
   color: var(--tx-2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 .colprev.none { color: var(--tx-muted); }
+.warn-cell { border-color: var(--warn) !important;
+  background: rgba(245,158,11,.07) !important; }
 .warn-txt { color: var(--warn); font-weight: 700; }
 .fx::placeholder { color: var(--tx-muted); font-weight: 600;
   font-family: var(--cf-font); }
@@ -513,7 +515,7 @@ function renderEditor() {
     <div class="sec">
       <div class="sec-h"><h3>Response 계측 스텝</h3>
         <span class="sub" id="rcnt"></span>
-        <span class="sub">— 관리 파라미터 1개당 1행으로 등록</span>
+        <span class="sub">— 이 공정의 Inline 계측 · 파라미터 1개당 1행</span>
         <span class="right">
           <button class="btn sm" id="fclr-resps" style="display:none;"
                   onclick="clearFilter('resps')">필터 해제</button>
@@ -560,7 +562,7 @@ function renderEditor() {
     <div class="sec">
       <div class="sec-h"><h3>Defect 계측 스텝</h3>
         <span class="sub" id="dcnt"></span>
-        <span class="sub">— 관리 파라미터 1개당 1행으로 등록</span>
+        <span class="sub">— 이 공정의 Defect 계수 · 파라미터 1개당 1행</span>
         <span class="right">
           <button class="btn sm" id="fclr-defects" style="display:none;"
                   onclick="clearFilter('defects')">필터 해제</button>
@@ -608,7 +610,7 @@ function renderEditor() {
     <div class="sec">
       <div class="sec-h"><h3>연계 공정</h3>
         <span class="sub" id="kcnt"></span>
-        <span class="sub">— 사전공정 chamber·측정값, 다른 공정의 값을 붙입니다</span>
+        <span class="sub">— 다른 공정의 값 (사전공정 챔버·측정값 등)</span>
         <span class="right">
           <button class="btn sm" id="fclr-links" style="display:none;"
                   onclick="clearFilter('links')">필터 해제</button>
@@ -619,7 +621,10 @@ function renderEditor() {
           <button class="btn sm" onclick="addLink()">+ 추가</button>
         </span></div>
       <div class="hint" style="margin:0 0 8px;">
-        <b>LOT_CD</b> 를 고르면 그 device 에만 적용됩니다 — 비우면 전 device.
+        <b>다른 공정</b>의 값을 이 공정에 붙입니다 — 사전공정 챔버,
+        사전공정 측정값, 다른 공정의 계측값.
+        <b>이 공정 자신의 계측</b>은 위 Response·Defect 표에 넣으세요.<br>
+        <b>LOT_CD</b> 를 고르면 그 device 에만 적용됩니다 (비우면 전 device).
         관리 PARAM 에 <b>CHAMBER</b> 를 넣으면 장비·챔버 이력에서,
         그 외 값은 타입에 맞는 측정 테이블에서 가져옵니다.
       </div>
@@ -910,8 +915,12 @@ function renderLinks() {
                  data-tbl="links" data-row="${i}" data-col="2"
                  oninput="cur.links[${i}].alias=this.value.toUpperCase();refreshLinkCol(${i})"></td>
       <td><input value="${esc(d.link_id)}" placeholder="T5515000C"
+                 class="${sameAsOper(d.link_id) ? 'warn-cell' : ''}"
+                 title="${sameAsOper(d.link_id)
+                   ? '본공정입니다 — 이 공정의 계측은 Response·Defect 표에 넣으세요'
+                   : ''}"
                  data-tbl="links" data-row="${i}" data-col="3"
-                 oninput="cur.links[${i}].link_id=this.value.toUpperCase()"></td>
+                 oninput="cur.links[${i}].link_id=this.value.toUpperCase();renderLinks()"></td>
       <td><input value="${esc(d.param)}" placeholder="CHAMBER 또는 THK"
                  list="param-hints"
                  data-tbl="links" data-row="${i}" data-col="4"
@@ -950,6 +959,13 @@ function refreshLinkCol(i) {
 }
 
 function addLink() { addStepRow('links'); }
+
+/* 본공정을 연계로 등록했나 — 그러면 같은 값이 두 번 붙는다 */
+function sameAsOper(linkId) {
+  const a = String(linkId || '').trim().toUpperCase();
+  const b = String((cur && cur.oper_id) || '').trim().toUpperCase();
+  return !!a && a === b;
+}
 
 
 /* ══════════════════════════════════════════════════
