@@ -251,8 +251,8 @@ def get_config():
     #   최신이라고 보는 것이 자연스럽다.
     frames, srcs = [], []
 
-    for name, mod, label in (('v2', 'config2_service', 'cmp_cfg2_*'),
-                             ('v1', 'config_service', 'cmp_cfg_*')):
+    # ★ 기준정보는 config_service 하나로 통합됐다 (config2 폐기)
+    for name, mod, label in (('v1', 'config_service', 'cmp_cfg_*'),):
         try:
             m = __import__(f'{__package__}.{mod}', fromlist=[mod])
             d = m.build_config_df()
