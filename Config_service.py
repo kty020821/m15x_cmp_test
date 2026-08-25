@@ -899,8 +899,14 @@ def suggest_lots(oper_id):
 # ══════════════════════════════════════════════════════════
 # 연계 공정 (cmp_cfg_link)
 #
-#   본공정에 붙일 다른 공정의 값을 등록한다.
-#   사전공정 chamber, 사전공정 측정값, Response, Defect 를 한 표에서 다룬다.
+#   ★ '다른 공정' 의 값만 여기 등록한다.
+#     본공정 자신의 Inline 계측은 Response·Defect 표에 넣는다.
+#       연계 공정 : 사전공정 chamber, 사전공정 측정값,
+#                   다른 공정의 Response·Defect
+#       Response  : 이 공정의 Inline 계측
+#       Defect    : 이 공정의 Defect 계수
+#     둘 다 되는 상태로 두면 어디에 넣을지 헷갈리고,
+#     같은 값을 양쪽에 넣어 컬럼이 겹치는 일이 생긴다.
 #
 #   ★ LOT_CD(device) 단위다.
 #     5E2 와 5E9 가 서로 다른 사전공정을 쓰는 일이 흔한데,
@@ -926,8 +932,10 @@ LINK_SCOPES = [('both', '둘 다'), ('mon', '모니터링'), ('ana', '분석 전
 CHAMBER_PARAMS = {'CHAMBER', 'CH', 'CHM', 'EQP_CH', 'MODULE', 'MODULE_ID',
                   '챔버'}
 
-# 한 공정에 등록할 수 있는 연계 공정 수 (별칭 기준)
-MAX_LINKS = 5
+# 연계 공정 수에는 상한을 두지 않는다.
+#   ★ 예전엔 조회가 느려진다는 이유로 막았는데, 증분 적재라
+#     매일 하루치만 받으므로 개수가 늘어도 부담이 적다.
+#     대신 검증에서 개수를 알려 주기만 한다.
 
 
 def is_chamber_param(param):
@@ -1169,9 +1177,12 @@ def validate_links(oper_id):
             issues.append(f'별칭 {alias} 이(가) 여러 공정에 쓰였습니다: '
                           f'{", ".join(sorted(ids))}')
 
-    if len(aliases) > MAX_LINKS:
-        issues.append(f'연계 공정이 {len(aliases)}개입니다 — '
-                      f'{MAX_LINKS}개 이하를 권합니다 (조회가 느려집니다)')
+    # ★ 본공정을 연계로 등록하면 같은 값이 두 번 붙는다.
+    #   Response·Defect 표에 넣어야 할 것을 여기 넣은 경우다.
+    for i, r in enumerate(rows, start=1):
+        if _up(r.get('link_id')) == _up(oper_id):
+            issues.append(f'{i}행: 본공정({oper_id})을 연계로 등록했습니다 — '
+                          f'이 공정의 계측은 Response·Defect 표에 넣으세요')
 
     return {'ok': not issues, 'issues': issues,
             'n_alias': len(aliases), 'columns': sorted(seen.keys())}
