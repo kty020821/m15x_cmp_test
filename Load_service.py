@@ -839,7 +839,7 @@ def _due_schedule():
 def _sched_opers():
     """예약 적재 대상 — v1·v2 기준정보를 합친다"""
     out = []
-    for mod in ('config_service', 'config2_service'):
+    for mod in ('config_service',):
         try:
             m = __import__(f'{__package__}.{mod}', fromlist=[mod])
             for o in m.list_opers():
