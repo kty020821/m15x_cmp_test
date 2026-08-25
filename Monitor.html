@@ -256,6 +256,8 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
           <option value="60">60일</option>
           <option value="90">90일</option>
         </select>
+        <button class="btn-clear" onclick="refreshLoad()"
+                style="font-size:11px;">새로고침</button>
         <span class="msg" id="load-msg" style="margin-left:auto;"></span>
       </div>
       {% endif %}
@@ -385,17 +387,47 @@ function fmt(v, nd) {
 
 /* 오류가 나도 팝업을 띄우지 않는다 (분석 페이지와 동일 방침) */
 async function postJSON(url, payload) {
+  /* ★ 응답을 글자로 먼저 받는다.
+     res.json() 을 바로 부르면 HTML 이 왔을 때
+     "Unexpected token '<'" 만 남고 진짜 원인이 사라진다.
+     배포에서는 500(오류 페이지)·404(경로 없음)·로그인 리다이렉트가
+     전부 HTML 로 오므로 그것들을 구분해 알려 준다. */
+  let res, text;
   try {
-    const res = await fetch(url, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
       body: JSON.stringify(payload || {}),
     });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) { console.error(`API ${res.status}`, url, j.error || ''); return {}; }
-    if (j.note)  console.info('[monitor]', j.note);
-    if (j.error) console.warn('[monitor]', j.error);
-    return j;
-  } catch (e) { console.error('요청 실패', url, e); return {}; }
+    text = await res.text();
+  } catch (e) {
+    console.error('요청 실패', url, e);
+    return {ok: false, error: `서버에 연결하지 못했습니다: ${e.message}`};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    // JSON 이 아니다 — 무엇이 왔는지 보고 원인을 짚는다
+    const head = (text || '').trim().slice(0, 300);
+    let why;
+    if (res.status === 404) {
+      why = `경로를 찾을 수 없습니다 (404) — urls.py 에 ${url} 이 ` +
+            `등록됐는지 확인하세요`;
+    } else if (res.status === 500) {
+      why = '서버 오류(500) — 서버 로그를 확인하세요';
+    } else if (res.status === 403) {
+      why = '권한 없음(403) — CSRF 설정이나 로그인 상태를 확인하세요';
+    } else if (/<!doctype html|<html/i.test(head)) {
+      why = `HTML 이 돌아왔습니다 (${res.status}) — 로그인 페이지로 ` +
+            `넘어갔거나 오류 페이지일 수 있습니다`;
+    } else {
+      why = `응답을 해석하지 못했습니다 (${res.status})`;
+    }
+    console.error('API 응답 오류', url, res.status, head);
+    return {ok: false, error: why, status: res.status, body: head};
+  }
 }
 
 /* ══════════════════════════════════════════════════
@@ -656,13 +688,24 @@ function loadMsg(t, err) {
   el.textContent = t;
 }
 
+/* ★ 패널을 열 때마다 전부 다시 조회하면 느리다.
+   한 번 받은 뒤에는 그대로 두고, 새로고침 버튼으로만 다시 받는다. */
+let loadLoaded = false;
+
 async function openLoad() {
-  document.getElementById('loadbox').style.display = 'block';
+  const box = document.getElementById('loadbox');
+  const shown = box.style.display === 'block';
+
+  box.style.display = 'block';
+  box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+
+  // 진행 상황과 예약은 가벼우니 열 때마다 갱신한다
+  refreshQueue();
+  loadSchedule();
+
+  if (loadLoaded && shown) return;      // 이미 받아 뒀다
   await refreshLoad();
-  refreshQueue();       // 진행 상황 (다른 사람이 돌린 것도 보인다)
-  loadSchedule();       // 정기 예약 설정
-  document.getElementById('loadbox').scrollIntoView({behavior:'smooth',
-                                                    block:'nearest'});
+  loadLoaded = true;
 }
 
 async function refreshLoad() {
