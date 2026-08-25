@@ -103,7 +103,21 @@
 .fld .hint { font-size: 10px; font-weight: 600; color: var(--tx-muted); }
 
 /* ── 편집 표 ─────────────────────────────────── */
-table.et { width: 100%; border-collapse: collapse; }
+/* ★ table-layout: fixed 라야 th 의 width 가 그대로 적용된다.
+   auto 면 브라우저가 내용에 맞춰 다시 계산해서, 끌어서 바꾼 폭이
+   다음 렌더에 되돌아간다. */
+table.et { width: 100%; border-collapse: collapse; table-layout: fixed; }
+
+/* 헤더 경계를 끌어 폭을 조절한다 */
+table.et th { position: relative; }
+.col-grip { position: absolute; top: 0; right: -3px; width: 7px;
+  height: 100%; cursor: col-resize; z-index: 3; }
+.col-grip:hover, .col-grip.on { background: var(--accent); opacity: .35; }
+body.col-resizing { cursor: col-resize; user-select: none; }
+
+/* 폭이 좁아도 내용을 볼 수 있게 — 칸 안에서 잘리되 툴팁으로 확인 */
+table.et td { overflow: hidden; }
+table.et input, table.et select { text-overflow: ellipsis; }
 table.et th { font-size: 10px; font-weight: 800; color: var(--tx-muted);
   text-align: left; padding: 7px 8px; border-bottom: 1.5px solid var(--bd);
   letter-spacing: .03em;
@@ -406,7 +420,10 @@ function renderEditor() {
       <b>엑셀에서 그대로 붙여넣을 수 있습니다</b> —
       채우고 싶은 칸을 클릭하고 <b>Ctrl+V</b> 하면 그 자리부터 들어갑니다.
       행이 모자라면 자동으로 늘어나고, 머리글 줄은 알아서 건너뜁니다.
-      Enter 로 아래 칸으로 이동합니다.
+      Enter 로 아래 칸으로 이동합니다.<br>
+      <b>컬럼 폭</b>은 머리글 경계를 끌어서 조절합니다 (두 번 누르면 기본값).
+      <a href="#" onclick="resetColWidths();return false"
+         style="color:var(--accent);">전체 초기화</a>
     </div>
     <div class="sec">
       <div class="sec-h"><h3>${esc(c.oper_desc || c.oper_id || '새 공정')}</h3>
@@ -688,6 +705,8 @@ function renderEditor() {
   restoreFilterInputs();       // 화면을 새로 만들었으므로 필터 값 되살리기
   renderLots(); renderParams(); renderResps(); renderDefects();
   renderLinks();
+  // ★ 표는 innerHTML 로 새로 만들어지므로 렌더 후에 다시 입힌다
+  setupColResize(document.getElementById('editor'));
   refreshAutoTypes(true);      // '자동 (…)' 표시 채우기
 }
 
@@ -1110,6 +1129,117 @@ document.addEventListener('keydown', (ev) => {
     `[data-col="${el.dataset.col}"]`);
   if (nxt) { ev.preventDefault(); nxt.focus(); if (nxt.select) nxt.select(); }
 });
+
+
+/* ══════════════════════════════════════════════════
+   컬럼 폭 조절
+
+   ★ 헤더 경계를 끌어서 폭을 바꾼다. 내용이 잘려 안 보이는 칸을
+     그때그때 넓힐 수 있어야 한다.
+   ★ 바꾼 폭은 이 브라우저에 기억해 둔다 — 다음에 열어도 그대로다.
+     매번 다시 끄는 건 번거롭다.
+   ★ 표를 다시 그려도 유지된다. 표는 innerHTML 로 새로 만들어지므로
+     렌더 후에 폭을 다시 입혀야 한다.
+   ══════════════════════════════════════════════════ */
+const COLW_KEY = 'cfg_colw';
+let colWidths = {};          // {tbodyId: [px, px, ...]}
+
+function loadColWidths() {
+  try {
+    colWidths = JSON.parse(window.localStorage.getItem(COLW_KEY) || '{}') || {};
+  } catch (e) { colWidths = {}; }
+}
+
+function saveColWidths() {
+  try {
+    window.localStorage.setItem(COLW_KEY, JSON.stringify(colWidths));
+  } catch (e) { /* 저장이 막힌 환경 — 이번 세션만 유지된다 */ }
+}
+
+/* 표를 찾아 그립을 달고 저장된 폭을 입힌다 */
+function setupColResize(root) {
+  (root || document).querySelectorAll('table.et').forEach(tb => {
+    const body = tb.querySelector('tbody');
+    if (!body || !body.id) return;
+    const ths = [...tb.querySelectorAll('thead th')];
+    if (!ths.length) return;
+
+    // 저장된 폭 적용
+    const saved = colWidths[body.id];
+    if (saved) {
+      ths.forEach((th, i) => {
+        if (saved[i]) th.style.width = saved[i] + 'px';
+      });
+    }
+
+    // 그립은 한 번만 단다
+    if (tb._gripped) return;
+    tb._gripped = true;
+
+    ths.forEach((th, i) => {
+      if (i === ths.length - 1) return;      // 마지막 칸은 여백이라 제외
+      const g = document.createElement('div');
+      g.className = 'col-grip';
+      g.addEventListener('mousedown', ev => startColResize(ev, tb, body.id, i));
+      g.addEventListener('dblclick', ev => {
+        // 두 번 누르면 그 칸만 기본값으로
+        ev.preventDefault();
+        const w = colWidths[body.id];
+        if (w) { delete w[i]; saveColWidths(); }
+        th.style.width = '';
+      });
+      th.appendChild(g);
+    });
+  });
+}
+
+let resizing = null;
+
+function startColResize(ev, table, bodyId, idx) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const th = [...table.querySelectorAll('thead th')][idx];
+  resizing = {
+    table, bodyId, idx, th,
+    startX: ev.clientX,
+    startW: th.getBoundingClientRect().width,
+    grip: ev.target,
+  };
+  ev.target.classList.add('on');
+  document.body.classList.add('col-resizing');
+}
+
+document.addEventListener('mousemove', ev => {
+  if (!resizing) return;
+  // 너무 좁으면 내용이 아예 안 보이므로 하한을 둔다
+  const w = Math.max(44, resizing.startW + (ev.clientX - resizing.startX));
+  resizing.th.style.width = w + 'px';
+});
+
+document.addEventListener('mouseup', () => {
+  if (!resizing) return;
+  const {bodyId, idx, th, grip} = resizing;
+  colWidths[bodyId] = colWidths[bodyId] || {};
+  colWidths[bodyId][idx] = Math.round(th.getBoundingClientRect().width);
+  saveColWidths();
+
+  if (grip) grip.classList.remove('on');
+  document.body.classList.remove('col-resizing');
+  resizing = null;
+});
+
+// ★ 선언 뒤에 부른다 — let 은 호이스팅되지 않아 위에서 부르면 TDZ 로 죽는다
+loadColWidths();
+
+/* 모든 표의 폭을 기본값으로 되돌린다 */
+function resetColWidths() {
+  colWidths = {};
+  saveColWidths();
+  document.querySelectorAll('table.et thead th').forEach(th => {
+    th.style.width = '';
+  });
+  edMsg('컬럼 폭을 기본값으로 되돌렸습니다');
+}
 
 
 const TBL = {
