@@ -139,24 +139,47 @@ def status(oper_ids=None):
                     ['cmp_analysis_%'])
         tables = {r[0] for r in cur.fetchall()}
 
+        # ── 최신 데이터 날짜 ────────────────────────────
+        #   ★ 공정마다 따로 SELECT 를 던지면 왕복이 그만큼 늘어
+        #     패널이 열릴 때마다 버벅인다. UNION ALL 로 한 번에 묻는다.
+        #   ★ 각 SELECT 는 MAX("DATE") 하나뿐이라 인덱스로 즉시 나온다.
         ids = oper_ids or list(out.keys())
+        have, missing = [], []
         for oper_id in ids:
-            t = _an_table(oper_id)
+            (have if _an_table(oper_id) in tables else missing).append(oper_id)
+
+        for oper_id in missing:
             d = out.setdefault(oper_id, {})
-            if t not in tables:
-                d['data_max'] = None
-                d['loaded'] = False
-                continue
-            d['loaded'] = True
+            d['data_max'] = None
+            d['loaded'] = False
+
+        for oper_id in have:
+            out.setdefault(oper_id, {})['loaded'] = True
+
+        if have:
+            parts, args = [], []
+            for oper_id in have:
+                parts.append(f'SELECT %s AS k, MAX("DATE") AS v '
+                             f'FROM {_an_table(oper_id)}')
+                args.append(oper_id)
             try:
-                # ★ COUNT(*) 는 테이블을 통째로 훑는다. 공정이 20개면
-                #   20번 훑어 패널이 열릴 때마다 버벅였다.
-                #   행수는 마지막 적재 기록(last_rows)으로 충분하다.
-                cur.execute(f'SELECT MAX("DATE") FROM {t}')
-                mx = cur.fetchone()[0]
-                d['data_max'] = str(mx)[:19] if mx else None
-            except Exception:
-                d['data_max'] = None
+                cur.execute(' UNION ALL '.join(parts), args)
+                for k, v in cur.fetchall():
+                    out.setdefault(k, {})['data_max'] = (
+                        str(v)[:19] if v else None)
+            except Exception as e:
+                # 한 테이블이 깨져도 화면은 떠야 한다 — 개별로 다시 시도
+                print(f'[load] 최신일 일괄 조회 실패, 개별 조회로 전환: '
+                      f'{e.__class__.__name__}: {e}')
+                for oper_id in have:
+                    d = out.setdefault(oper_id, {})
+                    try:
+                        cur.execute(
+                            f'SELECT MAX("DATE") FROM {_an_table(oper_id)}')
+                        mx = cur.fetchone()[0]
+                        d['data_max'] = str(mx)[:19] if mx else None
+                    except Exception:
+                        d['data_max'] = None
 
     return out
 
@@ -701,7 +724,16 @@ def cancel(oper_id=None, all_waiting=False):
 #     같은 공정이 겹치면 큐가 중복을 막는다.
 # ══════════════════════════════════════════════════════════
 def ensure_sched_table():
-    with _conn().cursor() as cur:
+    """
+    예약 표를 만든다.
+
+    ★ 트랜잭션이 열린 채 요청이 끝나면 저장이 롤백된다.
+      설정 저장은 곧바로 반영돼야 하므로 자동커밋을 확인한다.
+    """
+    conn = _conn()
+    if not conn.get_autocommit():
+        conn.set_autocommit(True)
+    with conn.cursor() as cur:
         cur.execute(
             "CREATE TABLE IF NOT EXISTS " + T_SCHED + " ("
             "  id BIGSERIAL PRIMARY KEY,"
@@ -741,9 +773,16 @@ def _yn(v, default='N'):
 
 
 def save_schedule(d, user=''):
+    """
+    예약 설정 저장.
+
+    ★ 저장 후 다시 읽어 돌려준다 — 화면이 그 값을 그대로 그리므로
+      DB 와 화면이 어긋날 수 없다.
+    """
     ensure_sched_table()
     cur_s = get_schedule()
-    with _conn().cursor() as cur:
+    conn = _conn()
+    with conn.cursor() as cur:
         cur.execute(
             "UPDATE " + T_SCHED +
             " SET enabled=%s, hour=%s, minute=%s, incremental=%s, days=%s,"
@@ -754,8 +793,24 @@ def save_schedule(d, user=''):
              _yn(d.get('incremental', 'Y'), 'Y'),
              max(1, int(d.get('days', 45) or 45)),
              str(user)[:100], cur_s['id']])
+        if not cur.rowcount:
+            # 행이 없어졌으면 새로 만든다 (표를 지운 경우 등)
+            cur.execute(
+                "INSERT INTO " + T_SCHED +
+                " (name, enabled, hour, minute, incremental, days,"
+                "  updated_by, updated_at)"
+                " VALUES ('전체 공정 정기 적재', %s, %s, 0, %s, %s, %s, NOW())",
+                [_yn(d.get('enabled')),
+                 max(0, min(23, int(d.get('hour', 6) or 0))),
+                 _yn(d.get('incremental', 'Y'), 'Y'),
+                 max(1, int(d.get('days', 45) or 45)),
+                 str(user)[:100]])
+
     ensure_worker()
-    return get_schedule()
+    saved = get_schedule()
+    print(f"[load] 예약 저장 — 사용 {saved['enabled']} · "
+          f"{saved['hour']}시 · 증분 {saved['incremental']}")
+    return saved
 
 
 def _due_schedule():
