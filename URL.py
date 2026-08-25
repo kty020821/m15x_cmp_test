@@ -50,6 +50,7 @@ urlpatterns = [
     path('api/an2/ask/',      ai.an2_ask,        name='an2-ask'),
     path('api/an2/run/',      ai.an2_run,        name='an2-run'),
     path('api/an2/llm/',      ai.an2_llm,        name='an2-llm'),
+    path('api/an2/llmcheck/',  ai.an2_llm_check,  name='an2-llm-check'),
 
     # 기준정보 v2 — 연계 공정 다중 등록 (기존 config 와 병행)
     path('config2/',              v2.config2_page,     name='config2'),
