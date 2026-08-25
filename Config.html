@@ -288,6 +288,11 @@ table.et tr.sel select { color: var(--tx-2); }
     빈 줄은 무시합니다.</div>
 </div>
 
+<!-- 관리 PARAM 입력 도우미 -->
+<datalist id="param-hints">
+  <option value="CHAMBER">장비·챔버 이력에서 가져옵니다</option>
+</datalist>
+
 <script>
 const API_OPERS      = "{% url 'config-opers' %}";
 const API_OPER       = "{% url 'config-oper' %}";
@@ -592,6 +597,75 @@ function renderEditor() {
       </div>
     </div>
 
+    <!-- ── 연계 공정 ─────────────────────────────────── -->
+    <div class="sec">
+      <div class="sec-h"><h3>연계 공정</h3>
+        <span class="sub" id="kcnt"></span>
+        <span class="sub">— 사전공정 chamber·측정값, 다른 공정의 값을 붙입니다</span>
+        <span class="right">
+          <button class="btn sm" id="fclr-links" style="display:none;"
+                  onclick="clearFilter('links')">필터 해제</button>
+          <button class="btn sm danger" id="del-links" disabled
+                  onclick="delSelected('links')">선택 삭제</button>
+          <button class="btn sm" onclick="clearRows('links')">전체 비우기</button>
+          <button class="btn sm" onclick="openBulk('links')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="addLink()">+ 추가</button>
+        </span></div>
+      <div class="hint" style="margin:0 0 8px;">
+        <b>LOT_CD</b> 를 고르면 그 device 에만 적용됩니다 — 비우면 전 device.
+        관리 PARAM 에 <b>CHAMBER</b> 를 넣으면 장비·챔버 이력에서,
+        그 외 값은 타입에 맞는 측정 테이블에서 가져옵니다.
+      </div>
+      <div class="tbl-scroll">
+        <table class="et">
+          <thead><tr>
+            <th class="ck"><input type="checkbox" id="all-links"
+                onchange="selAll('links', this.checked)"></th>
+            <th style="width:11%;">LOT_CD
+              <input class="fx" id="fx-links-lot_cd" placeholder="검색"
+                     oninput="setFilter('links','lot_cd',this.value)"></th>
+            <th style="width:9%;">타입
+              <select class="fx" id="fx-links-kind"
+                      onchange="setFilter('links','kind',this.value)">
+                <option value="">전체</option>
+                <option value="SRC">SRC</option>
+                <option value="REP">REP</option>
+                <option value="DEF">DEF</option>
+              </select></th>
+            <th style="width:17%;">공정명(별칭) *
+              <input class="fx" id="fx-links-alias" placeholder="검색"
+                     oninput="setFilter('links','alias',this.value)"></th>
+            <th style="width:15%;">공정·스텝 *
+              <input class="fx" id="fx-links-link_id" placeholder="검색"
+                     oninput="setFilter('links','link_id',this.value)"></th>
+            <th style="width:14%;">관리 PARAM
+              <input class="fx" id="fx-links-param" placeholder="검색"
+                     oninput="setFilter('links','param',this.value)"></th>
+            <th style="width:20%;">생성 컬럼
+              <span class="fx" style="border-color:transparent;
+                    background:transparent;color:var(--tx-muted);
+                    font-weight:600;">merge 결과 이름</span></th>
+            <th style="width:10%;">용도
+              <select class="fx" id="fx-links-scope"
+                      onchange="setFilter('links','scope',this.value)">
+                <option value="">전체</option>
+                <option value="both">둘 다</option>
+                <option value="mon">모니터링</option>
+                <option value="ana">분석</option>
+              </select></th>
+            <th style="width:9%;">사용
+              <select class="fx" id="fx-links-use_yn"
+                      onchange="setFilter('links','use_yn',this.value)">
+                <option value="">전체</option>
+                <option value="Y">사용</option>
+                <option value="N">제외</option>
+              </select></th>
+            <th></th></tr></thead>
+          <tbody id="ktbody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div style="margin-top:20px;display:flex;gap:8px;align-items:center;">
       <button class="btn pri" onclick="saveOper()">저장</button>
       <button class="btn" onclick="validateOne()">이 공정 검증</button>
@@ -601,6 +675,7 @@ function renderEditor() {
 
   restoreFilterInputs();       // 화면을 새로 만들었으므로 필터 값 되살리기
   renderLots(); renderParams(); renderResps(); renderDefects();
+  renderLinks();
   refreshAutoTypes(true);      // '자동 (…)' 표시 채우기
 }
 
@@ -763,6 +838,113 @@ function addResp()   { addStepRow('resps'); }
    붙여넣는 위치가 어느 표의 몇 번째 열인지는 각 input/select 에
    data-tbl / data-row / data-col 로 심어 둔다.
    ══════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════
+   연계 공정
+
+   ★ 사전공정 chamber·측정값, 다른 공정의 Response·Defect 를
+     한 표에서 다룬다. LOT_CD 단위라 device 마다 다른 사전공정을
+     쓸 수 있다 — 예전 구조는 사전공정이 공정 단위라 못 했다.
+   ★ 조회처는 타입이 아니라 PARAM 이 가른다.
+     CHAMBER 면 장비·챔버 이력, 그 외는 타입에 맞는 측정 테이블.
+   ══════════════════════════════════════════════════ */
+const CHAMBER_PARAMS = ['CHAMBER', 'CH', 'CHM', 'EQP_CH', 'MODULE',
+                        'MODULE_ID', '챔버'];
+
+function isChamberParam(p) {
+  const v = slugName(p);
+  return !v || CHAMBER_PARAMS.includes(v);
+}
+
+function slugName(v) {
+  return String(v || '').trim().toUpperCase()
+    .replace(/[^0-9A-Z_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
+
+/* 생성 컬럼 미리보기 — 서버의 link_column / chm_columns 와 같은 규칙 */
+function linkColName(d) {
+  const a = slugName(d.alias);
+  if (!a) return '';
+  if (isChamberParam(d.param)) return `${a}_EQP, ${a}_CH`;
+  const p = slugName(d.param);
+  if (!p) return '';
+  const k = ['SRC', 'REP', 'DEF'].includes(d.kind) ? d.kind : 'SRC';
+  return `${k}_${a}_${p}`;
+}
+
+/* 이 공정에 등록된 device — LOT_CD 칸을 드롭박스로 채운다 */
+function lotOptions(sel) {
+  const lots = [...new Set((cur.lots || [])
+    .map(l => (l.lot_cd || '').trim()).filter(Boolean))];
+  return `<option value="">전체</option>` + lots.map(v =>
+    `<option value="${esc(v)}" ${sel === v ? 'selected' : ''}>${esc(v)}</option>`
+  ).join('');
+}
+
+function renderLinks() {
+  const rows = cur.links || [];
+  document.getElementById('ktbody').innerHTML = rows.map((d, i) => {
+    const col = linkColName(d);
+    return `
+    <tr class="${d._sel ? 'sel' : ''}">
+      <td class="ck"><input type="checkbox" ${d._sel ? 'checked' : ''}
+            onchange="cur.links[${i}]._sel=this.checked;markSel('links',${i},this.checked)"></td>
+      <td><select data-tbl="links" data-row="${i}" data-col="0"
+                  onchange="cur.links[${i}].lot_cd=this.value">
+        ${lotOptions(d.lot_cd)}
+      </select></td>
+      <td><select data-tbl="links" data-row="${i}" data-col="1"
+                  onchange="cur.links[${i}].kind=this.value;renderLinks()">
+        <option value="SRC" ${d.kind !== 'REP' && d.kind !== 'DEF' ? 'selected' : ''}>SRC</option>
+        <option value="REP" ${d.kind === 'REP' ? 'selected' : ''}>REP</option>
+        <option value="DEF" ${d.kind === 'DEF' ? 'selected' : ''}>DEF</option>
+      </select></td>
+      <td><input value="${esc(d.alias)}" placeholder="M1_POLY"
+                 title="영문 공정명 — 생성 컬럼 이름에 들어갑니다"
+                 data-tbl="links" data-row="${i}" data-col="2"
+                 oninput="cur.links[${i}].alias=this.value.toUpperCase();refreshLinkCol(${i})"></td>
+      <td><input value="${esc(d.link_id)}" placeholder="T5515000C"
+                 data-tbl="links" data-row="${i}" data-col="3"
+                 oninput="cur.links[${i}].link_id=this.value.toUpperCase()"></td>
+      <td><input value="${esc(d.param)}" placeholder="CHAMBER 또는 THK"
+                 list="param-hints"
+                 data-tbl="links" data-row="${i}" data-col="4"
+                 oninput="cur.links[${i}].param=this.value.toUpperCase();refreshLinkCol(${i})"></td>
+      <td class="colprev ${col ? '' : 'none'}" id="kcol-${i}"
+          title="${esc(col)}">
+        ${col || '<span class="warn-txt">공정명 필요</span>'}</td>
+      <td><select data-tbl="links" data-row="${i}" data-col="5"
+                  onchange="cur.links[${i}].scope=this.value">
+        <option value="both" ${d.scope !== 'mon' && d.scope !== 'ana' ? 'selected' : ''}>둘 다</option>
+        <option value="mon" ${d.scope === 'mon' ? 'selected' : ''}>모니터링</option>
+        <option value="ana" ${d.scope === 'ana' ? 'selected' : ''}>분석</option>
+      </select></td>
+      <td><select data-tbl="links" data-row="${i}" data-col="6"
+                  onchange="cur.links[${i}].use_yn=this.value">
+        <option value="Y" ${d.use_yn !== 'N' ? 'selected' : ''}>사용</option>
+        <option value="N" ${d.use_yn === 'N' ? 'selected' : ''}>제외</option>
+      </select></td>
+      <td><span class="row-del" onclick="delStepRow('links',${i})">×</span></td>
+    </tr>`;
+  }).join('')
+    || `<tr><td colspan="10" class="none-row">연계 공정이 없습니다.
+        추가하거나 엑셀에서 붙여넣으세요.</td></tr>`;
+  applyFilter('links');
+}
+
+/* 이름을 칠 때마다 표를 다시 그리면 포커스가 날아간다 —
+   생성 컬럼 칸만 갱신한다 */
+function refreshLinkCol(i) {
+  const el = document.getElementById(`kcol-${i}`);
+  if (!el) return;
+  const col = linkColName(cur.links[i]);
+  el.className = 'colprev' + (col ? '' : ' none');
+  el.title = col || '';
+  el.innerHTML = col || '<span class="warn-txt">공정명 필요</span>';
+}
+
+function addLink() { addStepRow('links'); }
+
+
 const TBL = {
   lots: {
     cols: ['lot_cd', 'recipe_id', 'use_yn'],
@@ -792,6 +974,17 @@ const TBL = {
   /* Response — Defect 과 구조가 같다.
      Inline 에서 실제로 관리하는 건 Response 와 Defect 이고,
      스텝 하나에 관리 파라미터가 여럿이라 파라미터 1개당 1행으로 둔다. */
+  /* 연계 공정 — 사전공정 chamber·측정값을 device 단위로 */
+  links: {
+    cols: ['lot_cd', 'kind', 'alias', 'link_id', 'param', 'scope', 'use_yn'],
+    filterCols: {lot_cd: 1, kind: 1, alias: 1, link_id: 1, param: 1,
+                 scope: 1, use_yn: 1},
+    tbody: 'ktbody', count: 'kcnt',
+    label: '연계 공정',
+    blank: () => ({lot_cd: '', kind: 'SRC', alias: '', link_id: '',
+                   param: 'CHAMBER', scope: 'both', use_yn: 'Y'}),
+    render: () => renderLinks(),
+  },
   resps: {
     cols: ['lot_cd', 'step_id', 'step_desc', 'param', 'use_yn'],
     filterCols: {lot_cd: 1, step_id: 1, step_desc: 1, param: 1, use_yn: 1},
@@ -1256,7 +1449,7 @@ async function applyCopy() {
      같이 지워지는 사고를 막기 위함.
    ══════════════════════════════════════════════════ */
 const FILT = {};
-['lots', 'params', 'defects', 'resps'].forEach(k => { FILT[k] = {}; });
+['lots', 'params', 'defects', 'resps', 'links'].forEach(k => { FILT[k] = {}; });
 
 function hasFilter(k) {
   return Object.values(FILT[k] || {}).some(v => String(v || '').trim() !== '');
@@ -1418,6 +1611,9 @@ function collect() {
     defects: strip((cur.defects || []).filter(d => (d.step_id || '').trim())),
     // ★ 빠뜨리면 서버가 기존 행을 지운 뒤 넣을 게 없어 통째로 사라진다
     resps:   strip((cur.resps   || []).filter(d => (d.step_id || '').trim())),
+    // 연계 공정 — 공정명과 공정·스텝이 모두 있는 행만
+    links:   strip((cur.links   || []).filter(d =>
+                (d.alias || '').trim() && (d.link_id || '').trim())),
   };
 }
 
