@@ -399,6 +399,13 @@ function renderEditor() {
       ${hint ? `<span class="hint">${hint}</span>` : ''}</div>`;
 
   document.getElementById('editor').innerHTML = `
+    <div class="hint" style="margin-bottom:10px;padding:8px 12px;
+         border:1px solid var(--bd);border-radius:10px;">
+      <b>엑셀에서 그대로 붙여넣을 수 있습니다</b> —
+      채우고 싶은 칸을 클릭하고 <b>Ctrl+V</b> 하면 그 자리부터 들어갑니다.
+      행이 모자라면 자동으로 늘어나고, 머리글 줄은 알아서 건너뜁니다.
+      Enter 로 아래 칸으로 이동합니다.
+    </div>
     <div class="sec">
       <div class="sec-h"><h3>${esc(c.oper_desc || c.oper_id || '새 공정')}</h3>
         <span class="sub">${esc(c.oper_id || '')}</span>
@@ -431,7 +438,7 @@ function renderEditor() {
           <button class="btn sm danger" id="del-lots" disabled
                   onclick="delSelected('lots')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('lots')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('lots')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="openBulk('lots')" title="창을 열어 붙여넣기">붙여넣기 창</button>
           <button class="btn sm" onclick="suggestLots()">적재 LOT_CD 가져오기</button>
           <button class="btn sm" onclick="addLot()">+ 추가</button>
         </span></div>
@@ -470,7 +477,7 @@ function renderEditor() {
                   onclick="delSelected('params')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('params')">전체 비우기</button>
           <button class="btn sm" onclick="autoClassify()">타입 자동 분류</button>
-          <button class="btn sm" onclick="openBulk('params')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="openBulk('params')" title="창을 열어 붙여넣기">붙여넣기 창</button>
           <button class="btn sm" onclick="suggestParams()">적재 컬럼에서 채우기</button>
           <button class="btn sm" onclick="addParam()">+ 추가</button>
         </span></div>
@@ -513,7 +520,7 @@ function renderEditor() {
           <button class="btn sm danger" id="del-resps" disabled
                   onclick="delSelected('resps')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('resps')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('resps')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="openBulk('resps')" title="창을 열어 붙여넣기">붙여넣기 창</button>
           <button class="btn sm" onclick="addResp()">+ 추가</button>
         </span></div>
       <div class="tbl-scroll">
@@ -560,7 +567,7 @@ function renderEditor() {
           <button class="btn sm danger" id="del-defects" disabled
                   onclick="delSelected('defects')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('defects')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('defects')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="openBulk('defects')" title="창을 열어 붙여넣기">붙여넣기 창</button>
           <button class="btn sm" onclick="addDefect()">+ 추가</button>
         </span></div>
       <div class="tbl-scroll">
@@ -608,7 +615,7 @@ function renderEditor() {
           <button class="btn sm danger" id="del-links" disabled
                   onclick="delSelected('links')">선택 삭제</button>
           <button class="btn sm" onclick="clearRows('links')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('links')">엑셀 붙여넣기</button>
+          <button class="btn sm" onclick="openBulk('links')" title="창을 열어 붙여넣기">붙여넣기 창</button>
           <button class="btn sm" onclick="addLink()">+ 추가</button>
         </span></div>
       <div class="hint" style="margin:0 0 8px;">
@@ -943,6 +950,150 @@ function refreshLinkCol(i) {
 }
 
 function addLink() { addStepRow('links'); }
+
+
+/* ══════════════════════════════════════════════════
+   표에 직접 붙여넣기 (엑셀처럼)
+
+   ★ 칸을 클릭하고 Ctrl+V 하면 그 자리부터 채워진다.
+     정해진 순서로 창에 붙여 넣는 방식은 열 순서를 외워야 하고,
+     일부 열만 채우고 싶을 때 쓸 수가 없다.
+
+   ★ 붙여넣은 크기만큼 행이 모자라면 자동으로 늘린다.
+     엑셀에서 50줄을 복사했는데 표에 3줄뿐이면 47줄을 더 만든다.
+
+   ★ 드롭박스 칸(타입·용도·사용)에는 값이 목록에 있을 때만 넣는다.
+     'ㅇㅇ' 같은 값이 들어가면 select 가 조용히 첫 항목으로 바뀐다.
+   ══════════════════════════════════════════════════ */
+
+/* 지금 포커스가 있는 셀 좌표 */
+let cellAt = null;
+
+document.addEventListener('focusin', (ev) => {
+  const el = ev.target;
+  if (el && el.dataset && el.dataset.tbl) {
+    cellAt = {
+      tbl: el.dataset.tbl,
+      row: Number(el.dataset.row),
+      col: Number(el.dataset.col),
+    };
+  }
+});
+
+/* 표 안에서 Ctrl+V — 그 칸부터 채운다 */
+document.addEventListener('paste', (ev) => {
+  const el = document.activeElement;
+  if (!el || !el.dataset || !el.dataset.tbl) return;   // 표 밖이면 기본 동작
+
+  const text = (ev.clipboardData || window.clipboardData).getData('text');
+  if (!text || !/[\t\n]/.test(text)) return;   // 한 칸짜리는 그냥 붙여넣기
+
+  ev.preventDefault();
+  pasteAt(el.dataset.tbl, Number(el.dataset.row), Number(el.dataset.col), text);
+});
+
+function pasteAt(key, row0, col0, text) {
+  const t = TBL[key];
+  if (!t) return;
+
+  const grid = text.replace(/\r/g, '').replace(/\n+$/, '')
+    .split('\n').map(line => line.split('\t'));
+  if (!grid.length) return;
+
+  // 머리글로 보이면 건너뛴다 — 첫 줄이 컬럼 이름과 겹치는 경우
+  if (grid.length > 1 && looksLikeHeader(grid[0], t.cols)) grid.shift();
+  if (!grid.length) return;
+
+  cur[key] = cur[key] || [];
+  const need = row0 + grid.length - cur[key].length;
+  for (let i = 0; i < need; i++) cur[key].push(t.blank());
+
+  let filled = 0;
+  grid.forEach((line, r) => {
+    const target = cur[key][row0 + r];
+    line.forEach((raw, c) => {
+      const col = t.cols[col0 + c];
+      if (!col) return;                      // 표 오른쪽 밖은 버린다
+      const v = coerceCell(key, col, raw);
+      if (v !== null) { target[col] = v; filled++; }
+    });
+  });
+
+  t.render();
+  edMsg(`${grid.length}행 × ${grid[0].length}열 붙여넣기 — ${filled}칸 입력됨`);
+}
+
+/* 첫 줄이 머리글인지 — 컬럼 이름이나 흔한 한글 머리글과 겹치면 */
+function looksLikeHeader(line, cols) {
+  const HEAD = ['LOT_CD', 'RECIPE_ID', 'PARAM', 'PARAM_TYPE', 'STEP_ID',
+                'STEP_DESC', 'KIND', 'ALIAS', 'LINK_ID', 'SCOPE', 'USE_YN',
+                '타입', '공정명', '별칭', '공정', '스텝', '관리', '용도',
+                '사용', '레시피', '파라미터'];
+  const up = line.map(v => String(v || '').trim().toUpperCase());
+  const hit = up.filter(v => v && (cols.includes(v.toLowerCase())
+                                   || HEAD.some(h => v.includes(h)))).length;
+  return hit >= Math.max(1, Math.ceil(line.length / 2));
+}
+
+/* 칸 종류에 맞게 값을 다듬는다.
+   넣을 수 없는 값이면 null 을 돌려 그 칸을 건너뛴다. */
+function coerceCell(key, col, raw) {
+  const v = String(raw ?? '').trim();
+
+  if (col === 'use_yn') {
+    if (!v) return null;
+    if (/^(N|제외|F|FALSE|0|X)$/i.test(v)) return 'N';
+    if (/^(Y|사용|T|TRUE|1|O)$/i.test(v)) return 'Y';
+    return null;                     // 알 수 없는 값은 건드리지 않는다
+  }
+
+  if (col === 'kind') {
+    const k = v.toUpperCase();
+    return ['SRC', 'REP', 'DEF'].includes(k) ? k : null;
+  }
+
+  if (col === 'scope') {
+    const s = v.toLowerCase();
+    if (['both', 'mon', 'ana'].includes(s)) return s;
+    if (/둘|both|전체/i.test(v)) return 'both';
+    if (/모니터|mon/i.test(v)) return 'mon';
+    if (/분석|ana/i.test(v)) return 'ana';
+    return null;
+  }
+
+  if (col === 'param_type') {
+    const p = v.toUpperCase();
+    return (TYPE_OPTS || []).some(x => x[0] === p) ? p : (v ? '' : null);
+  }
+
+  // 나머지는 글자 그대로 — 코드성 칸만 대문자로
+  if (['lot_cd', 'step_id', 'param', 'alias', 'link_id'].includes(col)) {
+    return v.toUpperCase();
+  }
+  return v;
+}
+
+/* 표에서 방향키로 칸 이동 — 엑셀처럼 */
+document.addEventListener('keydown', (ev) => {
+  const el = document.activeElement;
+  if (!el || !el.dataset || !el.dataset.tbl) return;
+
+  const isText = el.tagName === 'INPUT';
+  let dr = 0, dc = 0;
+
+  if (ev.key === 'Enter' && !ev.shiftKey) { dr = 1; }
+  else if (ev.key === 'Enter' && ev.shiftKey) { dr = -1; }
+  else if (ev.key === 'ArrowDown' && !isText) { dr = 1; }
+  else if (ev.key === 'ArrowUp' && !isText) { dr = -1; }
+  else if (ev.key === 'Tab') { return; }     // 브라우저 기본 동작이 낫다
+  else { return; }
+
+  const nxt = document.querySelector(
+    `[data-tbl="${el.dataset.tbl}"]` +
+    `[data-row="${Number(el.dataset.row) + dr}"]` +
+    `[data-col="${el.dataset.col}"]`);
+  if (nxt) { ev.preventDefault(); nxt.focus(); if (nxt.select) nxt.select(); }
+});
 
 
 const TBL = {
@@ -1628,6 +1779,7 @@ async function saveOper() {
   edMsg(`저장 완료 — device ${j.saved.lots} · param ${j.saved.params}`
         + (j.saved.resps   ? ` · response ${j.saved.resps}` : '')
         + (j.saved.defects ? ` · defect ${j.saved.defects}` : '')
+        + (j.saved.links   ? ` · 연계 ${j.saved.links}` : '')
         + ` (평면 ${j.saved.lots * j.saved.params}행으로 조합됩니다)`);
   await openOper(d.oper_id);
 }
