@@ -33,7 +33,9 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from . import config2_service as cfg2
+# ★ 기준정보는 config_service 하나로 통합됐다 (config2 는 폐기).
+#   이름은 cfg2 로 두어 아래 코드를 그대로 쓴다.
+from . import config_service as cfg2
 
 VERBOSE = True
 
@@ -200,7 +202,7 @@ def preview_sql(oper_id, scope=None, days=30, date_from=None, date_to=None,
         base_lots = ['<LOT_CD 미등록>']
 
     out = []
-    for lk in cfg2.links_of(oper_id, scope):
+    for lk in cfg2.links_for_query(oper_id, scope=scope):
         lots = [str(v).upper() for v in (lk.get('lot_cds') or []) if v] \
                or base_lots
 
@@ -367,7 +369,7 @@ def pivot_chm(df, link):
     """
     if df is None or df.empty:
         return pd.DataFrame()
-    a = cfg2.slug(link['alias'])
+    a = cfg2._slug_name(link['alias'])
     return (df.rename(columns={'eqp_id': f'{a}_EQP',
                                'module_id': f'{a}_CH'})
               .drop_duplicates(subset=['wkey'], keep='last'))
@@ -395,7 +397,7 @@ def pivot_link(df, link):
     wide.columns.name = None
 
     if 'end_tm' in d.columns:
-        tcol = f"{link['kind']}_{cfg2.slug(link['alias'])}_DATE"
+        tcol = f"{link['kind']}_{cfg2._slug_name(link['alias'])}_DATE"
         tm = (d.groupby('wkey', as_index=False)['end_tm'].max()
                 .rename(columns={'end_tm': tcol}))
         wide = wide.merge(tm, on='wkey', how='left')
@@ -436,7 +438,11 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
     if base is None or base.empty:
         return base
 
-    links = cfg2.links_of(oper_id, scope)
+    # ★ 연계는 device(LOT_CD)마다 다르다.
+    #   5E2 와 5E9 가 서로 다른 사전공정을 쓰는 일이 흔한데,
+    #   한 번에 합쳐 조회하면 5E2 웨이퍼에 5E9 의 사전공정이 붙는다.
+    #   device 별로 나눠 조회하고 마지막에 합친다.
+    links = cfg2.links_for_query(oper_id, scope=scope)
     if not links:
         if VERBOSE:
             print(f'  [link] {oper_id}: 등록된 연계 공정 없음 — 건너뜀')
@@ -464,14 +470,19 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
         # 기준정보에 device 가 없으면 조회할 대상이 없다.
         #   적재 데이터로 대신하지 않는다 — 그게 S5C 가 들어온 경로였다.
         print(f'[link] {oper_id}: 기준정보에 등록된 LOT_CD 가 없어 '
-              f'연계 조회를 건너뜁니다 (config2 에서 device 를 등록하세요)')
+              f'연계 조회를 건너뜁니다 (기준정보에서 device 를 등록하세요)')
         return base
 
     for lk in links:
-        # ★ 연계 공정은 본공정과 device 코드가 다를 수 있다.
-        #   기준정보에 LOT_CD 를 적었으면 그것만, 비웠으면 본공정 것을 쓴다.
-        lots = [str(v).upper() for v in (lk.get('lot_cds') or []) if v] \
-               or base_lots
+        # ★ 연계 행에 LOT_CD 를 적었으면 그 device 만 조회한다.
+        #   비워 두면 본공정에 등록된 device 를 모두 본다.
+        #   이것이 '5E2 를 조회할 때 5E2 것만 본다' 를 만드는 지점이다.
+        one = str(lk.get('lot_cd') or '').strip().upper()
+        lots = [one] if one else base_lots
+
+        if VERBOSE:
+            print(f"  [link] {lk['alias']}({lk['link_id']}) — "
+                  f"device {', '.join(lots)}")
 
         # ★ 한 연계 공정이 두 가지를 함께 가져올 수 있다.
         #   param 이 chamber 면 장비·챔버 이력에서, 그 외 param 은
