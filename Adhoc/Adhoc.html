@@ -920,6 +920,7 @@ async function runScan() {
       // 심각한 것부터 위로 — 중간 결과도 바로 훑어볼 수 있게
       izScan.items.sort((a, b) => b.severity - a.severity);
       izScan.n_param = izScan.items.length;
+      izScan.failed = (izScan.failed || []).concat(j.failed || []);
       izScan.n_bad  = izScan.items.filter(x => x.status === '이상').length;
       izScan.n_warn = izScan.items.filter(x => x.status === '주의').length;
       izScan.n_cp   = izScan.items.filter(x => x.cp_in_sel).length;
@@ -1214,7 +1215,10 @@ function renderScan(j, total) {
     <div class="verdict ${j.n_bad ? 'bad' : (j.n_warn ? 'warn' : 'good')}">
       <span class="t">${j.n_cp ? `변곡 ${j.n_cp}건` : '변곡 없음'}</span>
       <span class="d">${esc(j.sel_desc)} · 파라미터 ${j.n_param}개
-        ${partial ? `/ ${total} 스캔 중...` : '스캔 완료'}</span>
+        ${partial ? `/ ${total} 스캔 중...` : '스캔 완료'}
+        ${(j.failed && j.failed.length)
+          ? `<b style="color:var(--warn);"> · ${j.failed.length}개 판정 실패</b>`
+          : ''}</span>
     </div>
     <div class="scan-sum">
       ${card('', 'all', j.n_param + (partial ? `<span style="font-size:12px;color:var(--tx-muted);">/${total}</span>` : ''), '전체')}
@@ -1223,6 +1227,11 @@ function renderScan(j, total) {
       ${card('cp', 'cp', j.n_cp, '구간 내 변곡')}
     </div>
     <div class="note">
+      ${(j.failed && j.failed.length) ? `<div style="color:var(--warn);
+         margin-bottom:5px;">판정 실패: ${j.failed.slice(0,5)
+           .map(f => esc(f.param)).join(', ')}${j.failed.length > 5
+           ? ` 외 ${j.failed.length - 5}개` : ''}
+         — 그 파라미터만 빠졌고 나머지는 정상입니다</div>` : ''}
       요약 카드를 누르면 해당 항목만 걸러집니다 (다시 누르면 해제).
       행을 누르면 그 자리에서 상세가 펼쳐지고, 다시 누르면 닫힙니다.
       ${scanFilter ? `<b style="color:var(--tx-1);"> · 지금 «${esc(scanFilter === 'cp' ? '구간 내 변곡' : scanFilter)}» 만 보는 중</b>` : ''}
