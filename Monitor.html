@@ -258,6 +258,9 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
         </select>
         <button class="btn-clear" onclick="refreshLoad()"
                 style="font-size:11px;">새로고침</button>
+        <button class="btn-clear" onclick="refreshDataMax()"
+                style="font-size:11px;" title="적재 테이블을 실제로 읽습니다 (느림)">
+          최신일 다시 재기</button>
         <span class="msg" id="load-msg" style="margin-left:auto;"></span>
       </div>
       {% endif %}
@@ -362,6 +365,7 @@ const API_LOAD_RUN = "{% url 'load-run' %}";
 const API_LOAD_QUEUE = "{% url 'load-queue' %}";
 const API_LOAD_CANCEL = "{% url 'load-cancel' %}";
 const API_LOAD_SCHED = "{% url 'load-schedule' %}";
+const API_LOAD_REFMAX = "{% url 'load-refresh-max' %}";
 
 /* 개발 환경인가 — 적재 조작은 개발자에게만 연다.
    운영 배포는 DEBUG=False 이므로 일반 사용자에게는 버튼이 없다. */
@@ -575,6 +579,18 @@ async function refreshQueue() {
 
   // 진행 중이면 자주, 아니면 뜸하게
   qTimer = setTimeout(refreshQueue, busy ? 4000 : 15000);
+}
+
+/* 최신 데이터 날짜를 실제로 다시 잰다.
+   ★ 평소 화면은 적재할 때 기록해 둔 값을 읽는다 — 그게 빠르다.
+     기록이 없는 예전 공정만 이 버튼으로 채우면 된다. */
+async function refreshDataMax() {
+  loadMsg('최신일을 읽는 중… (공정 수에 따라 시간이 걸립니다)');
+  const j = await postJSON(API_LOAD_REFMAX, {});
+  if (!j || !j.ok) { loadMsg((j && j.error) || '실패', true); return; }
+  const n = Object.keys(j.data_max || {}).length;
+  loadMsg(`${n}개 공정의 최신일을 갱신했습니다`);
+  refreshLoad();
 }
 
 async function cancelJob(operId, all) {
