@@ -36,6 +36,7 @@ equipment/issue_service.py
 """
 
 import re
+import traceback
 from datetime import datetime
 
 from django.db import connections
@@ -107,6 +108,37 @@ def _num(col):
       집계 전에 double precision 으로 맞춰 그 두 문제를 함께 없앤다.
     """
     return f'"{col}"::double precision'
+
+
+def _sig(v):
+    """
+    σ 값을 표시용 문자열로.
+
+    ★ shift_sigma 나 sigma 는 표준편차가 0이거나 표본이 모자라면
+      None 이 된다. 그걸 f'{v:+.1f}' 에 넣으면
+      TypeError: unsupported format string passed to NoneType.__format__
+      로 스캔이 통째로 멈춘다.
+      값이 없으면 '?' 로 표시하고 넘어간다 — 한 파라미터 때문에
+      전체 스캔이 죽으면 안 된다.
+    """
+    try:
+        x = float(v)
+        if x != x:          # NaN — 계산이 성립하지 않은 경우
+            return '?'
+        return f'{x:+.1f}'
+    except (TypeError, ValueError):
+        return '?'
+
+
+def _rat(v):
+    """배수 표시 — None 이면 '?'"""
+    try:
+        x = float(v)
+        if x != x:
+            return '?'
+        return f'{x:.1f}'
+    except (TypeError, ValueError):
+        return '?'
 
 
 def _f(v, nd=3):
@@ -512,20 +544,34 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
                                             parts=parts)
 
     # ── 4. 파라미터별 판정 ───────────────────────────────
-    items = []
+    #   ★ 한 파라미터가 실패해도 나머지는 계속 본다.
+    #     예전엔 여기서 예외가 나면 스캔 전체가 멈춰,
+    #     파라미터 300개 중 하나 때문에 아무 결과도 못 받았다.
+    items, failed = [], []
     for p in params:
-        ptype = pt.classify(p)
-        s_in, s_out = stat_in.get(p, {}), stat_out.get(p, {})
-        ser = series_map.get(p, [])
-        it = _judge_one(p, ptype, s_in, s_out, out_cnt.get(p, 0),
-                        ser, sel_flag)
-        if with_series:
-            # 리포트 차트용 — 점이 너무 많으면 파일이 커지므로 줄인다.
-            # ★ 원본 점 수도 남긴다: 웨이퍼 단위인데 차트가 성기면
-            #   단위가 잘못된 게 아니라 다운샘플 때문임을 구분할 수 있어야 한다.
-            it['n_raw'] = len(ser)
-            it['series'] = _downsample(ser, series_points)
-        items.append(it)
+        try:
+            ptype = pt.classify(p)
+            s_in, s_out = stat_in.get(p, {}), stat_out.get(p, {})
+            ser = series_map.get(p, [])
+            it = _judge_one(p, ptype, s_in, s_out, out_cnt.get(p, 0),
+                            ser, sel_flag)
+            if with_series:
+                # 리포트 차트용 — 점이 너무 많으면 파일이 커지므로 줄인다.
+                # ★ 원본 점 수도 남긴다: 웨이퍼 단위인데 차트가 성기면
+                #   단위가 잘못된 게 아니라 다운샘플 때문임을 구분할 수 있어야 한다.
+                it['n_raw'] = len(ser)
+                it['series'] = _downsample(ser, series_points)
+            items.append(it)
+        except Exception as e:
+            traceback.print_exc()
+            failed.append({'param': p,
+                           'error': f'{e.__class__.__name__}: {e}'})
+            print(f'  [scan] {p} 판정 실패 — 건너뜁니다: '
+                  f'{e.__class__.__name__}: {e}')
+
+    if failed:
+        print(f'[scan] {oper_id}: 파라미터 {len(failed)}개 판정 실패 '
+              f'(나머지 {len(items)}개는 정상)')
 
     items.sort(key=lambda x: -x['severity'])
 
@@ -538,6 +584,8 @@ def scan_all(oper_id, lot_cd, sel, unit='lot', max_params=400,
         'unit': unit, 'n_param': len(items), 'n_total': len(all_params),
         'n_bad': n_bad, 'n_warn': n_warn, 'n_cp': n_cp,
         'items': items,
+        # ★ 판정에 실패한 파라미터 — 조용히 빠지면 왜 없는지 알 수 없다
+        'failed': failed,
     }
 
 
@@ -698,7 +746,7 @@ def _judge_one(param, ptype, s_in, s_out, out_cnt, series, sel_flag):
         if it['cp_in_sel']:
             c = [x for x in cps if x.get('in_sel')][0]
             it['reasons'].append(f"{c['at']} {c['direction']} "
-                                 f"({c['shift_sigma']:+.1f}σ)")
+                                 f"({_sig(c['shift_sigma'])}σ)")
         return it
 
     level = 0
@@ -709,12 +757,12 @@ def _judge_one(param, ptype, s_in, s_out, out_cnt, series, sel_flag):
         it['sigma'] = round(sigma, 2)
         if abs(sigma) >= SIGMA_ALERT:
             level = 2
-            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ '
+            reasons.append(f'평균이 나머지 대비 {_sig(sigma)}σ '
                            f'({s_in["avg"]} vs {b_avg})')
             checks.append('L')
         elif abs(sigma) >= SIGMA_WARN:
             level = max(level, 1)
-            reasons.append(f'평균이 나머지 대비 {sigma:+.1f}σ')
+            reasons.append(f'평균이 나머지 대비 {_sig(sigma)}σ')
             checks.append('L')
 
     if out_cnt >= OUT_ALERT:
@@ -731,11 +779,11 @@ def _judge_one(param, ptype, s_in, s_out, out_cnt, series, sel_flag):
         it['spread'] = round(ratio, 2)
         if ratio >= SPREAD_ALERT:
             level = 2
-            reasons.append(f'산포가 {ratio:.1f}배 — 조건 혼입 의심')
+            reasons.append(f'산포가 {_rat(ratio)}배 — 조건 혼입 의심')
             checks.append('S')
         elif ratio >= SPREAD_WARN:
             level = max(level, 1)
-            reasons.append(f'산포가 {ratio:.1f}배')
+            reasons.append(f'산포가 {_rat(ratio)}배')
             checks.append('S')
 
     # ★ 지정 구간 안에서 수준이 바뀐 것이 이 화면의 핵심 신호다
@@ -744,7 +792,7 @@ def _judge_one(param, ptype, s_in, s_out, out_cnt, series, sel_flag):
         level = max(level, 1)
         reasons.append(f"{c['at']} 무렵 {c['direction']} "
                        f"({c['before_avg']} → {c['after_avg']}, "
-                       f"{c['shift_sigma']:+.1f}σ)")
+                       f"{_sig(c['shift_sigma'])}σ)")
         checks.append('C')
 
     it['status']  = ['정상', '주의', '이상'][level]
@@ -826,12 +874,12 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
             r['sigma'] = round(sigma, 2)
             if abs(sigma) >= SIGMA_ALERT:
                 level = 2
-                reasons.append(f'선택 구간 평균이 나머지 대비 {sigma:+.1f}σ '
+                reasons.append(f'선택 구간 평균이 나머지 대비 {_sig(sigma)}σ '
                                f'({s_in["avg"]} vs {b_avg})')
                 checks.append('L-수준이탈')
             elif abs(sigma) >= SIGMA_WARN:
                 level = max(level, 1)
-                reasons.append(f'선택 구간 평균이 나머지 대비 {sigma:+.1f}σ')
+                reasons.append(f'선택 구간 평균이 나머지 대비 {_sig(sigma)}σ')
                 checks.append('L-수준이탈')
 
         # ── R 범위이탈 ───────────────────────────────────
@@ -858,12 +906,12 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
             r['spread'] = round(ratio, 2)
             if ratio >= SPREAD_ALERT:
                 level = 2
-                reasons.append(f'선택 구간 산포가 나머지의 {ratio:.1f}배 '
+                reasons.append(f'선택 구간 산포가 나머지의 {_rat(ratio)}배 '
                                f'(σ {s_in["std"]} vs {b_std}) — 조건 혼입 의심')
                 checks.append('S-산포확대')
             elif ratio >= SPREAD_WARN:
                 level = max(level, 1)
-                reasons.append(f'선택 구간 산포가 나머지의 {ratio:.1f}배')
+                reasons.append(f'선택 구간 산포가 나머지의 {_rat(ratio)}배')
                 checks.append('S-산포확대')
 
         # ── E 단독이탈 (장비·챔버) ───────────────────────
@@ -890,7 +938,7 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
                 if len(hot) == 1 and calm:
                     level = 2
                     reasons.append(f"{hot[0]['eqp']} 단독 이탈 "
-                                   f"({hot[0]['sigma']:+.1f}σ, {hot[0]['n']}장)")
+                                   f"({_sig(hot[0]['sigma'])}σ, {hot[0]['n']}장)")
                     checks.append('E-단독이탈')
 
         r['status']  = ['정상', '주의', '이상'][level]
@@ -914,7 +962,7 @@ def analyze(oper_id, lot_cd, param, sel, unit='wafer'):
             c = inside[0]
             r['reasons'].append(
                 f"선택 구간 내 {c['at']} 무렵 수준이 {c['direction']} "
-                f"({c['before_avg']} → {c['after_avg']}, {c['shift_sigma']:+.1f}σ)")
+                f"({c['before_avg']} → {c['after_avg']}, {_sig(c['shift_sigma'])}σ)")
             if 'C-변곡점' not in r['checks']:
                 r['checks'].append('C-변곡점')
 
@@ -1034,7 +1082,7 @@ def _series_and_cp(cur, table, param, base_where, base_args,
     elif len(cps) == 1:
         c = cps[0]
         note = (f"{c['at']} 무렵 수준이 {c['direction']}했습니다 "
-                f"({c['before_avg']} → {c['after_avg']}, {c['shift_sigma']:+.1f}σ)")
+                f"({c['before_avg']} → {c['after_avg']}, {_sig(c['shift_sigma'])}σ)")
 
     # 차트가 무거워지지 않게 표본을 줄인다 (판정은 전체로 이미 끝났다)
     MAX_PTS = 3000
