@@ -73,6 +73,7 @@ def ensure_tables():
               date_from    VARCHAR(20),
               date_to      VARCHAR(20),
               rows         INTEGER DEFAULT 0,
+              data_max     VARCHAR(30),
               message      TEXT,
               requested_by VARCHAR(100),
               requested_at TIMESTAMP,
@@ -80,6 +81,9 @@ def ensure_tables():
               finished_at  TIMESTAMP
             )
         ''')
+        # 예전에 만든 표에는 없는 칸 — 있으면 그냥 넘어간다
+        cur.execute(f'ALTER TABLE {T_JOB} '
+                    f'ADD COLUMN IF NOT EXISTS data_max VARCHAR(30)')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{T_JOB}_oper '
                     f'ON {T_JOB} (oper_id, status)')
         # ★ 같은 공정에 '실행중' 행은 하나만 존재할 수 있다.
@@ -134,52 +138,72 @@ def status(oper_ids=None):
             d['last_status'] = st
             d['last_days'] = days
 
-        # 적재 테이블의 실제 최신 데이터 날짜
+        # ── 최신 데이터 날짜 ────────────────────────────
+        #   ★ 적재 테이블을 건드리지 않는다.
+        #     MAX("DATE") 는 인덱스가 있어도 공정 수만큼 왕복이 생기고,
+        #     테이블이 크면 그 자체가 무겁다. 패널을 열 때마다 그걸
+        #     반복하니 버벅였다.
+        #   ★ 대신 적재를 끝낼 때 기록해 둔 값을 읽는다.
+        #     큐 표는 행이 몇백 개뿐이라 즉시 나온다.
+        cur.execute(f'''
+            SELECT DISTINCT ON (oper_id) oper_id, data_max
+            FROM {T_JOB}
+            WHERE status = '완료' AND data_max IS NOT NULL
+            ORDER BY oper_id, finished_at DESC
+        ''')
+        for oper_id, dmax in cur.fetchall():
+            out.setdefault(oper_id, {})['data_max'] = dmax
+
+        # 적재 테이블이 실제로 있는지 (가벼운 조회)
         cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE %s",
                     ['cmp_analysis_%'])
         tables = {r[0] for r in cur.fetchall()}
 
-        # ── 최신 데이터 날짜 ────────────────────────────
-        #   ★ 공정마다 따로 SELECT 를 던지면 왕복이 그만큼 늘어
-        #     패널이 열릴 때마다 버벅인다. UNION ALL 로 한 번에 묻는다.
-        #   ★ 각 SELECT 는 MAX("DATE") 하나뿐이라 인덱스로 즉시 나온다.
-        ids = oper_ids or list(out.keys())
-        have, missing = [], []
-        for oper_id in ids:
-            (have if _an_table(oper_id) in tables else missing).append(oper_id)
-
-        for oper_id in missing:
+        for oper_id in (oper_ids or list(out.keys())):
             d = out.setdefault(oper_id, {})
-            d['data_max'] = None
-            d['loaded'] = False
+            d['loaded'] = _an_table(oper_id) in tables
+            d.setdefault('data_max', None)
 
-        for oper_id in have:
-            out.setdefault(oper_id, {})['loaded'] = True
+    return out
 
-        if have:
-            parts, args = [], []
-            for oper_id in have:
-                parts.append(f'SELECT %s AS k, MAX("DATE") AS v '
-                             f'FROM {_an_table(oper_id)}')
-                args.append(oper_id)
+
+def refresh_data_max(oper_ids=None):
+    """
+    적재 테이블을 실제로 훑어 최신 데이터 날짜를 다시 잰다.
+
+    ★ 평소에는 안 쓴다 — 무거워서 화면이 버벅이던 원인이다.
+      적재 기록이 없는 기존 공정처럼, 값이 비어 있을 때만 눌러서 채운다.
+    """
+    ensure_tables()
+    out = {}
+    with _conn().cursor() as cur:
+        cur.execute("SELECT tablename FROM pg_tables WHERE tablename LIKE %s",
+                    ['cmp_analysis_%'])
+        tables = {r[0] for r in cur.fetchall()}
+
+        ids = oper_ids or [o for o in tables]
+        for oper_id in (oper_ids or []):
+            t = _an_table(oper_id)
+            if t not in tables:
+                continue
             try:
-                cur.execute(' UNION ALL '.join(parts), args)
-                for k, v in cur.fetchall():
-                    out.setdefault(k, {})['data_max'] = (
-                        str(v)[:19] if v else None)
+                cur.execute(f'SELECT MAX("DATE") FROM {t}')
+                mx = cur.fetchone()[0]
+                out[oper_id] = str(mx)[:19] if mx else None
             except Exception as e:
-                # 한 테이블이 깨져도 화면은 떠야 한다 — 개별로 다시 시도
-                print(f'[load] 최신일 일괄 조회 실패, 개별 조회로 전환: '
+                print(f'[load] {oper_id} 최신일 조회 실패: '
                       f'{e.__class__.__name__}: {e}')
-                for oper_id in have:
-                    d = out.setdefault(oper_id, {})
-                    try:
-                        cur.execute(
-                            f'SELECT MAX("DATE") FROM {_an_table(oper_id)}')
-                        mx = cur.fetchone()[0]
-                        d['data_max'] = str(mx)[:19] if mx else None
-                    except Exception:
-                        d['data_max'] = None
+
+        # 기록으로 남겨 다음부터는 훑지 않게 한다
+        for oper_id, dmax in out.items():
+            if not dmax:
+                continue
+            cur.execute(f"""
+                UPDATE {T_JOB} SET data_max=%s
+                WHERE id = (SELECT id FROM {T_JOB}
+                            WHERE oper_id=%s AND status='완료'
+                            ORDER BY finished_at DESC LIMIT 1)
+            """, [dmax, oper_id])
 
     return out
 
@@ -243,13 +267,21 @@ def claim(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None):
         return False, {'error': f'적재 요청 실패: {e}'}
 
 
-def finish(job_id, status, rows=0, message=''):
+def finish(job_id, status, rows=0, message='', data_max=None):
+    """
+    작업 종료 기록.
+
+    ★ data_max(최신 데이터 날짜)를 여기서 남긴다.
+      화면이 그 값을 읽으므로 적재 테이블을 다시 훑지 않아도 된다 —
+      공정이 많을 때 패널이 버벅이던 원인이었다.
+    """
     with _conn().cursor() as cur:
-        cur.execute(f'''
-            UPDATE {T_JOB} SET status=%s, rows=%s, message=%s, finished_at=%s
+        cur.execute(f"""
+            UPDATE {T_JOB} SET status=%s, rows=%s, message=%s,
+                   finished_at=%s, data_max=COALESCE(%s, data_max)
             WHERE id=%s
-        ''', [status, int(rows or 0), str(message)[:2000], datetime.now(),
-              int(job_id)])
+        """, [status, int(rows or 0), str(message)[:2000], datetime.now(),
+              data_max, int(job_id)])
 
 
 def progress(job_id, message):
@@ -643,6 +675,17 @@ def _do_load(job):
     svc.save_analysis_df(df, oper_id,
                          date_from=date_from if last_at else None)
 
+    # ★ 최신 데이터 날짜는 지금 손에 든 DataFrame 에서 바로 얻는다.
+    #   나중에 테이블을 훑는 것보다 훨씬 싸다.
+    dmax = None
+    try:
+        col = next((c for c in df.columns if str(c).upper() == 'DATE'), None)
+        if col is not None:
+            v = df[col].max()
+            dmax = str(v)[:19] if v is not None else None
+    except Exception:
+        pass
+
     # ★ 일부 LOT_CD 가 실패했으면 그 사실을 결과에 남긴다.
     #   '완료' 로만 표시하면 빠진 데이터를 모르고 지나친다.
     try:
@@ -655,9 +698,10 @@ def _do_load(job):
         more = f' 외 {len(fails) - 4}건' if len(fails) > 4 else ''
         finish(job_id, '완료', len(df),
                f'{len(df):,}행 적재 ({span}) · 조회 실패 {len(fails)}건 '
-               f'[{keys}{more}] — 그 부분은 빠져 있습니다')
+               f'[{keys}{more}] — 그 부분은 빠져 있습니다', data_max=dmax)
     else:
-        finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})')
+        finish(job_id, '완료', len(df), f'{len(df):,}행 적재 완료 ({span})',
+               data_max=dmax)
 
 
 def run_async(oper_ids, days=DEFAULT_DAYS, user='',
