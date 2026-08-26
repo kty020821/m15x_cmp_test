@@ -169,6 +169,24 @@ def load_history(request):
 
 
 @csrf_exempt
+def load_refresh_max(request):
+    """
+    최신 데이터 날짜 다시 재기 — 적재 테이블을 실제로 훑는다.
+
+    ★ 무거우므로 버튼을 눌렀을 때만 돈다.
+      평소 화면은 적재할 때 기록해 둔 값을 읽는다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    b = _body(request)
+    try:
+        ids = b.get('opers') or [o['oper_id'] for o in _opers()]
+        return JsonResponse({'ok': True, 'data_max': ls.refresh_data_max(ids)})
+    except Exception as e:
+        return _fail(f'최신일 조회 실패: {e}', exc=e)
+
+
+@csrf_exempt
 def load_queue(request):
     """
     적재 큐 상태 — 어느 화면에서든 진행 상황을 볼 수 있다.
