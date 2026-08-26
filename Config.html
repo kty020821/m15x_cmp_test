@@ -237,20 +237,27 @@ table.sheet { width: max-content; min-width: 100%;
   table-layout: fixed; font-size: 12px; }
 
 table.sheet th { position: sticky; top: 0; z-index: 2;
-  background: var(--bg-2); font-size: 11px; font-weight: 800;
-  color: var(--tx-2); text-align: left; padding: 6px 8px;
-  border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd);
+  background: var(--bg-2); font-size: 11.5px; font-weight: 800;
+  color: var(--tx-1); text-align: left; padding: 7px 9px;
+  letter-spacing: -.01em;
+  border-right: 1px solid var(--bd); border-bottom: 2px solid var(--bd);
   white-space: nowrap; user-select: none; }
+table.sheet th.ctr { text-align: center; }
 
-table.sheet td { padding: 0; border-right: 1px solid rgba(128,128,128,.14);
-  border-bottom: 1px solid rgba(128,128,128,.14);
-  height: 26px; overflow: hidden; }
+table.sheet td { padding: 0; border-right: 1px solid rgba(128,128,128,.13);
+  border-bottom: 1px solid rgba(128,128,128,.13);
+  height: 28px; overflow: hidden; }
+
+/* 줄무늬 — 행이 많을 때 눈이 따라가기 쉽다 */
+table.sheet tbody tr:nth-child(even) td { background: rgba(128,128,128,.025); }
+table.sheet tbody tr:hover td { background: rgba(128,128,128,.06); }
 
 /* 행 번호 — 엑셀의 왼쪽 회색 칸 */
 table.sheet td.rowno, table.sheet th.rowno {
-  width: 38px; min-width: 38px; text-align: center;
+  width: 40px; min-width: 40px; text-align: center;
   background: var(--bg-2); color: var(--tx-muted);
-  font-size: 10px; font-weight: 700; user-select: none; }
+  font-size: 10.5px; font-weight: 800; user-select: none;
+  border-right: 1px solid var(--bd); }
 
 table.sheet td.rowdel, table.sheet th.rowdel {
   width: 26px; min-width: 26px; text-align: center; }
@@ -260,16 +267,23 @@ table.sheet td.rowdel span:hover { color: var(--bad); }
 
 /* 셀 */
 table.sheet td.cell { position: relative; cursor: cell;
-  padding: 0 8px; line-height: 26px; white-space: nowrap; }
+  padding: 0 9px; line-height: 28px; white-space: nowrap;
+  font-weight: 700; color: var(--tx-1); }
+table.sheet td.cell.ctr { text-align: center; }
 table.sheet td.cell .v { display: block; overflow: hidden;
   text-overflow: ellipsis; }
-table.sheet td.cell .v.dim { color: var(--tx-muted); font-style: italic; }
-table.sheet td.cell.calc { background: rgba(128,128,128,.05);
-  color: var(--tx-2); font-family: var(--cf-mono); cursor: default; }
+table.sheet td.cell .v.dim { color: var(--tx-muted); font-weight: 600;
+  font-style: italic; }
+
+/* 계산 칸 — 고칠 수 없다는 게 보이게 */
+table.sheet td.cell.calc { background: rgba(128,128,128,.06);
+  color: var(--tx-2); font-family: var(--cf-mono); font-weight: 700;
+  font-size: 11.5px; cursor: default; }
 
 /* 선택 */
-table.sheet td.cell.sel { background: rgba(37,99,235,.10); }
-table.sheet td.cell.anchor { box-shadow: inset 0 0 0 2px var(--accent); }
+table.sheet tbody tr td.cell.sel { background: rgba(37,99,235,.13); }
+table.sheet tbody tr td.cell.anchor {
+  box-shadow: inset 0 0 0 2px var(--accent); background: rgba(37,99,235,.06); }
 
 /* 채우기 핸들 — 선택 영역 오른쪽 아래 작은 사각형 */
 .fill-handle { position: absolute; right: -3px; bottom: -3px;
@@ -280,9 +294,11 @@ table.sheet td.cell.anchor { box-shadow: inset 0 0 0 2px var(--accent); }
 table.sheet td.cell.edit { padding: 0; box-shadow: inset 0 0 0 2px var(--accent); }
 table.sheet td.cell.edit input,
 table.sheet td.cell.edit select {
-  width: 100%; height: 26px; border: 0; outline: 0; padding: 0 7px;
-  font-size: 12px; font-family: var(--cf-font); font-weight: 600;
+  width: 100%; height: 28px; border: 0; outline: 0; padding: 0 8px;
+  font-size: 12px; font-family: var(--cf-font); font-weight: 700;
   background: var(--bg-3); color: var(--tx-1); box-sizing: border-box; }
+table.sheet td.cell.edit.ctr input,
+table.sheet td.cell.edit.ctr select { text-align: center; }
 
 table.sheet tr:hover td.rowno { color: var(--tx-1); }
 .sheet-wrap { overflow: auto; max-height: 52vh;
@@ -290,6 +306,17 @@ table.sheet tr:hover td.rowno { color: var(--tx-1); }
 .sheet-wrap::-webkit-scrollbar { width: 9px; height: 9px; }
 .sheet-wrap::-webkit-scrollbar-thumb {
   background: rgba(128,128,128,.28); border-radius: 5px; }
+
+/* 상태 배지 */
+table.sheet .tag { display: inline-block; font-size: 10.5px; font-weight: 800;
+  border-radius: 20px; padding: 1px 9px; line-height: 17px;
+  letter-spacing: -.01em; }
+table.sheet .tag.on  { color: #0f6e56; background: rgba(15,110,86,.13); }
+table.sheet .tag.off { color: var(--tx-muted); background: rgba(128,128,128,.14); }
+table.sheet .tag.sc  { color: var(--tx-2); background: rgba(128,128,128,.12); }
+table.sheet .tag.k-SRC { color: #1d4ed8; background: rgba(29,78,216,.13); }
+table.sheet .tag.k-REP { color: #0f6e56; background: rgba(15,110,86,.13); }
+table.sheet .tag.k-DEF { color: #b45309; background: rgba(180,83,9,.13); }
 
 .sheet-tip { font-size: 11px; color: var(--tx-muted); line-height: 1.6;
   margin: 6px 0 0; }
@@ -778,44 +805,44 @@ document.addEventListener('mousemove', ev => {
      sel    정해진 목록 중 하나 */
 const COLDEF = {
   lots: [
-    {k: 'lot_cd',    t: 'upper', w: 110, label: 'LOT_CD *'},
+    {k: 'lot_cd',    t: 'upper', w: 110, label: 'LOT_CD *', a: 'c'},
     {k: 'recipe_id', t: 'text',  w: 260, label: 'RECIPE_ID'},
-    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용',
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
      opts: [['Y', '사용'], ['N', '제외']]},
   ],
   params: [
     {k: 'param',      t: 'upper', w: 220, label: 'PARAM *'},
-    {k: 'param_type', t: 'sel',   w: 130, label: '타입', optsFrom: 'type'},
-    {k: 'use_yn',     t: 'sel',   w: 80,  label: '사용',
+    {k: 'param_type', t: 'sel',   w: 130, label: '타입', a: 'c', optsFrom: 'type'},
+    {k: 'use_yn',     t: 'sel',   w: 80,  label: '사용', a: 'c',
      opts: [['Y', '사용'], ['N', '제외']]},
   ],
   resps: [
-    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD'},
-    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *'},
+    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD', a: 'c'},
+    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *', a: 'c'},
     {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
     {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *'},
-    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용',
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
      opts: [['Y', '사용'], ['N', '제외']]},
   ],
   defects: [
-    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD'},
-    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *'},
+    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD', a: 'c'},
+    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *', a: 'c'},
     {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
     {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *'},
-    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용',
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
      opts: [['Y', '사용'], ['N', '제외']]},
   ],
   links: [
-    {k: 'lot_cd',  t: 'sel',   w: 90,  label: 'LOT_CD', optsFrom: 'lot'},
-    {k: 'kind',    t: 'sel',   w: 80,  label: '타입',
+    {k: 'lot_cd',  t: 'sel',   w: 90,  label: 'LOT_CD', a: 'c', optsFrom: 'lot'},
+    {k: 'kind',    t: 'sel',   w: 80,  label: '타입', a: 'c',
      opts: [['SRC', 'SRC'], ['REP', 'REP'], ['DEF', 'DEF']]},
     {k: 'alias',   t: 'upper', w: 150, label: '공정명 *'},
-    {k: 'link_id', t: 'upper', w: 130, label: '공정·스텝 *'},
+    {k: 'link_id', t: 'upper', w: 130, label: '공정·스텝 *', a: 'c'},
     {k: 'param',   t: 'upper', w: 130, label: '관리 PARAM'},
     {k: '_col',    t: 'calc',  w: 190, label: '생성 컬럼'},
-    {k: 'scope',   t: 'sel',   w: 90,  label: '용도',
+    {k: 'scope',   t: 'sel',   w: 90,  label: '용도', a: 'c',
      opts: [['both', '둘 다'], ['mon', '모니터링'], ['ana', '분석']]},
-    {k: 'use_yn',  t: 'sel',   w: 80,  label: '사용',
+    {k: 'use_yn',  t: 'sel',   w: 80,  label: '사용', a: 'c',
      opts: [['Y', '사용'], ['N', '제외']]},
   ],
 };
@@ -861,7 +888,8 @@ function renderSheetHead(key) {
   tr.innerHTML =
     '<th class="rowno"></th>' +
     COLDEF[key].map(d =>
-      `<th style="width:${d.w}px;">${esc(d.label)}</th>`).join('') +
+      `<th class="${d.a === 'c' ? 'ctr' : ''}" style="width:${d.w}px;"
+        >${esc(d.label)}</th>`).join('') +
     '<th class="rowdel"></th>';
 }
 
@@ -911,16 +939,31 @@ function renderSheet(key) {
                       && sheetEdit.r === r && sheetEdit.c === c;
 
       if (editing) {
-        return `<td class="cell edit" data-r="${r}" data-c="${c}">
+        return `<td class="cell edit ${def.a === 'c' ? 'ctr' : ''}"
+                  data-r="${r}" data-c="${c}">
           ${editorHtml(key, row, def, r, c)}</td>`;
       }
       const cls = ['cell', def.t === 'calc' ? 'calc' : '',
+                   def.a === 'c' ? 'ctr' : '',
                    isSel ? 'sel' : '', isAnchor ? 'anchor' : ''].join(' ');
       const txt = cellText(key, row, def);
       const dim = (def.k === 'param_type' && !row[def.k]) ? ' dim' : '';
+
+      // 상태 칸은 배지로 — 한눈에 구분된다
+      let inner;
+      if (def.k === 'use_yn') {
+        inner = `<span class="tag ${row.use_yn === 'N' ? 'off' : 'on'}"
+                  >${esc(txt)}</span>`;
+      } else if (def.k === 'kind') {
+        inner = `<span class="tag k-${esc(row.kind || 'SRC')}">${esc(txt)}</span>`;
+      } else if (def.k === 'scope') {
+        inner = `<span class="tag sc">${esc(txt)}</span>`;
+      } else {
+        inner = `<span class="v${dim}">${esc(txt)}</span>`;
+      }
+
       return `<td class="${cls}" data-r="${r}" data-c="${c}"
-                  title="${esc(txt)}">
-        <span class="v${dim}">${esc(txt)}</span>
+                  title="${esc(txt)}">${inner}
         ${isAnchor ? '<span class="fill-handle"></span>' : ''}</td>`;
     }).join('');
 
