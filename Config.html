@@ -229,6 +229,74 @@ table.et tr.sel select { color: var(--tx-2); }
 .iss.good { color: var(--good); }
 .empty { padding: 40px; text-align: center; color: var(--tx-muted);
   font-size: 13px; font-weight: 600; }
+/* ══════════════════════════════════════════════════
+   엑셀식 시트 — 모양
+   ══════════════════════════════════════════════════ */
+table.sheet { width: max-content; min-width: 100%;
+  border-collapse: separate; border-spacing: 0;
+  table-layout: fixed; font-size: 12px; }
+
+table.sheet th { position: sticky; top: 0; z-index: 2;
+  background: var(--bg-2); font-size: 11px; font-weight: 800;
+  color: var(--tx-2); text-align: left; padding: 6px 8px;
+  border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd);
+  white-space: nowrap; user-select: none; }
+
+table.sheet td { padding: 0; border-right: 1px solid rgba(128,128,128,.14);
+  border-bottom: 1px solid rgba(128,128,128,.14);
+  height: 26px; overflow: hidden; }
+
+/* 행 번호 — 엑셀의 왼쪽 회색 칸 */
+table.sheet td.rowno, table.sheet th.rowno {
+  width: 38px; min-width: 38px; text-align: center;
+  background: var(--bg-2); color: var(--tx-muted);
+  font-size: 10px; font-weight: 700; user-select: none; }
+
+table.sheet td.rowdel, table.sheet th.rowdel {
+  width: 26px; min-width: 26px; text-align: center; }
+table.sheet td.rowdel span { color: var(--tx-muted); cursor: pointer;
+  font-size: 14px; line-height: 26px; display: block; }
+table.sheet td.rowdel span:hover { color: var(--bad); }
+
+/* 셀 */
+table.sheet td.cell { position: relative; cursor: cell;
+  padding: 0 8px; line-height: 26px; white-space: nowrap; }
+table.sheet td.cell .v { display: block; overflow: hidden;
+  text-overflow: ellipsis; }
+table.sheet td.cell .v.dim { color: var(--tx-muted); font-style: italic; }
+table.sheet td.cell.calc { background: rgba(128,128,128,.05);
+  color: var(--tx-2); font-family: var(--cf-mono); cursor: default; }
+
+/* 선택 */
+table.sheet td.cell.sel { background: rgba(37,99,235,.10); }
+table.sheet td.cell.anchor { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* 채우기 핸들 — 선택 영역 오른쪽 아래 작은 사각형 */
+.fill-handle { position: absolute; right: -3px; bottom: -3px;
+  width: 7px; height: 7px; background: var(--accent);
+  border: 1px solid #fff; cursor: crosshair; z-index: 3; }
+
+/* 편집 중 */
+table.sheet td.cell.edit { padding: 0; box-shadow: inset 0 0 0 2px var(--accent); }
+table.sheet td.cell.edit input,
+table.sheet td.cell.edit select {
+  width: 100%; height: 26px; border: 0; outline: 0; padding: 0 7px;
+  font-size: 12px; font-family: var(--cf-font); font-weight: 600;
+  background: var(--bg-3); color: var(--tx-1); box-sizing: border-box; }
+
+table.sheet tr:hover td.rowno { color: var(--tx-1); }
+.sheet-wrap { overflow: auto; max-height: 52vh;
+  border: 1px solid var(--bd); border-radius: 10px; }
+.sheet-wrap::-webkit-scrollbar { width: 9px; height: 9px; }
+.sheet-wrap::-webkit-scrollbar-thumb {
+  background: rgba(128,128,128,.28); border-radius: 5px; }
+
+.sheet-tip { font-size: 11px; color: var(--tx-muted); line-height: 1.6;
+  margin: 6px 0 0; }
+.sheet-tip kbd { font-family: var(--cf-mono); font-size: 10px;
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 4px; padding: 1px 5px; }
+
 </style>
 {% endblock %}
 
@@ -417,13 +485,12 @@ function renderEditor() {
   document.getElementById('editor').innerHTML = `
     <div class="hint" style="margin-bottom:10px;padding:8px 12px;
          border:1px solid var(--bd);border-radius:10px;">
-      <b>엑셀에서 그대로 붙여넣을 수 있습니다</b> —
-      채우고 싶은 칸을 클릭하고 <b>Ctrl+V</b> 하면 그 자리부터 들어갑니다.
-      행이 모자라면 자동으로 늘어나고, 머리글 줄은 알아서 건너뜁니다.
-      Enter 로 아래 칸으로 이동합니다.<br>
-      <b>컬럼 폭</b>은 머리글 경계를 끌어서 조절합니다 (두 번 누르면 기본값).
-      <a href="#" onclick="resetColWidths();return false"
-         style="color:var(--accent);">전체 초기화</a>
+      <b>엑셀처럼 씁니다</b> —
+      셀을 클릭해 고르고, 끌어서 범위를 잡습니다.
+      선택 영역 오른쪽 아래 <b>작은 사각형을 아래로 끌면</b> 값이 복사됩니다.<br>
+      <kbd>Ctrl+C</kbd> <kbd>Ctrl+V</kbd> 로 엑셀과 주고받고,
+      <kbd>Delete</kbd> 로 비우고, 글자를 치면 바로 편집이 시작됩니다
+      (<kbd>F2</kbd> 나 더블클릭으로도 편집).
     </div>
     <div class="sec">
       <div class="sec-h"><h3>${esc(c.oper_desc || c.oper_id || '새 공정')}</h3>
@@ -450,36 +517,16 @@ function renderEditor() {
     <div class="sec">
       <div class="sec-h"><h3>Device</h3>
         <span class="sub" id="lcnt"></span>
-        <span class="sub">— 새 device 는 여기 한 줄만 추가하면 됩니다</span>
+        <span class="sub">— LOT_CD 와 레시피</span>
         <span class="right">
-          <button class="btn sm" id="fclr-lots" style="display:none;"
-                  onclick="clearFilter('lots')">필터 해제</button>
-          <button class="btn sm danger" id="del-lots" disabled
-                  onclick="delSelected('lots')">선택 삭제</button>
-          <button class="btn sm" onclick="clearRows('lots')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('lots')" title="창을 열어 붙여넣기">붙여넣기 창</button>
-          <button class="btn sm" onclick="suggestLots()">적재 LOT_CD 가져오기</button>
-          <button class="btn sm" onclick="addLot()">+ 추가</button>
+          <button class="btn sm" onclick="addSheetRow('lots', 1)">+ 행</button>
+          <button class="btn sm" onclick="addSheetRow('lots', 10)">+ 10행</button>
+          <button class="btn sm danger" onclick="delSelRows()">선택 행 삭제</button>
         </span></div>
-      <div class="tbl-scroll">
-        <table class="et">
-          <thead><tr>
-            <th class="ck"><input type="checkbox" id="all-lots"
-                onchange="selAll('lots', this.checked)"></th>
-            <th style="width:26%;">LOT_CD *
-              <input class="fx" id="fx-lots-lot_cd" placeholder="검색"
-                     oninput="setFilter('lots','lot_cd',this.value)"></th>
-            <th style="width:52%;">RECIPE_ID
-              <input class="fx" id="fx-lots-recipe_id" placeholder="검색"
-                     oninput="setFilter('lots','recipe_id',this.value)"></th>
-            <th style="width:18%;">사용
-              <select class="fx" id="fx-lots-use_yn"
-                      onchange="setFilter('lots','use_yn',this.value)">
-                <option value="">전체</option>
-                <option value="Y">사용</option>
-                <option value="N">제외</option>
-              </select></th>
-            <th></th></tr></thead>
+      
+      <div class="sheet-wrap">
+        <table class="sheet" id="sheet-lots">
+          <thead><tr></tr></thead>
           <tbody id="ltbody"></tbody>
         </table>
       </div>
@@ -488,42 +535,16 @@ function renderEditor() {
     <div class="sec">
       <div class="sec-h"><h3>파라미터</h3>
         <span class="sub" id="pcnt"></span>
-        <span class="sub">— device 와 무관하게 공정당 한 번만</span>
+        <span class="sub">— CMP 자체 측정 항목</span>
         <span class="right">
-          <button class="btn sm" id="fclr-params" style="display:none;"
-                  onclick="clearFilter('params')">필터 해제</button>
-          <button class="btn sm danger" id="del-params" disabled
-                  onclick="delSelected('params')">선택 삭제</button>
-          <button class="btn sm" onclick="clearRows('params')">전체 비우기</button>
-          <button class="btn sm" onclick="autoClassify()">타입 자동 분류</button>
-          <button class="btn sm" onclick="openBulk('params')" title="창을 열어 붙여넣기">붙여넣기 창</button>
-          <button class="btn sm" onclick="suggestParams()">적재 컬럼에서 채우기</button>
-          <button class="btn sm" onclick="addParam()">+ 추가</button>
+          <button class="btn sm" onclick="addSheetRow('params', 1)">+ 행</button>
+          <button class="btn sm" onclick="addSheetRow('params', 10)">+ 10행</button>
+          <button class="btn sm danger" onclick="delSelRows()">선택 행 삭제</button>
         </span></div>
-      <div class="tbl-scroll">
-        <table class="et">
-          <thead><tr>
-            <th class="ck"><input type="checkbox" id="all-params"
-                onchange="selAll('params', this.checked)"></th>
-            <th style="width:55%;">PARAM
-              <input class="fx" id="fx-params-param" placeholder="포함 문자 검색"
-                     oninput="setFilter('params','param',this.value)"></th>
-            <th style="width:20%;">타입
-              <select class="fx" id="fx-params-param_type"
-                      onchange="setFilter('params','param_type',this.value)">
-                <option value="">전체</option>
-                <option value="__AUTO__">자동(미지정)</option>
-                {% for v, l in type_options %}<option value="{{ v }}">{{ v }}</option>
-                {% endfor %}
-              </select></th>
-            <th style="width:18%;">사용
-              <select class="fx" id="fx-params-use_yn"
-                      onchange="setFilter('params','use_yn',this.value)">
-                <option value="">전체</option>
-                <option value="Y">사용</option>
-                <option value="N">제외</option>
-              </select></th>
-            <th></th></tr></thead>
+      
+      <div class="sheet-wrap">
+        <table class="sheet" id="sheet-params">
+          <thead><tr></tr></thead>
           <tbody id="ptbody"></tbody>
         </table>
       </div>
@@ -534,43 +555,14 @@ function renderEditor() {
         <span class="sub" id="rcnt"></span>
         <span class="sub">— 이 공정의 Inline 계측 · 파라미터 1개당 1행</span>
         <span class="right">
-          <button class="btn sm" id="fclr-resps" style="display:none;"
-                  onclick="clearFilter('resps')">필터 해제</button>
-          <button class="btn sm danger" id="del-resps" disabled
-                  onclick="delSelected('resps')">선택 삭제</button>
-          <button class="btn sm" onclick="clearRows('resps')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('resps')" title="창을 열어 붙여넣기">붙여넣기 창</button>
-          <button class="btn sm" onclick="addResp()">+ 추가</button>
+          <button class="btn sm" onclick="addSheetRow('resps', 1)">+ 행</button>
+          <button class="btn sm" onclick="addSheetRow('resps', 10)">+ 10행</button>
+          <button class="btn sm danger" onclick="delSelRows()">선택 행 삭제</button>
         </span></div>
-      <div class="tbl-scroll">
-        <table class="et">
-          <thead><tr>
-            <th class="ck"><input type="checkbox" id="all-resps"
-                onchange="selAll('resps', this.checked)"></th>
-            <th style="width:12%;">LOT_CD
-              <input class="fx" id="fx-resps-lot_cd" placeholder="검색"
-                     oninput="setFilter('resps','lot_cd',this.value)"></th>
-            <th style="width:18%;">STEP_ID *
-              <input class="fx" id="fx-resps-step_id" placeholder="검색"
-                     oninput="setFilter('resps','step_id',this.value)"></th>
-            <th style="width:16%;">스텝 이름
-              <input class="fx" id="fx-resps-step_desc" placeholder="검색"
-                     oninput="setFilter('resps','step_desc',this.value)"></th>
-            <th style="width:16%;">관리 PARAM
-              <input class="fx" id="fx-resps-param" placeholder="검색"
-                     oninput="setFilter('resps','param',this.value)"></th>
-            <th style="width:20%;">생성 컬럼
-              <span class="fx" style="border-color:transparent;
-                    background:transparent;color:var(--tx-muted);
-                    font-weight:600;">merge 결과 이름</span></th>
-            <th style="width:14%;">사용
-              <select class="fx" id="fx-resps-use_yn"
-                      onchange="setFilter('resps','use_yn',this.value)">
-                <option value="">전체</option>
-                <option value="Y">사용</option>
-                <option value="N">제외</option>
-              </select></th>
-            <th></th></tr></thead>
+      
+      <div class="sheet-wrap">
+        <table class="sheet" id="sheet-resps">
+          <thead><tr></tr></thead>
           <tbody id="rtbody"></tbody>
         </table>
       </div>
@@ -581,43 +573,14 @@ function renderEditor() {
         <span class="sub" id="dcnt"></span>
         <span class="sub">— 이 공정의 Defect 계수 · 파라미터 1개당 1행</span>
         <span class="right">
-          <button class="btn sm" id="fclr-defects" style="display:none;"
-                  onclick="clearFilter('defects')">필터 해제</button>
-          <button class="btn sm danger" id="del-defects" disabled
-                  onclick="delSelected('defects')">선택 삭제</button>
-          <button class="btn sm" onclick="clearRows('defects')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('defects')" title="창을 열어 붙여넣기">붙여넣기 창</button>
-          <button class="btn sm" onclick="addDefect()">+ 추가</button>
+          <button class="btn sm" onclick="addSheetRow('defects', 1)">+ 행</button>
+          <button class="btn sm" onclick="addSheetRow('defects', 10)">+ 10행</button>
+          <button class="btn sm danger" onclick="delSelRows()">선택 행 삭제</button>
         </span></div>
-      <div class="tbl-scroll">
-        <table class="et">
-          <thead><tr>
-            <th class="ck"><input type="checkbox" id="all-defects"
-                onchange="selAll('defects', this.checked)"></th>
-            <th style="width:12%;">LOT_CD
-              <input class="fx" id="fx-defects-lot_cd" placeholder="검색"
-                     oninput="setFilter('defects','lot_cd',this.value)"></th>
-            <th style="width:18%;">STEP_ID *
-              <input class="fx" id="fx-defects-step_id" placeholder="검색"
-                     oninput="setFilter('defects','step_id',this.value)"></th>
-            <th style="width:16%;">스텝 이름
-              <input class="fx" id="fx-defects-step_desc" placeholder="검색"
-                     oninput="setFilter('defects','step_desc',this.value)"></th>
-            <th style="width:16%;">관리 PARAM
-              <input class="fx" id="fx-defects-param" placeholder="검색"
-                     oninput="setFilter('defects','param',this.value)"></th>
-            <th style="width:20%;">생성 컬럼
-              <span class="fx" style="border-color:transparent;
-                    background:transparent;color:var(--tx-muted);
-                    font-weight:600;">merge 결과 이름</span></th>
-            <th style="width:14%;">사용
-              <select class="fx" id="fx-defects-use_yn"
-                      onchange="setFilter('defects','use_yn',this.value)">
-                <option value="">전체</option>
-                <option value="Y">사용</option>
-                <option value="N">제외</option>
-              </select></th>
-            <th></th></tr></thead>
+      
+      <div class="sheet-wrap">
+        <table class="sheet" id="sheet-defects">
+          <thead><tr></tr></thead>
           <tbody id="dtbody"></tbody>
         </table>
       </div>
@@ -629,67 +592,19 @@ function renderEditor() {
         <span class="sub" id="kcnt"></span>
         <span class="sub">— 다른 공정의 값 (사전공정 챔버·측정값 등)</span>
         <span class="right">
-          <button class="btn sm" id="fclr-links" style="display:none;"
-                  onclick="clearFilter('links')">필터 해제</button>
-          <button class="btn sm danger" id="del-links" disabled
-                  onclick="delSelected('links')">선택 삭제</button>
-          <button class="btn sm" onclick="clearRows('links')">전체 비우기</button>
-          <button class="btn sm" onclick="openBulk('links')" title="창을 열어 붙여넣기">붙여넣기 창</button>
-          <button class="btn sm" onclick="addLink()">+ 추가</button>
+          <button class="btn sm" onclick="addSheetRow('links', 1)">+ 행</button>
+          <button class="btn sm" onclick="addSheetRow('links', 10)">+ 10행</button>
+          <button class="btn sm danger" onclick="delSelRows()">선택 행 삭제</button>
         </span></div>
       <div class="hint" style="margin:0 0 8px;">
-        <b>다른 공정</b>의 값을 이 공정에 붙입니다 — 사전공정 챔버,
-        사전공정 측정값, 다른 공정의 계측값.
-        <b>이 공정 자신의 계측</b>은 위 Response·Defect 표에 넣으세요.<br>
-        <b>LOT_CD</b> 를 고르면 그 device 에만 적용됩니다 (비우면 전 device).
-        관리 PARAM 에 <b>CHAMBER</b> 를 넣으면 장비·챔버 이력에서,
-        그 외 값은 타입에 맞는 측정 테이블에서 가져옵니다.
+        <b>다른 공정</b>의 값을 이 공정에 붙입니다.
+        <b>이 공정 자신의 계측</b>은 위 Response·Defect 표에 넣으세요.
+        LOT_CD 를 고르면 그 device 에만 적용됩니다 (비우면 전 device).
+        관리 PARAM 에 <b>CHAMBER</b> 를 넣으면 장비·챔버 이력에서 가져옵니다.
       </div>
-      <div class="tbl-scroll">
-        <table class="et">
-          <thead><tr>
-            <th class="ck"><input type="checkbox" id="all-links"
-                onchange="selAll('links', this.checked)"></th>
-            <th style="width:11%;">LOT_CD
-              <input class="fx" id="fx-links-lot_cd" placeholder="검색"
-                     oninput="setFilter('links','lot_cd',this.value)"></th>
-            <th style="width:9%;">타입
-              <select class="fx" id="fx-links-kind"
-                      onchange="setFilter('links','kind',this.value)">
-                <option value="">전체</option>
-                <option value="SRC">SRC</option>
-                <option value="REP">REP</option>
-                <option value="DEF">DEF</option>
-              </select></th>
-            <th style="width:17%;">공정명(별칭) *
-              <input class="fx" id="fx-links-alias" placeholder="검색"
-                     oninput="setFilter('links','alias',this.value)"></th>
-            <th style="width:15%;">공정·스텝 *
-              <input class="fx" id="fx-links-link_id" placeholder="검색"
-                     oninput="setFilter('links','link_id',this.value)"></th>
-            <th style="width:14%;">관리 PARAM
-              <input class="fx" id="fx-links-param" placeholder="검색"
-                     oninput="setFilter('links','param',this.value)"></th>
-            <th style="width:20%;">생성 컬럼
-              <span class="fx" style="border-color:transparent;
-                    background:transparent;color:var(--tx-muted);
-                    font-weight:600;">merge 결과 이름</span></th>
-            <th style="width:10%;">용도
-              <select class="fx" id="fx-links-scope"
-                      onchange="setFilter('links','scope',this.value)">
-                <option value="">전체</option>
-                <option value="both">둘 다</option>
-                <option value="mon">모니터링</option>
-                <option value="ana">분석</option>
-              </select></th>
-            <th style="width:9%;">사용
-              <select class="fx" id="fx-links-use_yn"
-                      onchange="setFilter('links','use_yn',this.value)">
-                <option value="">전체</option>
-                <option value="Y">사용</option>
-                <option value="N">제외</option>
-              </select></th>
-            <th></th></tr></thead>
+      <div class="sheet-wrap">
+        <table class="sheet" id="sheet-links">
+          <thead><tr></tr></thead>
           <tbody id="ktbody"></tbody>
         </table>
       </div>
@@ -703,35 +618,15 @@ function renderEditor() {
     </div>`;
 
   restoreFilterInputs();       // 화면을 새로 만들었으므로 필터 값 되살리기
-  renderLots(); renderParams(); renderResps(); renderDefects();
-  renderLinks();
-  // ★ 표는 innerHTML 로 새로 만들어지므로 렌더 후에 다시 입힌다
-  setupColResize(document.getElementById('editor'));
+  // 시트 다섯 개 — 헤더를 만들고 내용을 그린다
+  ['lots', 'params', 'resps', 'defects', 'links'].forEach(k => {
+    renderSheetHead(k);
+    renderSheet(k);
+  });
   refreshAutoTypes(true);      // '자동 (…)' 표시 채우기
 }
 
 /* ── device (LOT_CD + RECIPE) ──────────────── */
-function renderLots() {
-  document.getElementById('ltbody').innerHTML = cur.lots.map((l, i) => `
-    <tr class="${l._sel ? 'sel' : ''}">
-      <td class="ck"><input type="checkbox" ${l._sel ? 'checked' : ''}
-            onchange="cur.lots[${i}]._sel=this.checked;markSel('lots',${i},this.checked)"></td>
-      <td><input value="${esc(l.lot_cd)}" placeholder="5E2"
-                 data-tbl="lots" data-row="${i}" data-col="0"
-                 oninput="cur.lots[${i}].lot_cd=this.value.toUpperCase()"></td>
-      <td><input value="${esc(l.recipe_id)}" placeholder="E2_M1CU_AB.CAS (비우면 전체)"
-                 data-tbl="lots" data-row="${i}" data-col="1"
-                 oninput="cur.lots[${i}].recipe_id=this.value"></td>
-      <td><select data-tbl="lots" data-row="${i}" data-col="2"
-                  onchange="cur.lots[${i}].use_yn=this.value">
-        <option value="Y" ${l.use_yn !== 'N' ? 'selected' : ''}>사용</option>
-        <option value="N" ${l.use_yn === 'N' ? 'selected' : ''}>제외</option>
-      </select></td>
-      <td><span class="row-del" onclick="delLot(${i})">×</span></td>
-    </tr>`).join('')
-    || '<tr><td colspan="5" class="none-row">device 가 없습니다. 추가하거나 엑셀에서 붙여넣으세요.</td></tr>';
-  applyFilter('lots');
-}
 function addLot() { cur.lots.push({lot_cd:'', recipe_id:'', use_yn:'Y'}); renderLots(); }
 function delLot(i) { cur.lots.splice(i,1); renderLots(); }
 
@@ -752,32 +647,6 @@ async function suggestLots() {
 }
 
 /* ── 파라미터 ──────────────────────────────── */
-function renderParams() {
-  document.getElementById('ptbody').innerHTML = cur.params.map((p, i) => `
-    <tr class="${p._sel ? 'sel' : ''}">
-      <td class="ck"><input type="checkbox" ${p._sel ? 'checked' : ''}
-            onchange="cur.params[${i}]._sel=this.checked;markSel('params',${i},this.checked)"></td>
-      <td><input value="${esc(p.param)}" placeholder="CU_THK_AVG"
-                 data-tbl="params" data-row="${i}" data-col="0"
-                 oninput="cur.params[${i}].param=this.value.toUpperCase()"></td>
-      <td><select data-tbl="params" data-row="${i}" data-col="1"
-                  title="${esc(p.param_type ? '지정' : '자동: ' + autoType(p.param))}"
-                  onchange="cur.params[${i}].param_type=this.value">
-        <option value="">자동 (${esc(autoType(p.param) || '-')})</option>
-        ${TYPE_OPTS.map(([v, l]) =>
-          `<option value="${v}" ${p.param_type === v ? 'selected' : ''}>${esc(v)}</option>`
-        ).join('')}
-      </select></td>
-      <td><select data-tbl="params" data-row="${i}" data-col="2"
-                  onchange="cur.params[${i}].use_yn=this.value">
-        <option value="Y" ${p.use_yn !== 'N' ? 'selected' : ''}>사용</option>
-        <option value="N" ${p.use_yn === 'N' ? 'selected' : ''}>제외</option>
-      </select></td>
-      <td><span class="row-del" onclick="delParam(${i})">×</span></td>
-    </tr>`).join('')
-    || '<tr><td colspan="5" class="none-row">파라미터가 없습니다. 추가하거나 엑셀에서 붙여넣으세요.</td></tr>';
-  applyFilter('params');
-}
 function addParam() { cur.params.push({param:'', param_type:'', use_yn:'Y'}); renderParams(); }
 function delParam(i) { cur.params.splice(i,1); renderParams(); }
 
@@ -798,46 +667,9 @@ async function suggestParams() {
 
 /* ── defect 스텝 ───────────────────────────── */
 /* Defect · Response 는 구조가 같아 한 함수로 그린다 */
-function renderStepTable(key) {
-  const t = TBL[key];
-  const rows = cur[key] || [];
-  document.getElementById(t.tbody).innerHTML = rows.map((d, i) => `
-    <tr class="${d._sel ? 'sel' : ''}">
-      <td class="ck"><input type="checkbox" ${d._sel ? 'checked' : ''}
-            onchange="cur.${key}[${i}]._sel=this.checked;markSel('${key}',${i},this.checked)"></td>
-      <td><input value="${esc(d.lot_cd)}" placeholder="5E2"
-                 data-tbl="${key}" data-row="${i}" data-col="0"
-                 oninput="cur.${key}[${i}].lot_cd=this.value.toUpperCase()"></td>
-      <td><input value="${esc(d.step_id)}" placeholder="STEP_ID"
-                 data-tbl="${key}" data-row="${i}" data-col="1"
-                 oninput="cur.${key}[${i}].step_id=this.value.toUpperCase()"></td>
-      <td><input value="${esc(d.step_desc)}" placeholder="스텝 이름 (선택)"
-                 data-tbl="${key}" data-row="${i}" data-col="2"
-                 oninput="cur.${key}[${i}].step_desc=this.value"></td>
-      <td><input value="${esc(d.param)}" placeholder="관리 PARAM"
-                 data-tbl="${key}" data-row="${i}" data-col="3"
-                 oninput="cur.${key}[${i}].param=this.value.toUpperCase()"></td>
-      <td class="colprev ${colName(key, d) ? '' : 'none'}"
-          title="병합 후 이 이름의 컬럼에 값이 들어갑니다">
-        ${colName(key, d) || '<span class="warn-txt">PARAM 필요</span>'}</td>
-      <td><select data-tbl="${key}" data-row="${i}" data-col="4"
-                  onchange="cur.${key}[${i}].use_yn=this.value">
-        <option value="Y" ${d.use_yn !== 'N' ? 'selected' : ''}>사용</option>
-        <option value="N" ${d.use_yn === 'N' ? 'selected' : ''}>제외</option>
-      </select></td>
-      <td><span class="row-del" onclick="delStepRow('${key}',${i})">×</span></td>
-    </tr>`).join('')
-    || `<tr><td colspan="8" class="none-row">${t.label}이 없습니다.
-        추가하거나 엑셀에서 붙여넣으세요.</td></tr>`;
-  applyFilter(key);
-}
 /* 서버 config_service.step_column 과 같은 규칙.
    ★ 두 곳에 규칙이 있는 게 이상적이진 않지만, 저장 전에 결과를 보여주려면
      화면에서도 만들 수밖에 없다. 규칙을 바꿀 땐 반드시 양쪽을 함께 고칠 것. */
-function slugName(v) {
-  return String(v || '').trim().toUpperCase()
-    .replace(/[^0-9A-Z_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-}
 function colName(key, d) {
   const pre = key === 'defects' ? 'DEF' : 'RESP';
   const st = slugName(d.step_desc || d.step_id);
@@ -846,41 +678,11 @@ function colName(key, d) {
   return st ? `${pre}_${st}_${pm}` : `${pre}_${pm}`;
 }
 
-function renderDefects() { renderStepTable('defects'); }
-function renderResps()   { renderStepTable('resps'); }
 
-function addStepRow(key) {
-  cur[key] = cur[key] || [];
-  cur[key].push(TBL[key].blank());
-  TBL[key].render();
-}
-function delStepRow(key, i) { cur[key].splice(i, 1); TBL[key].render(); }
-
-function addDefect() { addStepRow('defects'); }
-function addResp()   { addStepRow('resps'); }
-
-/* ══════════════════════════════════════════════════
-   엑셀 붙여넣기
-
-   엑셀은 복사할 때 열을 탭, 행을 개행으로 구분한 텍스트를 준다.
-   그래서 표 셀에 붙여넣으면 그 위치를 기준으로 여러 행·열을 한 번에
-   채울 수 있다. 행이 부족하면 자동으로 늘린다.
-
-   붙여넣는 위치가 어느 표의 몇 번째 열인지는 각 input/select 에
-   data-tbl / data-row / data-col 로 심어 둔다.
-   ══════════════════════════════════════════════════ */
-/* ══════════════════════════════════════════════════
-   연계 공정
-
-   ★ 사전공정 chamber·측정값, 다른 공정의 Response·Defect 를
-     한 표에서 다룬다. LOT_CD 단위라 device 마다 다른 사전공정을
-     쓸 수 있다 — 예전 구조는 사전공정이 공정 단위라 못 했다.
-   ★ 조회처는 타입이 아니라 PARAM 이 가른다.
-     CHAMBER 면 장비·챔버 이력, 그 외는 타입에 맞는 측정 테이블.
-   ══════════════════════════════════════════════════ */
 const CHAMBER_PARAMS = ['CHAMBER', 'CH', 'CHM', 'EQP_CH', 'MODULE',
                         'MODULE_ID', '챔버'];
 
+/* 이 PARAM 이 chamber 인가 — 조회처를 가르는 기준 (서버와 같은 규칙) */
 function isChamberParam(p) {
   const v = slugName(p);
   return !v || CHAMBER_PARAMS.includes(v);
@@ -903,88 +705,11 @@ function linkColName(d) {
 }
 
 /* 이 공정에 등록된 device — LOT_CD 칸을 드롭박스로 채운다 */
-function lotOptions(sel) {
-  const lots = [...new Set((cur.lots || [])
-    .map(l => (l.lot_cd || '').trim()).filter(Boolean))];
-  return `<option value="">전체</option>` + lots.map(v =>
-    `<option value="${esc(v)}" ${sel === v ? 'selected' : ''}>${esc(v)}</option>`
-  ).join('');
-}
 
-function renderLinks() {
-  const rows = cur.links || [];
-  document.getElementById('ktbody').innerHTML = rows.map((d, i) => {
-    const col = linkColName(d);
-    return `
-    <tr class="${d._sel ? 'sel' : ''}">
-      <td class="ck"><input type="checkbox" ${d._sel ? 'checked' : ''}
-            onchange="cur.links[${i}]._sel=this.checked;markSel('links',${i},this.checked)"></td>
-      <td><select data-tbl="links" data-row="${i}" data-col="0"
-                  onchange="cur.links[${i}].lot_cd=this.value">
-        ${lotOptions(d.lot_cd)}
-      </select></td>
-      <td><select data-tbl="links" data-row="${i}" data-col="1"
-                  onchange="cur.links[${i}].kind=this.value;renderLinks()">
-        <option value="SRC" ${d.kind !== 'REP' && d.kind !== 'DEF' ? 'selected' : ''}>SRC</option>
-        <option value="REP" ${d.kind === 'REP' ? 'selected' : ''}>REP</option>
-        <option value="DEF" ${d.kind === 'DEF' ? 'selected' : ''}>DEF</option>
-      </select></td>
-      <td><input value="${esc(d.alias)}" placeholder="M1_POLY"
-                 title="영문 공정명 — 생성 컬럼 이름에 들어갑니다"
-                 data-tbl="links" data-row="${i}" data-col="2"
-                 oninput="cur.links[${i}].alias=this.value.toUpperCase();refreshLinkCol(${i})"></td>
-      <td><input value="${esc(d.link_id)}" placeholder="T5515000C"
-                 class="${sameAsOper(d.link_id) ? 'warn-cell' : ''}"
-                 title="${sameAsOper(d.link_id)
-                   ? '본공정입니다 — 이 공정의 계측은 Response·Defect 표에 넣으세요'
-                   : ''}"
-                 data-tbl="links" data-row="${i}" data-col="3"
-                 oninput="cur.links[${i}].link_id=this.value.toUpperCase();renderLinks()"></td>
-      <td><input value="${esc(d.param)}" placeholder="CHAMBER 또는 THK"
-                 list="param-hints"
-                 data-tbl="links" data-row="${i}" data-col="4"
-                 oninput="cur.links[${i}].param=this.value.toUpperCase();refreshLinkCol(${i})"></td>
-      <td class="colprev ${col ? '' : 'none'}" id="kcol-${i}"
-          title="${esc(col)}">
-        ${col || '<span class="warn-txt">공정명 필요</span>'}</td>
-      <td><select data-tbl="links" data-row="${i}" data-col="5"
-                  onchange="cur.links[${i}].scope=this.value">
-        <option value="both" ${d.scope !== 'mon' && d.scope !== 'ana' ? 'selected' : ''}>둘 다</option>
-        <option value="mon" ${d.scope === 'mon' ? 'selected' : ''}>모니터링</option>
-        <option value="ana" ${d.scope === 'ana' ? 'selected' : ''}>분석</option>
-      </select></td>
-      <td><select data-tbl="links" data-row="${i}" data-col="6"
-                  onchange="cur.links[${i}].use_yn=this.value">
-        <option value="Y" ${d.use_yn !== 'N' ? 'selected' : ''}>사용</option>
-        <option value="N" ${d.use_yn === 'N' ? 'selected' : ''}>제외</option>
-      </select></td>
-      <td><span class="row-del" onclick="delStepRow('links',${i})">×</span></td>
-    </tr>`;
-  }).join('')
-    || `<tr><td colspan="10" class="none-row">연계 공정이 없습니다.
-        추가하거나 엑셀에서 붙여넣으세요.</td></tr>`;
-  applyFilter('links');
-}
 
 /* 이름을 칠 때마다 표를 다시 그리면 포커스가 날아간다 —
    생성 컬럼 칸만 갱신한다 */
-function refreshLinkCol(i) {
-  const el = document.getElementById(`kcol-${i}`);
-  if (!el) return;
-  const col = linkColName(cur.links[i]);
-  el.className = 'colprev' + (col ? '' : ' none');
-  el.title = col || '';
-  el.innerHTML = col || '<span class="warn-txt">공정명 필요</span>';
-}
 
-function addLink() { addStepRow('links'); }
-
-/* 본공정을 연계로 등록했나 — 그러면 같은 값이 두 번 붙는다 */
-function sameAsOper(linkId) {
-  const a = String(linkId || '').trim().toUpperCase();
-  const b = String((cur && cur.oper_id) || '').trim().toUpperCase();
-  return !!a && a === b;
-}
 
 
 /* ══════════════════════════════════════════════════
@@ -1001,136 +726,6 @@ function sameAsOper(linkId) {
      'ㅇㅇ' 같은 값이 들어가면 select 가 조용히 첫 항목으로 바뀐다.
    ══════════════════════════════════════════════════ */
 
-/* 지금 포커스가 있는 셀 좌표 */
-let cellAt = null;
-
-document.addEventListener('focusin', (ev) => {
-  const el = ev.target;
-  if (el && el.dataset && el.dataset.tbl) {
-    cellAt = {
-      tbl: el.dataset.tbl,
-      row: Number(el.dataset.row),
-      col: Number(el.dataset.col),
-    };
-  }
-});
-
-/* 표 안에서 Ctrl+V — 그 칸부터 채운다 */
-document.addEventListener('paste', (ev) => {
-  const el = document.activeElement;
-  if (!el || !el.dataset || !el.dataset.tbl) return;   // 표 밖이면 기본 동작
-
-  const text = (ev.clipboardData || window.clipboardData).getData('text');
-  if (!text || !/[\t\n]/.test(text)) return;   // 한 칸짜리는 그냥 붙여넣기
-
-  ev.preventDefault();
-  pasteAt(el.dataset.tbl, Number(el.dataset.row), Number(el.dataset.col), text);
-});
-
-function pasteAt(key, row0, col0, text) {
-  const t = TBL[key];
-  if (!t) return;
-
-  const grid = text.replace(/\r/g, '').replace(/\n+$/, '')
-    .split('\n').map(line => line.split('\t'));
-  if (!grid.length) return;
-
-  // 머리글로 보이면 건너뛴다 — 첫 줄이 컬럼 이름과 겹치는 경우
-  if (grid.length > 1 && looksLikeHeader(grid[0], t.cols)) grid.shift();
-  if (!grid.length) return;
-
-  cur[key] = cur[key] || [];
-  const need = row0 + grid.length - cur[key].length;
-  for (let i = 0; i < need; i++) cur[key].push(t.blank());
-
-  let filled = 0;
-  grid.forEach((line, r) => {
-    const target = cur[key][row0 + r];
-    line.forEach((raw, c) => {
-      const col = t.cols[col0 + c];
-      if (!col) return;                      // 표 오른쪽 밖은 버린다
-      const v = coerceCell(key, col, raw);
-      if (v !== null) { target[col] = v; filled++; }
-    });
-  });
-
-  t.render();
-  edMsg(`${grid.length}행 × ${grid[0].length}열 붙여넣기 — ${filled}칸 입력됨`);
-}
-
-/* 첫 줄이 머리글인지 — 컬럼 이름이나 흔한 한글 머리글과 겹치면 */
-function looksLikeHeader(line, cols) {
-  const HEAD = ['LOT_CD', 'RECIPE_ID', 'PARAM', 'PARAM_TYPE', 'STEP_ID',
-                'STEP_DESC', 'KIND', 'ALIAS', 'LINK_ID', 'SCOPE', 'USE_YN',
-                '타입', '공정명', '별칭', '공정', '스텝', '관리', '용도',
-                '사용', '레시피', '파라미터'];
-  const up = line.map(v => String(v || '').trim().toUpperCase());
-  const hit = up.filter(v => v && (cols.includes(v.toLowerCase())
-                                   || HEAD.some(h => v.includes(h)))).length;
-  return hit >= Math.max(1, Math.ceil(line.length / 2));
-}
-
-/* 칸 종류에 맞게 값을 다듬는다.
-   넣을 수 없는 값이면 null 을 돌려 그 칸을 건너뛴다. */
-function coerceCell(key, col, raw) {
-  const v = String(raw ?? '').trim();
-
-  if (col === 'use_yn') {
-    if (!v) return null;
-    if (/^(N|제외|F|FALSE|0|X)$/i.test(v)) return 'N';
-    if (/^(Y|사용|T|TRUE|1|O)$/i.test(v)) return 'Y';
-    return null;                     // 알 수 없는 값은 건드리지 않는다
-  }
-
-  if (col === 'kind') {
-    const k = v.toUpperCase();
-    return ['SRC', 'REP', 'DEF'].includes(k) ? k : null;
-  }
-
-  if (col === 'scope') {
-    const s = v.toLowerCase();
-    if (['both', 'mon', 'ana'].includes(s)) return s;
-    if (/둘|both|전체/i.test(v)) return 'both';
-    if (/모니터|mon/i.test(v)) return 'mon';
-    if (/분석|ana/i.test(v)) return 'ana';
-    return null;
-  }
-
-  if (col === 'param_type') {
-    const p = v.toUpperCase();
-    return (TYPE_OPTS || []).some(x => x[0] === p) ? p : (v ? '' : null);
-  }
-
-  // 나머지는 글자 그대로 — 코드성 칸만 대문자로
-  if (['lot_cd', 'step_id', 'param', 'alias', 'link_id'].includes(col)) {
-    return v.toUpperCase();
-  }
-  return v;
-}
-
-/* 표에서 방향키로 칸 이동 — 엑셀처럼 */
-document.addEventListener('keydown', (ev) => {
-  const el = document.activeElement;
-  if (!el || !el.dataset || !el.dataset.tbl) return;
-
-  const isText = el.tagName === 'INPUT';
-  let dr = 0, dc = 0;
-
-  if (ev.key === 'Enter' && !ev.shiftKey) { dr = 1; }
-  else if (ev.key === 'Enter' && ev.shiftKey) { dr = -1; }
-  else if (ev.key === 'ArrowDown' && !isText) { dr = 1; }
-  else if (ev.key === 'ArrowUp' && !isText) { dr = -1; }
-  else if (ev.key === 'Tab') { return; }     // 브라우저 기본 동작이 낫다
-  else { return; }
-
-  const nxt = document.querySelector(
-    `[data-tbl="${el.dataset.tbl}"]` +
-    `[data-row="${Number(el.dataset.row) + dr}"]` +
-    `[data-col="${el.dataset.col}"]`);
-  if (nxt) { ev.preventDefault(); nxt.focus(); if (nxt.select) nxt.select(); }
-});
-
-
 /* ══════════════════════════════════════════════════
    컬럼 폭 조절
 
@@ -1144,70 +739,12 @@ document.addEventListener('keydown', (ev) => {
 const COLW_KEY = 'cfg_colw';
 let colWidths = {};          // {tbodyId: [px, px, ...]}
 
-function loadColWidths() {
-  try {
-    colWidths = JSON.parse(window.localStorage.getItem(COLW_KEY) || '{}') || {};
-  } catch (e) { colWidths = {}; }
-}
 
-function saveColWidths() {
-  try {
-    window.localStorage.setItem(COLW_KEY, JSON.stringify(colWidths));
-  } catch (e) { /* 저장이 막힌 환경 — 이번 세션만 유지된다 */ }
-}
 
 /* 표를 찾아 그립을 달고 저장된 폭을 입힌다 */
-function setupColResize(root) {
-  (root || document).querySelectorAll('table.et').forEach(tb => {
-    const body = tb.querySelector('tbody');
-    if (!body || !body.id) return;
-    const ths = [...tb.querySelectorAll('thead th')];
-    if (!ths.length) return;
-
-    // 저장된 폭 적용
-    const saved = colWidths[body.id];
-    if (saved) {
-      ths.forEach((th, i) => {
-        if (saved[i]) th.style.width = saved[i] + 'px';
-      });
-    }
-
-    // 그립은 한 번만 단다
-    if (tb._gripped) return;
-    tb._gripped = true;
-
-    ths.forEach((th, i) => {
-      if (i === ths.length - 1) return;      // 마지막 칸은 여백이라 제외
-      const g = document.createElement('div');
-      g.className = 'col-grip';
-      g.addEventListener('mousedown', ev => startColResize(ev, tb, body.id, i));
-      g.addEventListener('dblclick', ev => {
-        // 두 번 누르면 그 칸만 기본값으로
-        ev.preventDefault();
-        const w = colWidths[body.id];
-        if (w) { delete w[i]; saveColWidths(); }
-        th.style.width = '';
-      });
-      th.appendChild(g);
-    });
-  });
-}
 
 let resizing = null;
 
-function startColResize(ev, table, bodyId, idx) {
-  ev.preventDefault();
-  ev.stopPropagation();
-  const th = [...table.querySelectorAll('thead th')][idx];
-  resizing = {
-    table, bodyId, idx, th,
-    startX: ev.clientX,
-    startW: th.getBoundingClientRect().width,
-    grip: ev.target,
-  };
-  ev.target.classList.add('on');
-  document.body.classList.add('col-resizing');
-}
 
 document.addEventListener('mousemove', ev => {
   if (!resizing) return;
@@ -1216,29 +753,548 @@ document.addEventListener('mousemove', ev => {
   resizing.th.style.width = w + 'px';
 });
 
-document.addEventListener('mouseup', () => {
-  if (!resizing) return;
-  const {bodyId, idx, th, grip} = resizing;
-  colWidths[bodyId] = colWidths[bodyId] || {};
-  colWidths[bodyId][idx] = Math.round(th.getBoundingClientRect().width);
-  saveColWidths();
 
-  if (grip) grip.classList.remove('on');
-  document.body.classList.remove('col-resizing');
-  resizing = null;
+
+/* ══════════════════════════════════════════════════
+   엑셀식 시트
+
+   ★ 셀은 평소 '선택 모드' 다 — 글자만 보이고 클릭하면 테두리가 생긴다.
+     타이핑을 시작하거나 더블클릭하면 그때 편집 상태가 된다.
+     실제 엑셀이 이 방식이고, 채우기 핸들도 이래야 자연스럽다.
+
+   ★ 되는 것
+       클릭·드래그        범위 선택
+       Shift+클릭         범위 확장
+       채우기 핸들 드래그  아래·위로 값 복사
+       Ctrl+C / Ctrl+V    범위 복사·붙여넣기 (엑셀과 호환)
+       Delete             선택 범위 비우기
+       방향키·Enter·Tab   이동
+       타이핑             그 자리에서 편집 시작
+   ══════════════════════════════════════════════════ */
+
+/* 열 정의 — 종류에 따라 편집 방식이 갈린다.
+     text   글자 그대로
+     upper  대문자로 (코드성 값)
+     sel    정해진 목록 중 하나 */
+const COLDEF = {
+  lots: [
+    {k: 'lot_cd',    t: 'upper', w: 110, label: 'LOT_CD *'},
+    {k: 'recipe_id', t: 'text',  w: 260, label: 'RECIPE_ID'},
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  params: [
+    {k: 'param',      t: 'upper', w: 220, label: 'PARAM *'},
+    {k: 'param_type', t: 'sel',   w: 130, label: '타입', optsFrom: 'type'},
+    {k: 'use_yn',     t: 'sel',   w: 80,  label: '사용',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  resps: [
+    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD'},
+    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *'},
+    {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
+    {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *'},
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  defects: [
+    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD'},
+    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *'},
+    {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
+    {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *'},
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  links: [
+    {k: 'lot_cd',  t: 'sel',   w: 90,  label: 'LOT_CD', optsFrom: 'lot'},
+    {k: 'kind',    t: 'sel',   w: 80,  label: '타입',
+     opts: [['SRC', 'SRC'], ['REP', 'REP'], ['DEF', 'DEF']]},
+    {k: 'alias',   t: 'upper', w: 150, label: '공정명 *'},
+    {k: 'link_id', t: 'upper', w: 130, label: '공정·스텝 *'},
+    {k: 'param',   t: 'upper', w: 130, label: '관리 PARAM'},
+    {k: '_col',    t: 'calc',  w: 190, label: '생성 컬럼'},
+    {k: 'scope',   t: 'sel',   w: 90,  label: '용도',
+     opts: [['both', '둘 다'], ['mon', '모니터링'], ['ana', '분석']]},
+    {k: 'use_yn',  t: 'sel',   w: 80,  label: '사용',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+};
+
+/* 드롭박스 항목 — 화면 상태에 따라 달라지는 것 */
+function colOpts(def) {
+  if (def.opts) return def.opts;
+  if (def.optsFrom === 'type') {
+    return [['', '자동']].concat(TYPE_OPTS.map(o => [o[0], o[0]]));
+  }
+  if (def.optsFrom === 'lot') {
+    const lots = [...new Set((cur.lots || [])
+      .map(l => (l.lot_cd || '').trim()).filter(Boolean))];
+    return [['', '전체']].concat(lots.map(v => [v, v]));
+  }
+  return [];
+}
+
+/* 셀에 보여 줄 글자 */
+function cellText(key, row, def) {
+  if (def.t === 'calc') {
+    return key === 'links' ? (linkColName(row) || '') : '';
+  }
+  const v = row[def.k];
+  if (def.t === 'sel') {
+    const hit = colOpts(def).find(o => o[0] === (v ?? ''));
+    return hit ? hit[1] : (v ?? '');
+  }
+  if (def.k === 'param_type' && !v) {
+    // 지정이 없으면 이름으로 자동 분류된 값을 흐리게 보여 준다
+    return autoType(row.param);
+  }
+  return v ?? '';
+}
+
+
+/* 헤더는 열 정의에서 만든다 — 마크업과 정의가 어긋날 일이 없다 */
+function renderSheetHead(key) {
+  const tb = document.getElementById(`sheet-${key}`);
+  if (!tb) return;
+  const tr = tb.querySelector('thead tr');
+  if (!tr) return;
+  tr.innerHTML =
+    '<th class="rowno"></th>' +
+    COLDEF[key].map(d =>
+      `<th style="width:${d.w}px;">${esc(d.label)}</th>`).join('') +
+    '<th class="rowdel"></th>';
+}
+
+/* 예전 이름 — 아직 부르는 곳이 남아 있어 그대로 잇는다.
+   ★ 호출 지점을 일일이 고치는 것보다 여기서 한 번 잇는 편이
+     빠뜨릴 위험이 없다. */
+function renderLots()    { renderSheet('lots'); }
+function renderParams()  { renderSheet('params'); }
+function renderResps()   { renderSheet('resps'); }
+function renderDefects() { renderSheet('defects'); }
+function renderLinks()   { renderSheet('links'); }
+
+/* ── 시트 상태 ────────────────────────────────────── */
+let sheetSel = null;    // {tbl, r1, c1, r2, c2} — 선택 범위
+let sheetEdit = null;   // {tbl, r, c} — 편집 중인 셀
+let dragMode = null;    // 'select' | 'fill'
+let fillFrom = null;    // 채우기 시작 범위
+
+function selNorm(s) {
+  if (!s) return null;
+  return {
+    tbl: s.tbl,
+    r1: Math.min(s.r1, s.r2), r2: Math.max(s.r1, s.r2),
+    c1: Math.min(s.c1, s.c2), c2: Math.max(s.c1, s.c2),
+  };
+}
+
+function inSel(s, r, c) {
+  const n = selNorm(s);
+  return !!n && r >= n.r1 && r <= n.r2 && c >= n.c1 && c <= n.c2;
+}
+
+/* ── 렌더 ─────────────────────────────────────────── */
+function renderSheet(key) {
+  const t = TBL[key];
+  const defs = COLDEF[key];
+  const rows = cur[key] || [];
+  const body = document.getElementById(t.tbody);
+  if (!body || !defs) return;
+
+  body.innerHTML = rows.map((row, r) => {
+    const cells = defs.map((def, c) => {
+      const isSel = sheetSel && sheetSel.tbl === key && inSel(sheetSel, r, c);
+      const n = selNorm(sheetSel);
+      const isAnchor = n && n.tbl === key && r === n.r2 && c === n.c2;
+      const editing = sheetEdit && sheetEdit.tbl === key
+                      && sheetEdit.r === r && sheetEdit.c === c;
+
+      if (editing) {
+        return `<td class="cell edit" data-r="${r}" data-c="${c}">
+          ${editorHtml(key, row, def, r, c)}</td>`;
+      }
+      const cls = ['cell', def.t === 'calc' ? 'calc' : '',
+                   isSel ? 'sel' : '', isAnchor ? 'anchor' : ''].join(' ');
+      const txt = cellText(key, row, def);
+      const dim = (def.k === 'param_type' && !row[def.k]) ? ' dim' : '';
+      return `<td class="${cls}" data-r="${r}" data-c="${c}"
+                  title="${esc(txt)}">
+        <span class="v${dim}">${esc(txt)}</span>
+        ${isAnchor ? '<span class="fill-handle"></span>' : ''}</td>`;
+    }).join('');
+
+    return `<tr data-r="${r}">
+      <td class="rowno">${r + 1}</td>${cells}
+      <td class="rowdel"><span onclick="delSheetRow('${key}',${r})">×</span></td>
+    </tr>`;
+  }).join('')
+    || `<tr><td colspan="${defs.length + 2}" class="none-row">
+        비어 있습니다. 아래 <b>+ 행 추가</b> 를 누르거나
+        엑셀에서 복사해 붙여넣으세요.</td></tr>`;
+
+  const cnt = document.getElementById(t.count);
+  if (cnt) cnt.textContent = `${rows.length}개`;
+}
+
+/* 편집 상태의 셀 내용 */
+function editorHtml(key, row, def, r, c) {
+  if (def.t === 'sel') {
+    const opts = colOpts(def).map(o =>
+      `<option value="${esc(o[0])}" ${(row[def.k] ?? '') === o[0] ? 'selected' : ''}
+       >${esc(o[1])}</option>`).join('');
+    return `<select id="sheet-editor" onchange="commitEdit(this.value)"
+             onblur="commitEdit(this.value)">${opts}</select>`;
+  }
+  return `<input id="sheet-editor" value="${esc(row[def.k] ?? '')}"
+           onblur="commitEdit(this.value)">`;
+}
+
+
+/* ══════════════════════════════════════════════════
+   시트 조작 — 선택 · 채우기 · 복사
+   ══════════════════════════════════════════════════ */
+
+/* 어느 표의 어느 셀을 눌렀나 */
+function cellOf(el) {
+  const td = el.closest && el.closest('td.cell');
+  if (!td) return null;
+  const tb = td.closest('tbody');
+  if (!tb) return null;
+  const key = Object.keys(TBL).find(k => TBL[k].tbody === tb.id);
+  if (!key) return null;
+  return {tbl: key, r: Number(td.dataset.r), c: Number(td.dataset.c)};
+}
+
+document.addEventListener('mousedown', ev => {
+  // 채우기 핸들을 잡았나
+  if (ev.target.classList && ev.target.classList.contains('fill-handle')) {
+    ev.preventDefault();
+    dragMode = 'fill';
+    fillFrom = selNorm(sheetSel);
+    return;
+  }
+
+  const at = cellOf(ev.target);
+  if (!at) {
+    // 시트 밖을 누르면 편집만 끝낸다 (선택은 남겨 둔다 — 복사에 쓴다)
+    if (sheetEdit) finishEdit();
+    return;
+  }
+
+  ev.preventDefault();
+  if (sheetEdit) finishEdit();
+
+  if (ev.shiftKey && sheetSel && sheetSel.tbl === at.tbl) {
+    sheetSel = {...sheetSel, r2: at.r, c2: at.c};
+  } else {
+    sheetSel = {tbl: at.tbl, r1: at.r, c1: at.c, r2: at.r, c2: at.c};
+    dragMode = 'select';
+  }
+  renderSheet(at.tbl);
 });
 
-// ★ 선언 뒤에 부른다 — let 은 호이스팅되지 않아 위에서 부르면 TDZ 로 죽는다
-loadColWidths();
+document.addEventListener('mousemove', ev => {
+  if (!dragMode || !sheetSel) return;
+  const at = cellOf(ev.target);
+  if (!at || at.tbl !== sheetSel.tbl) return;
 
-/* 모든 표의 폭을 기본값으로 되돌린다 */
-function resetColWidths() {
-  colWidths = {};
-  saveColWidths();
-  document.querySelectorAll('table.et thead th').forEach(th => {
-    th.style.width = '';
+  if (dragMode === 'select') {
+    if (sheetSel.r2 === at.r && sheetSel.c2 === at.c) return;
+    sheetSel = {...sheetSel, r2: at.r, c2: at.c};
+    renderSheet(sheetSel.tbl);
+  } else if (dragMode === 'fill' && fillFrom) {
+    // 채우기는 세로로만 — 가로 채우기는 열마다 뜻이 달라 의미가 없다
+    if (sheetSel.r2 === at.r) return;
+    sheetSel = {...fillFrom, r2: at.r};
+    renderSheet(sheetSel.tbl);
+  }
+});
+
+document.addEventListener('mouseup', () => {
+  if (dragMode === 'fill' && fillFrom) applyFill();
+  dragMode = null;
+  fillFrom = null;
+});
+
+/* 채우기 핸들을 놓았을 때 — 원본 범위 값을 늘어난 쪽으로 되풀이 */
+function applyFill() {
+  const src = fillFrom;
+  const dst = selNorm(sheetSel);
+  if (!src || !dst || dst.r2 <= src.r2) return;
+
+  const key = src.tbl;
+  const defs = COLDEF[key];
+  const rows = cur[key] || [];
+  const h = src.r2 - src.r1 + 1;      // 원본 높이
+
+  let n = 0;
+  for (let r = src.r2 + 1; r <= dst.r2; r++) {
+    while (rows.length <= r) rows.push(TBL[key].blank());
+    const from = rows[src.r1 + ((r - src.r1) % h)];
+    for (let c = src.c1; c <= src.c2; c++) {
+      const def = defs[c];
+      if (!def || def.t === 'calc') continue;
+      rows[r][def.k] = from[def.k];
+      n++;
+    }
+  }
+  renderSheet(key);
+  markSheetDirty();
+  edMsg(`${n}칸 채웠습니다`);
+}
+
+/* ── 편집 ─────────────────────────────────────────── */
+function startEdit(key, r, c, seed) {
+  const def = COLDEF[key][c];
+  if (!def || def.t === 'calc') return;      // 계산 칸은 못 고친다
+  sheetEdit = {tbl: key, r, c};
+  renderSheet(key);
+
+  const el = document.getElementById('sheet-editor');
+  if (!el) return;
+  if (seed != null && el.tagName === 'INPUT') el.value = seed;
+  el.focus();
+  if (el.select && seed == null) el.select();
+}
+
+function commitEdit(val) {
+  if (!sheetEdit) return;
+  const {tbl, r, c} = sheetEdit;
+  const def = COLDEF[tbl][c];
+  const rows = cur[tbl] || [];
+  if (rows[r] && def) {
+    rows[r][def.k] = def.t === 'upper'
+      ? String(val ?? '').trim().toUpperCase() : String(val ?? '');
+  }
+  sheetEdit = null;
+  renderSheet(tbl);
+  markSheetDirty();
+}
+
+function finishEdit() {
+  const el = document.getElementById('sheet-editor');
+  if (el) commitEdit(el.value);
+  else sheetEdit = null;
+}
+
+/* ── 키보드 ───────────────────────────────────────── */
+document.addEventListener('keydown', ev => {
+  if (sheetEdit) {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      const {tbl, r, c} = sheetEdit;
+      finishEdit();
+      moveSel(tbl, r + 1, c);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      sheetEdit = null;
+      renderSheet(sheetSel ? sheetSel.tbl : null);
+    } else if (ev.key === 'Tab') {
+      ev.preventDefault();
+      const {tbl, r, c} = sheetEdit;
+      finishEdit();
+      moveSel(tbl, r, c + (ev.shiftKey ? -1 : 1));
+    }
+    return;
+  }
+
+  if (!sheetSel) return;
+  const n = selNorm(sheetSel);
+  const key = n.tbl;
+  const maxR = (cur[key] || []).length - 1;
+  const maxC = COLDEF[key].length - 1;
+
+  const move = (dr, dc) => {
+    ev.preventDefault();
+    moveSel(key, Math.max(0, Math.min(maxR, n.r2 + dr)),
+                 Math.max(0, Math.min(maxC, n.c2 + dc)), ev.shiftKey);
+  };
+
+  switch (ev.key) {
+    case 'ArrowDown':  return move(1, 0);
+    case 'ArrowUp':    return move(-1, 0);
+    case 'ArrowRight': return move(0, 1);
+    case 'ArrowLeft':  return move(0, -1);
+    case 'Enter':      return move(1, 0);
+    case 'Tab':        ev.preventDefault();
+                       return moveSel(key, n.r2, n.c2 + (ev.shiftKey ? -1 : 1));
+    case 'F2':         ev.preventDefault();
+                       return startEdit(key, n.r2, n.c2);
+    case 'Delete':
+    case 'Backspace':  ev.preventDefault(); return clearSel();
+  }
+
+  // 글자를 치면 바로 편집 시작 — 엑셀과 같다
+  if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    startEdit(key, n.r2, n.c2, ev.key);
+  }
+});
+
+function moveSel(key, r, c, extend) {
+  const maxR = Math.max(0, (cur[key] || []).length - 1);
+  const maxC = COLDEF[key].length - 1;
+  r = Math.max(0, Math.min(maxR, r));
+  c = Math.max(0, Math.min(maxC, c));
+  sheetSel = extend && sheetSel
+    ? {...sheetSel, r2: r, c2: c}
+    : {tbl: key, r1: r, c1: c, r2: r, c2: c};
+  renderSheet(key);
+
+  // 화면 밖으로 나가면 따라간다
+  const td = document.querySelector(
+    `#${TBL[key].tbody} tr[data-r="${r}"] td[data-c="${c}"]`);
+  if (td && td.scrollIntoView) td.scrollIntoView({block: 'nearest'});
+}
+
+function clearSel() {
+  const n = selNorm(sheetSel);
+  if (!n) return;
+  const defs = COLDEF[n.tbl];
+  const rows = cur[n.tbl] || [];
+  let cnt = 0;
+  for (let r = n.r1; r <= n.r2; r++) {
+    for (let c = n.c1; c <= n.c2; c++) {
+      const def = defs[c];
+      if (!rows[r] || !def || def.t === 'calc') continue;
+      rows[r][def.k] = def.t === 'sel' ? (colOpts(def)[0] || [''])[0] : '';
+      cnt++;
+    }
+  }
+  renderSheet(n.tbl);
+  markSheetDirty();
+  edMsg(`${cnt}칸 비웠습니다`);
+}
+
+/* ── 복사 · 붙여넣기 ──────────────────────────────── */
+document.addEventListener('copy', ev => {
+  if (sheetEdit) return;                     // 편집 중이면 기본 동작
+  const n = selNorm(sheetSel);
+  if (!n) return;
+  ev.preventDefault();
+
+  const defs = COLDEF[n.tbl];
+  const rows = cur[n.tbl] || [];
+  const lines = [];
+  for (let r = n.r1; r <= n.r2; r++) {
+    const line = [];
+    for (let c = n.c1; c <= n.c2; c++) {
+      const def = defs[c];
+      line.push(!rows[r] || !def ? '' : String(rows[r][def.k] ?? ''));
+    }
+    lines.push(line.join('\t'));
+  }
+  ev.clipboardData.setData('text/plain', lines.join('\n'));
+  edMsg(`${n.r2 - n.r1 + 1}행 × ${n.c2 - n.c1 + 1}열 복사됨`);
+});
+
+document.addEventListener('paste', ev => {
+  if (sheetEdit) return;
+  const n = selNorm(sheetSel);
+  if (!n) return;
+  ev.preventDefault();
+
+  const text = (ev.clipboardData || window.clipboardData).getData('text');
+  pasteSheet(n.tbl, n.r1, n.c1, text);
+});
+
+function pasteSheet(key, row0, col0, text) {
+  const defs = COLDEF[key];
+  const rows = cur[key] || (cur[key] = []);
+
+  const grid = String(text || '').replace(/\r/g, '').replace(/\n+$/, '')
+    .split('\n').map(l => l.split('\t'));
+  if (!grid.length || (grid.length === 1 && !grid[0][0])) return;
+
+  // 머리글 줄이면 건너뛴다
+  if (grid.length > 1 && looksLikeHeader(grid[0], defs)) grid.shift();
+  if (!grid.length) return;
+
+  while (rows.length < row0 + grid.length) rows.push(TBL[key].blank());
+
+  let n = 0;
+  grid.forEach((line, r) => {
+    line.forEach((raw, c) => {
+      const def = defs[col0 + c];
+      if (!def || def.t === 'calc') return;
+      const v = coerceSheet(def, raw);
+      if (v !== null) { rows[row0 + r][def.k] = v; n++; }
+    });
   });
-  edMsg('컬럼 폭을 기본값으로 되돌렸습니다');
+
+  sheetSel = {tbl: key, r1: row0, c1: col0,
+              r2: row0 + grid.length - 1,
+              c2: Math.min(defs.length - 1, col0 + grid[0].length - 1)};
+  renderSheet(key);
+  markSheetDirty();
+  edMsg(`${grid.length}행 × ${grid[0].length}열 붙여넣기 — ${n}칸 입력됨`);
+}
+
+/* 첫 줄이 머리글인가 */
+function looksLikeHeader(line, defs) {
+  const labels = defs.map(d => d.label.replace(/\s*\*$/, '').toUpperCase());
+  const keys = defs.map(d => d.k.toUpperCase());
+  const up = line.map(v => String(v || '').trim().toUpperCase());
+  const hit = up.filter(v => v && (labels.includes(v) || keys.includes(v)
+                                   || labels.some(l => l && v.includes(l)))).length;
+  return hit >= Math.max(1, Math.ceil(line.length / 2));
+}
+
+/* 값을 열 종류에 맞게 — 못 넣을 값이면 null */
+function coerceSheet(def, raw) {
+  const v = String(raw ?? '').trim();
+
+  if (def.t === 'sel') {
+    const opts = colOpts(def);
+    const up = v.toUpperCase();
+    // 값 자체이거나 표시 이름이거나
+    const hit = opts.find(o => String(o[0]).toUpperCase() === up
+                            || String(o[1]).toUpperCase() === up);
+    if (hit) return hit[0];
+    if (def.k === 'use_yn') {
+      if (/^(N|제외|F|FALSE|0|X)$/i.test(v)) return 'N';
+      if (/^(Y|사용|T|TRUE|1|O)$/i.test(v)) return 'Y';
+    }
+    return v === '' ? '' : null;   // 알 수 없는 값은 건드리지 않는다
+  }
+
+  return def.t === 'upper' ? v.toUpperCase() : v;
+}
+
+/* ── 행 조작 ──────────────────────────────────────── */
+function addSheetRow(key, n) {
+  const rows = cur[key] || (cur[key] = []);
+  const cnt = Math.max(1, Number(n) || 1);
+  for (let i = 0; i < cnt; i++) rows.push(TBL[key].blank());
+  sheetSel = {tbl: key, r1: rows.length - cnt, c1: 0,
+              r2: rows.length - 1, c2: 0};
+  renderSheet(key);
+  markSheetDirty();
+}
+
+function delSheetRow(key, r) {
+  (cur[key] || []).splice(r, 1);
+  sheetSel = null;
+  renderSheet(key);
+  markSheetDirty();
+}
+
+/* 선택 범위의 행을 통째로 지운다 */
+function delSelRows() {
+  const n = selNorm(sheetSel);
+  if (!n) { edMsg('지울 행을 먼저 고르세요', true); return; }
+  const cnt = n.r2 - n.r1 + 1;
+  if (!confirm(`${cnt}개 행을 지울까요?`)) return;
+  (cur[n.tbl] || []).splice(n.r1, cnt);
+  sheetSel = null;
+  renderSheet(n.tbl);
+  markSheetDirty();
+  edMsg(`${cnt}개 행을 지웠습니다`);
+}
+
+function markSheetDirty() {
+  if (typeof edMsg === 'function') { /* 저장 안내는 저장 버튼이 맡는다 */ }
 }
 
 
@@ -1249,7 +1305,7 @@ const TBL = {
     tbody: 'ltbody', count: 'lcnt',
     label: 'Device',
     blank: () => ({lot_cd: '', recipe_id: '', use_yn: 'Y'}),
-    render: () => renderLots(),
+    render: () => renderSheet('lots'),
   },
   params: {
     cols: ['param', 'param_type', 'use_yn'],
@@ -1257,7 +1313,7 @@ const TBL = {
     tbody: 'ptbody', count: 'pcnt',
     label: '파라미터',
     blank: () => ({param: '', param_type: '', use_yn: 'Y'}),
-    render: () => renderParams(),
+    render: () => renderSheet('params'),
   },
   defects: {
     cols: ['lot_cd', 'step_id', 'step_desc', 'param', 'use_yn'],
@@ -1266,7 +1322,7 @@ const TBL = {
     label: 'Defect 스텝',
     blank: () => ({lot_cd: '', step_id: '', step_desc: '', param: '',
                    use_yn: 'Y'}),
-    render: () => renderDefects(),
+    render: () => renderSheet('defects'),
   },
   /* Response — Defect 과 구조가 같다.
      Inline 에서 실제로 관리하는 건 Response 와 Defect 이고,
@@ -1280,7 +1336,7 @@ const TBL = {
     label: '연계 공정',
     blank: () => ({lot_cd: '', kind: 'SRC', alias: '', link_id: '',
                    param: 'CHAMBER', scope: 'both', use_yn: 'Y'}),
-    render: () => renderLinks(),
+    render: () => renderSheet('links'),
   },
   resps: {
     cols: ['lot_cd', 'step_id', 'step_desc', 'param', 'use_yn'],
@@ -1289,7 +1345,7 @@ const TBL = {
     label: 'Response 스텝',
     blank: () => ({lot_cd: '', step_id: '', step_desc: '', param: '',
                    use_yn: 'Y'}),
-    render: () => renderResps(),
+    render: () => renderSheet('resps'),
   },
 };
 
