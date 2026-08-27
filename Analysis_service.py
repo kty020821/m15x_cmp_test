@@ -45,6 +45,15 @@ VERBOSE = True
 #   조회가 일부만 성공한 채로 덮어써서 데이터가 조용히 줄어드는 것을 막는다.
 SHRINK_GUARD = 0.5
 
+# SRC 와 APC 를 어떻게 붙일지.
+#   'inner'  APC 에 있는 웨이퍼만 남긴다 — rework 가 자동으로 걸러지지만,
+#            APC(R2R 이력)가 늦게 쌓이면 그 최신 구간이 통째로 빠진다.
+#   'left'   측정된 웨이퍼는 모두 남기고 APC 값만 비운다 —
+#            최신 데이터가 잘리지 않지만 rework 웨이퍼가 섞일 수 있다.
+#   ★ 최신 데이터가 잘리는 편이 더 곤란하므로 left 를 기본으로 둔다.
+#     APC 값이 비어 있는 행은 화면에서 그 컬럼만 빈칸으로 보인다.
+SRC_APC_JOIN = 'left'
+
 
 def _rows(d):
     """행수 (None/빈 df 는 0)"""
@@ -1439,11 +1448,51 @@ def merge_sources(df_src_wide, df_apc_prep, df_mes=None):
 
         # 위에서 중복을 걸렀으므로 _APC 는 원칙적으로 생기지 않는다.
         # suffixes 는 예상 못 한 충돌에 대비한 안전장치로만 남겨둔다.
-        df = df.merge(apc, on='substrate_id', how='inner',
-                      suffixes=('', '_APC'))                 # inner → rework 자동 제외
+        # ★ inner 는 rework 를 걸러 주지만, APC 에 아직 안 들어온
+        #   최신 웨이퍼도 함께 버린다. APC(R2R 이력)는 측정보다 늦게
+        #   쌓이는 일이 있어 그 구간이 통째로 잘린다.
+        before_n = len(df)
+        before_max = None
+        try:
+            if 'end_tm' in df.columns:
+                before_max = pd.to_datetime(df['end_tm'],
+                                            errors='coerce').max()
+        except Exception:
+            pass
+
+        df = df.merge(apc, on='substrate_id', how=SRC_APC_JOIN,
+                      suffixes=('', '_APC'))
 
         if VERBOSE:
-            print(f'  [merge] SRC∩APC → {len(df):,}행')
+            if SRC_APC_JOIN == 'inner':
+                print(f'  [merge] SRC∩APC(inner) → {len(df):,}행 '
+                      f'(SRC {before_n:,}행에서 {before_n - len(df):,}행 제외)')
+            else:
+                miss = 0
+                try:
+                    kc = next((c for c in apc.columns
+                               if c != 'substrate_id'), None)
+                    if kc:
+                        miss = int(df[kc].isna().sum())
+                except Exception:
+                    pass
+                print(f'  [merge] SRC+APC(left) → {len(df):,}행 '
+                      f'(APC 값 없는 웨이퍼 {miss:,}행 — 값만 비고 행은 남음)')
+
+            # 잘린 구간이 최신 쪽이면 알려 준다 — rework 제외와 구분해야 한다
+            try:
+                after_max = (pd.to_datetime(df['end_tm'], errors='coerce').max()
+                             if 'end_tm' in df.columns else None)
+                if before_max is not None and after_max is not None \
+                        and pd.notna(before_max) and pd.notna(after_max) \
+                        and after_max < before_max:
+                    gap_h = (before_max - after_max).total_seconds() / 3600
+                    print(f'  [merge] ★ 최신 시각이 {gap_h:.1f}시간 뒤로 밀렸습니다: '
+                          f'{str(before_max)[:19]} → {str(after_max)[:19]}')
+                    print(f'          APC(R2R)에 아직 안 들어온 웨이퍼가 '
+                          f'inner join 에서 빠진 것입니다.')
+            except Exception:
+                pass
             if 'idle' in df.columns:
                 # ★ APC 단계 분포와 비교하면 idle_1 이 어디서 사라졌는지 알 수 있다.
                 #   APC 에는 있는데 여기서 줄었다면 → 그 웨이퍼가 SRC(측정)에 없는 것
