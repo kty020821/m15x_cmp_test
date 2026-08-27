@@ -268,6 +268,9 @@ tr.more td { text-align: center; padding: 10px; background: var(--bg-2); }
 <script>
 const API_OPERS   = "{% url 'monitor-opers' %}";
 const API_RUN     = "{% url 'monitor-run' %}";
+const API_MON_START   = "{% url 'monitor-start' %}";
+const API_MON_JOBSTAT = "{% url 'monitor-jobstat' %}";
+const API_MON_JOBSTOP = "{% url 'monitor-jobstop' %}";
 const API_RESULTS = "{% url 'monitor-results' %}";
 const API_CLEAR   = "{% url 'monitor-clear' %}";
 const API_DIAG    = "{% url 'monitor-diag' %}";
@@ -366,25 +369,57 @@ async function startCheck() {
     return;
   }
 
-  allResults = [];
-  const notes = [];
-  for (let i = 0; i < list.length; i++) {
-    const o = list[i];
-    info.textContent = `${o.label} 점검중 (${i + 1}/${list.length})`;
-    const r = await postJSON(API_RUN, {oper_id: o.oper_id, label: o.label});
-    if (r.results) allResults = allResults.concat(r.results);
-    if (r.note) notes.push(`${o.label}: ${r.note}`);
-    bar.style.width = ((i + 1) / list.length * 100).toFixed(1) + '%';
+  /* ★ 점검은 서버가 한다. 브라우저는 '시작해 달라' 만 하고
+     진행 상황을 물어본다 — 페이지를 떠나도 계속 돈다. */
+  const st = await postJSON(API_MON_START, {opers: list});
+  if (!st || !st.ok) {
+    info.textContent = (st && st.error) || '점검을 시작하지 못했습니다';
+    btn.disabled = false; btn.textContent = '점검 시작';
+    box.classList.remove('on');
+    if (st && st.status) pollCheck();     // 이미 돌고 있으면 그걸 따라간다
+    return;
+  }
+  pollCheck();
+}
+
+/* 진행 상황을 몇 초마다 물어본다.
+   ★ 페이지를 새로 열어도 돌고 있으면 이어서 보여 준다. */
+let pollTimer = null;
+
+async function pollCheck() {
+  clearTimeout(pollTimer);
+
+  const btn = document.getElementById('btn-run');
+  const bar = document.getElementById('prog-bar');
+  const box = document.getElementById('prog');
+  const info = document.getElementById('run-info');
+
+  const j = await postJSON(API_MON_JOBSTAT, {});
+  if (!j || !j.ok) return;
+
+  if (j.running) {
+    box.classList.add('on');
+    btn.disabled = true; btn.textContent = '점검중...';
+    const pct = j.total ? (j.done / j.total * 100) : 0;
+    bar.style.width = pct.toFixed(1) + '%';
+    info.textContent =
+      `${j.now_label || ''} 점검중 (${j.done}/${j.total})`
+      + (j.started_by ? ` · ${j.started_by} 시작` : '');
+    pollTimer = setTimeout(pollCheck, 3000);
+    return;
   }
 
-  if (notes.length) console.info('[monitor]', notes.join(' / '));
-  info.textContent = `점검 완료 ${new Date().toLocaleString('ko-KR')}` +
-    dayInfo(allResults) +
-    (notes.length ? ` · 건너뛴 공정 ${notes.length}개(콘솔 참고)` : '');
+  // 끝났다 — 결과를 불러온다
+  bar.style.width = '100%';
   btn.disabled = false; btn.textContent = '다시 점검';
   setTimeout(() => box.classList.remove('on'), 600);
 
-  buildFilters(); resetPage(); render();
+  if ((j.notes || []).length) console.info('[monitor]', j.notes.join(' / '));
+  await loadSaved();
+  if (j.message) {
+    info.textContent = `${j.message} · ${j.finished_at || ''}`
+      + dayInfo(allResults);
+  }
 }
 
 /* 저장된 결과 비우기.
@@ -1006,5 +1041,9 @@ async function drawDetail(r) {
 }
 
 loadSaved();
+
+/* ★ 페이지를 열 때 점검이 돌고 있으면 이어서 보여 준다.
+   다른 사람이 시작한 것도 보인다. */
+pollCheck();
 </script>
 {% endblock %}
