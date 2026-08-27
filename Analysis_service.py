@@ -553,8 +553,12 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
                   f'사전공정 {pre_oper or "(없음)"}')
 
         for dt_s, dt_e, mt_s, mt_e in chunks:
-            dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d")
-            dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d")
+            # ★ end_tm 은 시각까지 있는 값이다.
+            #   '2026-08-27' 로 비교하면 '2026-08-27 00:00:00' 이 되어
+            #   그날 데이터가 통째로 잘린다 — 마지막 하루가 늘 비던 원인.
+            #   끝은 23:59:59 까지 명시한다.
+            dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d 00:00:00")
+            dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d 23:59:59")
 
             # SUBSTRING 길이는 lot_code 자릿수에 맞춘다.
             #   길이를 고정하면(2 또는 3) 다른 자릿수를 쓰는 공정에서
