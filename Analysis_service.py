@@ -1137,6 +1137,21 @@ def merge_steps(base, df_step, kind):
     if key.isupper():
         wide.columns = [c if c == key else str(c).upper() for c in wide.columns]
 
+    # ★ 이미 있는 컬럼과 겹치면 pandas 가 _x/_y 를 붙인다.
+    #   본공정과 계측 스텝이 같은 파라미터 이름을 쓰면 그렇게 된다.
+    #   덮어쓰지 말고 건너뛰면서 이유를 알려 준다 — 어느 쪽 값인지
+    #   모르는 컬럼이 생기는 것보다 낫다.
+    clash = [c for c in wide.columns if c != key and c in base.columns]
+    if clash:
+        print(f'  [{kind}] ★ 컬럼 이름이 겹쳐 {len(clash)}개를 건너뜁니다: '
+              f'{", ".join(map(str, clash[:6]))}'
+              f'{" ..." if len(clash) > 6 else ""}')
+        print(f'     본공정에 이미 같은 이름이 있습니다 — 기준정보에서 '
+              f'스텝 이름을 다르게 지으면 구분됩니다')
+        wide = wide.drop(columns=clash)
+        if len(wide.columns) <= 1:
+            return base
+
     before = set(base.columns)
     out = base.merge(wide, on=key, how='left')
     added = [c for c in out.columns if c not in before]
@@ -2020,6 +2035,33 @@ def save_analysis_df(df, oper_id, date_from=None):
 
     df = df.copy()
     df.columns = df.columns.str.upper()
+
+    # ★ pandas 는 병합할 때 양쪽에 같은 이름이 있으면 _X / _Y 를 붙인다.
+    #   그대로 저장하면 화면에 THK_X 같은 컬럼이 그대로 보인다.
+    #   원본 이름이 남아 있으면 접미사가 붙은 쪽은 버리고,
+    #   없으면 접미사만 떼어 원래 이름으로 되돌린다.
+    dup_fixed, dropped = {}, []
+    for c in list(df.columns):
+        if not (c.endswith('_X') or c.endswith('_Y')):
+            continue
+        base = c[:-2]
+        if not base:
+            continue
+        if base in df.columns:
+            # 원본이 이미 있다 — 접미사 쪽은 같은 값의 사본이므로 버린다
+            dropped.append(c)
+        elif base not in dup_fixed:
+            dup_fixed[c] = base
+
+    if dropped:
+        df = df.drop(columns=dropped)
+        print(f'  [{oper_id}] 병합 중복 컬럼 {len(dropped)}개 제거: '
+              f'{", ".join(dropped[:6])}{" ..." if len(dropped) > 6 else ""}')
+    if dup_fixed:
+        df = df.rename(columns=dup_fixed)
+        print(f'  [{oper_id}] 접미사 정리 {len(dup_fixed)}개: '
+              + ", ".join(f'{k}→{v}' for k, v in list(dup_fixed.items())[:6]))
+
     df = df.loc[:, ~df.columns.duplicated()]      # 중복 컬럼 방어
 
     table = _table_name(oper_id)
@@ -2176,14 +2218,23 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
     rng = {'date_from': date_from, 'date_to': date_to}
     def _n(tag, d):
         """
-        단계별 행수 + 그 단계 데이터의 최신 시각.
+        단계별 행수 + 최신 시각 + 병합 접미사 확인.
 
-        ★ 어느 단계에서 최신 데이터가 잘리는지 바로 보인다.
-          조회는 오늘까지인데 pivot 뒤에 날짜가 뒤로 밀려 있으면
-          그 단계에 문제가 있다는 뜻이다.
+        ★ 어느 단계에서 최신 데이터가 잘리는지, 어느 단계에서
+          _X/_Y 접미사가 생겼는지 여기서 바로 보인다.
         """
         if VERBOSE:
             print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행  {_latest(d)}")
+            try:
+                if d is not None and hasattr(d, 'columns'):
+                    bad = [c for c in d.columns
+                           if str(c).upper().endswith(('_X', '_Y'))]
+                    if bad:
+                        print(f'  [{oper_id}] ★ {tag} 에서 병합 접미사 발생: '
+                              f'{", ".join(map(str, bad[:8]))}'
+                              f'{" ..." if len(bad) > 8 else ""}')
+            except Exception:
+                pass
         return d
 
     cond = get_oper_cond(df_info, oper_id)
