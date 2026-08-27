@@ -254,6 +254,7 @@ tr.more td { text-align: center; padding: 10px; background: var(--bg-2); }
         <tr>
           <th>공정</th><th>LOT_CD</th><th>파라미터</th><th>타입</th>
           <th>상태</th><th class="num">σ / 배수</th><th class="num">범위밖</th>
+          <th style="width:90px;">점검일</th>
           <th style="width:150px;">30일 추이</th><th>판정 근거</th>
         </tr>
       </thead>
@@ -723,11 +724,14 @@ function render() {
       <td>${statusBadge(r.status)}${streak}</td>
       <td class="num">${sig}</td>
       <td class="num">${r.out_cnt || 0}</td>
+      <td class="mono" style="font-size:10.5px;white-space:nowrap;"
+          title="${esc((r.span && r.span.label) || '')}">
+        ${esc(spanCell(r))}</td>
       <td>${sparkline(r)}</td>
       <td><div class="reason">${tags ? tags + '<br>' : ''}${reasons}</div></td>
     </tr>` + (openKey === key ? detailRow(r) : '');
   }).join('') + (total > view.length
-    ? `<tr class="more"><td colspan="9">
+    ? `<tr class="more"><td colspan="10">
          <button class="btn-clear" onclick="showMore()">
            ${total - view.length}개 더 보기</button>
          <button class="btn-clear" onclick="showAll()">전체 보기</button>
@@ -748,6 +752,16 @@ function showAll()  { shownRows = 1e9; render(); }
    앞서 늘려 둔 수만큼 그려 느려진다 */
 function resetPage() { shownRows = PAGE_ROWS; }
 
+/* 점검일 — 계측값은 하루, Defect 은 며칠이라 길이가 다르다 */
+function spanCell(r) {
+  const sp = r.span || {};
+  const to = sp.to || r.day || '';
+  const from = sp.from || r.day_from || to;
+  if (!to) return '-';
+  if (from === to) return String(to).slice(5);        // MM-DD
+  return `${String(from).slice(5)}~${String(to).slice(5)}`;
+}
+
 function setStatus(s) { filterStatus = s; resetPage(); render(); }
 
 function detailRow(r) {
@@ -758,7 +772,7 @@ function detailRow(r) {
     return `<span class="eqp-chip${hot}">${esc(e.eqp)} · ${fmt(e.avg)}${sg} · ${e.n}장</span>`;
   }).join('');
 
-  return `<tr class="detail"><td colspan="9"><div class="detail-in">
+  return `<tr class="detail"><td colspan="10"><div class="detail-in">
     <div class="detail-head">
       <span>${esc(r.span || '최근일')} <b>${esc(r.day_from && r.day_from !== r.day ? r.day_from + ' ~ ' + r.day : r.day)}</b></span>
       <span>구간 평균 <b>${fmt(d.avg)}</b> (${d.n}장)</span>
@@ -855,7 +869,13 @@ async function drawDetail(r) {
     x: arr.map(p => p.date), y: arr.map(p => p.val),
     text: arr.map(p => {
       const eq = p.EQP_CH_ID || p.EQP_ID || '';
-      return `${p.LOT_ID || ''} / WF${p.WF_ID || ''}` +
+      // ★ 날짜를 맨 앞에 둔다 — '이게 최신인가' 를 확인하려고 보는 것이다.
+      //   점검 구간 안이면 표시해 판정 대상인지도 알 수 있게 한다.
+      const d = (p.date || '').replace('T', ' ');
+      const day = d.slice(0, 10);
+      const mark = (day >= dFrom && day <= dTo) ? ' <b>[점검]</b>' : '';
+      return `<b>${d}</b>${mark}` +
+             `<br>${p.LOT_ID || ''} / WF${p.WF_ID || ''}` +
              (eq ? `<br>${eq}` : '') +
              (p.IDLE ? `<br>IDLE: ${p.IDLE}` : '');
     }),
@@ -939,8 +959,14 @@ async function drawDetail(r) {
     paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
     font: {family: MN_FONT, color: '#555', size: 11},
     margin: {l: 58, r: 18, t: 10, b: 42},
+    /* ★ 날짜가 잘 보이게 — 기본 표시는 '8월 12' 처럼 나와 연도·시각을
+       알 수 없다. 월-일을 고정하고 눈금을 촘촘히 둔다. */
     xaxis: {tickfont: {family: MN_FONT, size: 10},
-            gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
+            gridcolor: 'rgba(0,0,0,.06)', zeroline: false,
+            type: 'date', tickformat: '%m-%d',
+            hoverformat: '%Y-%m-%d %H:%M',
+            nticks: 10, tickangle: 0,
+            showgrid: true, gridwidth: 1},
     yaxis: {title: {text: r.param, font: {family: MN_FONT, size: 11}},
             tickfont: {family: MN_FONT, size: 10},
             gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
@@ -959,11 +985,23 @@ async function drawDetail(r) {
   const note = document.getElementById('dp-note');
   if (note) {
     const span = dFrom === dTo ? dTo : `${dFrom} ~ ${dTo}`;
-    note.innerHTML = after
-      ? `점검 구간 <b>${esc(span)}</b> · `
-        + `<span style="color:var(--warn);">이후 ${after}점은 `
-        + `${esc(r.param)} 값이 있는 최신일 이후라 판정에서 제외</span>`
-      : `점검 구간 <b>${esc(span)}</b> · 이 파라미터의 최신 데이터까지 반영됨`;
+
+    /* ★ 구간 길이가 타입마다 다르다 — 그 이유를 밝힌다.
+       계측값은 매 웨이퍼 측정되니 하루면 충분하지만,
+       Defect 은 샘플링이라 하루만 보면 검사가 없거나 한두 장뿐이다. */
+    const why = (r.ptype === 'DEFECT')
+      ? ' <span style="color:var(--tx-muted);">— Defect 은 샘플 검사라 '
+        + '며칠을 묶어 봅니다</span>'
+      : ' <span style="color:var(--tx-muted);">— 계측값은 최근 하루로 '
+        + '판정합니다</span>';
+
+    note.innerHTML = `점검 구간 <b>${esc(span)}</b>${why}`
+      + (after
+        ? `<br><span style="color:var(--warn);">이후 ${after}점은 `
+          + `${esc(r.param)} 값이 있는 최신일 이후라 판정에서 제외됐습니다 `
+          + `— 그날 이 파라미터 측정이 없었습니다</span>`
+        : `<br><span style="color:var(--good);">이 파라미터의 최신 데이터까지 `
+          + `반영됐습니다</span>`);
   }
 }
 
