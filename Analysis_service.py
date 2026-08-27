@@ -651,6 +651,16 @@ where rn = 1
                 df = run_query(lake, query)
                 if df is not None and not df.empty:
                     dfs.append(df)
+                    # ★ Lake 원본이 어디까지 왔는지 — 여기가 시작점이다.
+                    #   이 값이 이미 밀려 있으면 Lake 쪽 문제이고,
+                    #   여기는 최신인데 뒤에서 밀리면 전처리 문제다.
+                    if VERBOSE:
+                        c = next((x for x in df.columns
+                                  if str(x).upper() == 'END_TM'), None)
+                        if c is not None:
+                            v = pd.to_datetime(df[c], errors='coerce').max()
+                            print(f'    [SRC] {lot_code} 원본 최신 '
+                                  f'{str(v)[:19]} · {len(df):,}행')
             except Exception as e:
                 note_fail('SRC', lot_code, e)
 
@@ -2017,10 +2027,50 @@ def save_analysis_df(df, oper_id, date_from=None):
     mode = f'{date_from} 이후 교체' if date_from else '전체 교체'
     print(f"[{oper_id}] 저장 완료 {len(df):,}행 ({mode} · lot_cd: {lot_cds})")
 
+    # ★ 저장한 뒤 DB 의 실제 최신값을 확인해 찍는다.
+    #   조회는 최신인데 DB 가 밀려 있으면 저장 단계가 문제라는 뜻이고,
+    #   둘이 같으면 조회 자체가 거기까지만 받은 것이다 — 구분이 된다.
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT MAX("DATE"), COUNT(*) FROM {table}')
+            mx, n = cur.fetchone()
+        gap = ''
+        if mx:
+            h = (datetime.now() - mx).total_seconds() / 3600
+            gap = f' · 지금으로부터 {h:.1f}시간 전'
+        print(f"[{oper_id}] DB 최신 {str(mx)[:19] if mx else '(없음)'}"
+              f"{gap} · 전체 {n:,}행")
+    except Exception as e:
+        print(f"[{oper_id}] DB 최신값 확인 실패: {e.__class__.__name__}: {e}")
+
 
 # ══════════════════════════════════════════════════════════
 # 10. 한 공정 전체 파이프라인
 # ══════════════════════════════════════════════════════════
+def _latest(d):
+    """
+    데이터프레임의 최신 시각 — 시각처럼 보이는 컬럼에서 찾는다.
+
+    ★ 단계마다 컬럼 이름이 다르다 (END_TM · DATE · REQUEST_DTTS …).
+      우선순위대로 찾아 첫 번째로 값이 있는 것을 쓴다.
+    """
+    try:
+        if d is None or not hasattr(d, 'columns') or d.empty:
+            return ''
+        up = {str(c).upper(): c for c in d.columns}
+        for name in ('DATE', 'END_TM', 'REQUEST_DTTS', 'LAST_UPDATE_DTTS',
+                     'PRE_OPER_TIME'):
+            c = up.get(name)
+            if c is None:
+                continue
+            v = pd.to_datetime(d[c], errors='coerce').max()
+            if pd.notna(v):
+                return f'~ {str(v)[:19]}  ({name})'
+        return ''
+    except Exception:
+        return ''
+
+
 def build_analysis_df(lake, df_info, oper_id, days=30,
                       date_from=None, date_to=None):
     """
@@ -2036,8 +2086,15 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
 
     rng = {'date_from': date_from, 'date_to': date_to}
     def _n(tag, d):
+        """
+        단계별 행수 + 그 단계 데이터의 최신 시각.
+
+        ★ 어느 단계에서 최신 데이터가 잘리는지 바로 보인다.
+          조회는 오늘까지인데 pivot 뒤에 날짜가 뒤로 밀려 있으면
+          그 단계에 문제가 있다는 뜻이다.
+        """
         if VERBOSE:
-            print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행")
+            print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행  {_latest(d)}")
         return d
 
     cond = get_oper_cond(df_info, oper_id)
