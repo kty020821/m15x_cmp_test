@@ -132,7 +132,7 @@ def load_run(request):
     if (date_from or date_to) and len(ids) > 1:
         return _fail('기간을 직접 지정할 때는 공정을 하나만 선택하세요')
 
-    # 증분 — 마지막 적재일부터만. 기간을 직접 지정하면 그쪽이 우선한다.
+    # ★ 증분은 쓰지 않는다 — 매번 기간 전체를 새로 받아 갈아 끼운다.
     incremental = bool(b.get('incremental')) and not (date_from or date_to)
 
     try:
