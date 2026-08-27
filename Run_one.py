@@ -5,6 +5,7 @@ run_one.py  (프로젝트 루트)
 
     python run_one.py V5071000B                 최근 45일
     python run_one.py V5071000B --days 7        최근 7일 (시험할 때 권장)
+    python run_one.py V5071000B --inc           마지막 적재일부터 지금까지
     python run_one.py V5071000B --from 2025-08-01 --to 2025-08-07
     python run_one.py V5071000B --links         연계 공정 등록 상태 확인
     python run_one.py V5071000B --sql           던질 쿼리만 보기 (실행 안 함)
@@ -115,6 +116,82 @@ def show_status():
                       f'{d.get("last_at", "")}'.strip())
         print(f'{oper_id:<16}{str(d.get("data_max") or "-"):<21}'
               f'{d.get("rows", 0):>10,}  {state}')
+
+
+def show_fresh(oper_id=None):
+    """
+    적재 테이블의 최신 데이터 시각 — 얼마나 밀려 있는지 본다.
+
+    ★ 적재는 돌린 시점의 Lake 데이터까지만 가져온다.
+      07시에 돌렸으면 그 뒤 들어온 건 다음 적재 때 붙는다.
+      '누락' 인지 '아직 안 받은 것' 인지 구분하려면
+      마지막 적재 시각과 함께 봐야 한다.
+    """
+    from django.db import connections
+    from datetime import datetime
+    import re as _re
+
+    conn = connections['analysis_db']
+    now = datetime.now()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT tablename FROM pg_tables "
+                    "WHERE tablename LIKE 'cmp_analysis_%' ORDER BY 1")
+        tables = [r[0] for r in cur.fetchall()]
+
+        if oper_id:
+            want = 'cmp_analysis_' + _re.sub(r'[^0-9A-Za-z_]', '_',
+                                             str(oper_id)).lower()
+            tables = [t for t in tables if t == want]
+            if not tables:
+                print(f'{oper_id} 적재 테이블이 없습니다')
+                return
+
+        # 마지막 적재 기록
+        last = {}
+        try:
+            cur.execute("""
+                SELECT DISTINCT ON (oper_id) oper_id, finished_at, rows, message
+                FROM cmp_load_job WHERE status = '완료'
+                ORDER BY oper_id, finished_at DESC
+            """)
+            for oid, fin, rows, msg in cur.fetchall():
+                last[oid.lower()] = (fin, rows, msg)
+        except Exception:
+            pass
+
+        print(f'\n지금 시각: {now:%Y-%m-%d %H:%M:%S}')
+        print('=' * 78)
+        print(f'{"공정":<22}{"최신 데이터":<21}{"지연":>8}  {"마지막 적재":<17}{"행수":>9}')
+        print('-' * 78)
+
+        for t in tables:
+            try:
+                cur.execute(f'SELECT MAX("DATE"), COUNT(*) FROM {t}')
+                mx, n = cur.fetchone()
+            except Exception as e:
+                print(f'{t:<22}조회 실패: {e.__class__.__name__}')
+                continue
+
+            oid = t.replace('cmp_analysis_', '')
+            fin, rows, msg = last.get(oid, (None, None, ''))
+
+            if mx:
+                gap = (now - mx).total_seconds() / 3600
+                gap_s = f'{gap:.0f}시간' if gap < 48 else f'{gap/24:.1f}일'
+            else:
+                gap_s = '-'
+
+            print(f'{oid.upper():<22}'
+                  f'{str(mx)[:19] if mx else "(없음)":<21}'
+                  f'{gap_s:>8}  '
+                  f'{str(fin)[:16] if fin else "-":<17}'
+                  f'{n:>9,}')
+
+        print('-' * 78)
+        print('※ 지연 = 지금 시각 - DB 최신 데이터 시각')
+        print('  적재는 돌린 시점까지만 가져오므로, 마지막 적재 이후 시간만큼은')
+        print('  원래 비어 있습니다. 그보다 크게 벌어져 있으면 확인이 필요합니다.')
 
 
 def show_links(oper_id):
@@ -232,8 +309,12 @@ def main():
                     help="멈춘 '실행중' 잠금 해제")
     ap.add_argument('--sql', action='store_true',
                     help='연계 공정 조회 쿼리만 출력 (실행 안 함)')
+    ap.add_argument('--fresh', action='store_true',
+                    help='DB 최신 데이터 시각과 지연 확인')
     ap.add_argument('--links', action='store_true',
                     help='기준정보 v2 의 연계 공정 등록 상태 확인')
+    ap.add_argument('--inc', action='store_true',
+                    help='(사용 안 함 — 항상 기간 전체를 새로 받습니다)')
     args = ap.parse_args()
 
     if args.list:
@@ -264,11 +345,12 @@ def main():
 
     oper_id = args.oper_id.upper()
     t0 = datetime.now()
-    print(f'[{oper_id}] 적재 시작 — 최근 {args.days}일 '
-          f'({t0:%Y-%m-%d %H:%M:%S})')
+    span = f'최근 {args.days}일 (전체 교체)'
+    print(f'[{oper_id}] 적재 시작 — {span} ({t0:%Y-%m-%d %H:%M:%S})')
 
     res = ls.run_oper(oper_id, days=args.days, user=args.user,
-                      date_from=args.date_from, date_to=args.date_to)
+                      date_from=args.date_from, date_to=args.date_to,
+                      incremental=args.inc)
 
     sec = (datetime.now() - t0).seconds
     if res.get('ok'):
