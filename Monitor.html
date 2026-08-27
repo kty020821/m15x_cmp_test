@@ -190,6 +190,8 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 .qs { font-size:10px; font-weight:800; border-radius:20px; padding:2px 8px; }
 .qs.run { color:#0f6e56; background:rgba(15,110,86,.13); }
 .qs.wait { color:#854f0b; background:rgba(133,79,11,.13); }
+.dp-note { font-size: 11px; font-weight: 700; color: var(--tx-2);
+  padding: 5px 10px 0; }
 .hint { font-size:11px; font-weight:600; color:var(--tx-muted);
   line-height:1.6; }
 </style>
@@ -672,13 +674,22 @@ function render() {
     <div class="card none ${filterStatus === '데이터없음' ? 'on' : ''}" onclick="setStatus('데이터없음')">
       <div class="n">${noData}</div><div class="l">판정제외</div></div>`;
 
-  const rows = filtered();
+  let rows = filtered();
   document.getElementById('cnt-info').textContent = `${rows.length}건 표시`;
   document.getElementById('empty').style.display = rows.length ? 'none' : 'block';
   if (!rows.length) {
     document.getElementById('empty').textContent =
       allResults.length ? '조건에 맞는 항목이 없습니다.' : '점검 시작을 눌러주세요.';
   }
+
+  /* ★ 같은 파라미터가 device 마다 한 행씩 나온다.
+     떨어져 있으면 중복처럼 보이므로 나란히 놓는다.
+     이상 → 주의 → 정상 순은 유지한다. */
+  const rank = st => st === '이상' ? 0 : st === '주의' ? 1 : 2;
+  rows = rows.slice().sort((a, b) =>
+    rank(a.status) - rank(b.status)
+    || String(a.param).localeCompare(String(b.param))
+    || String(a.lot_cd).localeCompare(String(b.lot_cd)));
 
   document.getElementById('tbody').innerHTML = rows.map(r => {
     const key = `${r.oper_id}|${r.lot_cd}|${r.param}`;
@@ -736,13 +747,31 @@ function detailRow(r) {
       </span>
     </div>
     <div class="detail-plot" id="dp"></div>
+      <div class="dp-note" id="dp-note"></div>
     ${eqp ? `<div class="eqp-grid">${eqp}</div>` : ''}
   </div></td></tr>`;
 }
 
 function toggleDetail(key) {
+  /* ★ render() 는 표를 통째로 다시 만든다. 그러면 브라우저가
+     스크롤 위치를 잡지 못해 화면이 튄다 — 특히 마지막 행에서 심하다.
+     누른 행의 화면상 위치를 재어 두고, 다시 그린 뒤 그대로 맞춘다. */
+  const tr = document.querySelector(`tr[data-key="${cssEsc(key)}"]`);
+  const before = tr ? tr.getBoundingClientRect().top : null;
+
   openKey = (openKey === key) ? null : key;
   render();
+
+  if (before === null) return;
+  const now = document.querySelector(`tr[data-key="${cssEsc(key)}"]`);
+  if (!now) return;
+  const after = now.getBoundingClientRect().top;
+  if (after !== before) window.scrollBy(0, after - before);
+}
+
+/* querySelector 에 넣을 수 있게 따옴표만 막는다 */
+function cssEsc(v) {
+  return String(v).replace(/["\\]/g, '\\$&');
 }
 
 /* ══════════════════════════════════════════════════
@@ -776,13 +805,20 @@ async function drawDetail(r) {
   const pts = j.points || [];
   if (!pts.length) { div.innerHTML = ''; return; }
 
-  // 점검 구간 (단일 일자일 수도, day_from ~ day 범위일 수도 있다)
-  const dTo   = r.day;
-  const dFrom = r.day_from || r.day;
+  // 점검 구간 — 서버가 판정에 실제로 쓴 구간을 그대로 받는다.
+  //   ★ 예전엔 화면이 r.day 로 추측해서, 서버 판정 구간과 어긋나면
+  //     '구간 뒤에 점이 있다' 처럼 보였다.
+  const sp = r.span || {};
+  const dTo   = sp.to || r.day;
+  const dFrom = sp.from || r.day_from || r.day;
   const inSpan = p => {
     const d = (p.date || '').slice(0, 10);
     return d >= dFrom && d <= dTo;
   };
+
+  // 점검 구간 밖의 최신 점이 있으면 알려 준다 —
+  //   그 파라미터에 값이 없어서 판정에서 빠진 날이다
+  const after = pts.filter(p => (p.date || '').slice(0, 10) > dTo).length;
 
   // 장비 키 — 챔버까지 있으면 챔버 단위가 더 유용하다
   const keyOf = p => p.EQP_CH_ID || p.EQP_ID || '(미확인)';
@@ -889,6 +925,19 @@ async function drawDetail(r) {
     hoverlabel: {bgcolor: '#fff', bordercolor: '#ddd',
                  font: {family: MN_FONT, size: 11}},
   }, {responsive: true, displaylogo: false, displayModeBar: false});
+
+  /* ★ 점검 구간 뒤에 점이 있으면 왜 그런지 알려 준다.
+     그 파라미터에 값이 없는 날은 판정에서 빠진다 —
+     '최신 데이터가 점검에서 빠졌다' 고 오해하기 쉬운 지점이다. */
+  const note = document.getElementById('dp-note');
+  if (note) {
+    const span = dFrom === dTo ? dTo : `${dFrom} ~ ${dTo}`;
+    note.innerHTML = after
+      ? `점검 구간 <b>${esc(span)}</b> · `
+        + `<span style="color:var(--warn);">이후 ${after}점은 `
+        + `${esc(r.param)} 값이 있는 최신일 이후라 판정에서 제외</span>`
+      : `점검 구간 <b>${esc(span)}</b> · 이 파라미터의 최신 데이터까지 반영됨`;
+  }
 }
 
 loadSaved();
