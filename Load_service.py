@@ -367,18 +367,14 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
         progress(job_id, '기준정보 조회 중')
         df_info = svc.get_config()
 
-        # ── 증분 적재 ────────────────────────────────────
-        #   마지막 데이터 날짜부터 지금까지만 받는다.
-        #   처음 적재하는 공정이면 기본 기간(45일)을 그대로 쓴다.
+        # ── 전체 교체 ────────────────────────────────────
+        #   ★ 증분을 쓰지 않는다.
+        #     마지막 데이터 시각을 기준으로 이어 붙이면, 그 시각 산정이
+        #     한 번이라도 어긋나면 그 뒤로 계속 어긋난 채 쌓인다.
+        #     매번 기간 전체를 새로 받아 통째로 갈아 끼우는 편이
+        #     상태가 분명하고 되돌릴 것도 없다.
         last_at = None
-        if incremental and not date_from and not date_to:
-            rng = incremental_range(oper_id)
-            if rng:
-                date_from, date_to, last_at = rng
-                print(f'[load] {oper_id} 증분 — 마지막 데이터 {last_at} · '
-                      f'{date_from} ~ {date_to} 조회')
-            else:
-                print(f'[load] {oper_id} 첫 적재 — 최근 {days}일 조회')
+        print(f'[load] {oper_id} 전체 교체 — 최근 {days}일 조회')
 
         span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
                 else f'최근 {days}일')
@@ -643,11 +639,9 @@ def _do_load(job):
     progress(job_id, '기준정보 조회 중')
     df_info = svc.get_config()
 
+    # ★ 증분을 쓰지 않는다 — 매번 기간 전체를 새로 받아 갈아 끼운다.
+    #   이어 붙이는 방식은 기준 시각이 한 번 어긋나면 계속 어긋난다.
     last_at = None
-    if job['incremental'] and not date_from and not date_to:
-        rng = incremental_range(oper_id)
-        if rng:
-            date_from, date_to, last_at = rng
 
     span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
             else f'최근 {days}일')
@@ -672,8 +666,8 @@ def _do_load(job):
         print(f'[load] {oper_id} 연계 병합 실패 — 본공정만 저장: {e}')
 
     progress(job_id, f'{len(df):,}행 저장 중')
-    svc.save_analysis_df(df, oper_id,
-                         date_from=date_from if last_at else None)
+    # ★ date_from 을 넘기지 않는다 = LOT_CD 전체를 지우고 새로 넣는다
+    svc.save_analysis_df(df, oper_id)
 
     # ★ 최신 데이터 날짜는 지금 손에 든 DataFrame 에서 바로 얻는다.
     #   나중에 테이블을 훑는 것보다 훨씬 싸다.
