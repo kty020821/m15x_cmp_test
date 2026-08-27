@@ -928,8 +928,19 @@ def clear_results(oper_id=None, with_history=False):
     return n
 
 
+# 목록의 스파크라인에 쓸 점 수 — 이보다 촘촘해도 140px 안에서 안 보인다
+SPARK_POINTS = 30
+
+
 def load_results():
-    """저장된 최근 점검 결과 전체"""
+    """
+    저장된 최근 점검 결과.
+
+    ★ series(일별 시계열)를 통째로 내려보내면 파라미터 수백 개 × device 만큼
+      쌓여 응답이 수십 MB 가 된다. 페이지를 여는 것만으로 버벅이던 원인이다.
+      목록에는 스파크라인용 최소 점만 남기고, 상세 차트는 행을 펼칠 때
+      따로 조회한다(wafer_detail).
+    """
     with _conn().cursor() as cur:
         if not _exists(cur, RESULT_TABLE):
             return {'run_ts': None, 'results': []}
@@ -940,9 +951,20 @@ def load_results():
         out = []
         for (p,) in cur.fetchall():
             try:
-                out.append(json.loads(p))
+                r = json.loads(p)
             except Exception:
-                pass
+                continue
+
+            # 목록에 필요 없는 큰 덩어리는 덜어 낸다
+            ser = r.get('series') or []
+            if len(ser) > SPARK_POINTS:
+                step = len(ser) / SPARK_POINTS
+                ser = [ser[int(i * step)] for i in range(SPARK_POINTS)] + ser[-1:]
+            r['series'] = ser
+            # eqp(장비별 요약)는 장비 수만큼이라 작다 — 그대로 둔다.
+            #   행을 펼쳤을 때 바로 보여야 하므로 여기서 빼면 다시 조회해야 한다.
+            out.append(r)
+
     _attach_streak(out)
     return {'run_ts': str(ts) if ts else None, 'results': out}
 
