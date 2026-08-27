@@ -798,6 +798,7 @@ async function onOperChange(v) {
      예전에 여기서 예외가 나 목록이 통째로 비었다. */
   try {
     overlayPick = new Set(); overlayData = [];
+    if (typeof syncRunBtn === 'function') syncRunBtn();
     updateOverlayBtn();
   } catch (e) {
     console.warn('합치기 상태 초기화 실패(무시):', e);
@@ -839,16 +840,30 @@ async function onOperChange(v) {
   }
 }
 
-function onParamChange(v) { btnRun.disabled = !v; }
+/* 조회 가능 조건 — 주 파라미터든 합친 파라미터든 하나라도 있으면 된다.
+   ★ 예전엔 주 파라미터를 반드시 골라야 했다. Defect 처럼 스텝별로
+     흩어진 항목만 보고 싶을 때 굳이 대표 하나를 정해야 해 불편했다. */
+function syncRunBtn() {
+  btnRun.disabled = !(ssParam.value || overlayPick.size);
+}
+
+function onParamChange(v) { syncRunBtn(); }
 function onLegendChange() { drawTrend(); drawCorr(); }
 
 /* ── 조회 (STEP 1 → 2) ─────────────────────────── */
 async function runQuery() {
   btnRun.disabled = true; btnRun.textContent = '조회중...';
   try {
+    /* ★ 주 파라미터를 안 골랐으면 합친 것 중 하나를 대신 쓴다.
+       서버는 param 하나를 기준으로 조회하므로 뭐든 하나는 필요한데,
+       사용자가 그걸 신경 쓸 이유는 없다. */
+    const picks = [...overlayPick];
+    const mainP = ssParam.value || picks[0] || '';
+    const rest = picks.filter(p => p !== mainP);
+
     const {data, param, error, overlays} = await postJSON(API_TREND, {
-      oper_id: ssOper.value, lot_cd: ssLot.value, param: ssParam.value,
-      overlay: [...overlayPick],
+      oper_id: ssOper.value, lot_cd: ssLot.value, param: mainP,
+      overlay: rest,
     });
     if (error) { console.warn('트렌드 조회 실패:', error); return; }
     trendData = data || [];
@@ -1069,6 +1084,7 @@ async function applyOverlay() {
   overlayPick = new Set(overlayDraft);
   toggleOverlayBox(false);
   updateOverlayBtn();
+  syncRunBtn();              // 합친 것만 있어도 조회할 수 있다
   await runQuery();          // 트렌드를 합쳐 다시 그린다
   if (ssCorrX.value && ssCorrY.value) await drawCorr();   // 상관도 함께
 }
