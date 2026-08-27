@@ -160,6 +160,54 @@ def monitor_opers(request):
 
 
 @csrf_exempt
+def monitor_start(request):
+    """
+    점검을 서버에서 시작한다 — 브라우저를 닫아도 계속 돈다.
+
+    ★ 예전에는 브라우저가 공정마다 요청을 보내며 진행해서,
+      페이지를 떠나면 점검이 중간에 멈췄다.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    from . import monitor_job as mj
+    try:
+        body = json.loads(request.body or '{}')
+    except Exception:
+        body = {}
+    try:
+        # ★ 대상 목록은 화면이 보낸다 (monitor_opers 로 이미 받아 둔 것).
+        #   목록 산출 로직이 monitor_opers 안에 있어 여기서 다시 만들지 않는다.
+        opers = body.get('opers') or []
+        if not opers:
+            return _fail('점검할 공정 목록이 비어 있습니다', {'ok': False})
+        return JsonResponse(mj.start(opers, user=body.get('user', '')))
+    except Exception as e:
+        return _fail(f'점검 시작 실패: {e}', {'ok': False}, exc=e)
+
+
+@csrf_exempt
+def monitor_job_status(request):
+    """점검 진행 상황 — 화면이 몇 초마다 물어본다"""
+    from . import monitor_job as mj
+    try:
+        return JsonResponse({'ok': True, **mj.status()})
+    except Exception as e:
+        return _fail(f'상태 조회 실패: {e}', {'running': False}, exc=e)
+
+
+@csrf_exempt
+def monitor_job_cancel(request):
+    """점검 중단"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    from . import monitor_job as mj
+    try:
+        return JsonResponse({'ok': True, 'cancelled': mj.cancel()})
+    except Exception as e:
+        return _fail(f'중단 실패: {e}', exc=e)
+
+
+@csrf_exempt
 def monitor_run(request):
     """공정 1건 점검"""
     if request.method != 'POST':
