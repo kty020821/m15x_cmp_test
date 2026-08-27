@@ -509,6 +509,25 @@ def merge_links(base, lake, oper_id, run_query, scope=None, days=30,
                 continue
 
             wide = wide.rename(columns={'wkey': '__wkey'})
+
+            # ★ 이미 있는 컬럼과 겹치면 pandas 가 _x/_y 를 붙인다.
+            #   그대로 두면 화면에 THK_X 같은 이름이 그대로 보이고,
+            #   어느 쪽 값인지도 알 수 없다.
+            #   같은 이름이 나오는 건 별칭이 겹쳤다는 뜻이므로
+            #   덮어쓰지 말고 건너뛰면서 이유를 알려 준다.
+            clash = [c for c in wide.columns
+                     if c != '__wkey' and c in out.columns]
+            if clash:
+                print(f"  [{tag}:{lk['alias']}] ★ 컬럼 이름이 겹쳐 "
+                      f"{len(clash)}개를 건너뜁니다: "
+                      f"{', '.join(clash[:6])}"
+                      f"{' ...' if len(clash) > 6 else ''}")
+                print(f"     같은 이름을 만드는 연계가 이미 있습니다 — "
+                      f"기준정보에서 별칭을 다르게 지으세요")
+                wide = wide.drop(columns=clash)
+                if len(wide.columns) <= 1:
+                    continue
+
             before = set(out.columns)
             out = out.merge(wide, on='__wkey', how='left')
             added = [c for c in out.columns if c not in before]
