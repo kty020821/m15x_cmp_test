@@ -617,8 +617,17 @@ async function loadJobs() {
       : '';
     return `<tr>
       <td>${statusBadge(job.status)}</td>
-      <td><b>${esc(c.oper_id || '')}</b>
-        <span class="mono">${esc((job.lot_cds || []).join(', '))}</span>
+      <td>
+        <b>${esc(job.oper_desc || c.oper_id || '')}</b>
+        ${job.oper_desc ? `<span class="mono" style="color:var(--tx-muted);
+           margin-left:4px;">${esc(c.oper_id || '')}</span>` : ''}
+        ${(job.lot_info && job.lot_info.length)
+          ? `<div style="margin-top:2px;">` + job.lot_info.map(l =>
+              `<span class="mono">${esc(l.lot_cd)}</span>` +
+              (l.recipe ? `<span style="color:var(--tx-muted);font-size:10px;
+                 margin-left:3px;">${esc(l.recipe)}</span>` : '')
+            ).join('<br>') + `</div>`
+          : `<span class="mono">${esc((job.lot_cds || []).join(', '))}</span>`}
         ${c.pre_oper_id ? `<br><span class="mono">사전 ${esc(c.pre_oper_id)}</span>` : ''}</td>
       <td class="mono">${esc(c.date_from || '')} ~ ${esc(c.date_to || '')}
         ${c.span_days ? `<br>${c.span_days}일` : ''}</td>
