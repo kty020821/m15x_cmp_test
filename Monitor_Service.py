@@ -494,6 +494,11 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
           AND "{param}" IS NOT NULL
     ''', [lot_cd, d_from, day])
     d_n, d_avg, d_std, d_min, d_max = cur.fetchone()
+
+    # ★ 판정 구간을 결과에 남긴다.
+    #   차트가 '어디까지가 점검 대상인지' 를 표시할 수 있어야
+    #   구간 뒤에 점이 보일 때 그게 정상인지 판단할 수 있다.
+    r_span = {'from': str(d_from), 'to': str(day), 'label': span_label}
     if not d_n:
         return _no_data(lot_cd, param, ptype,
                         f'{span_label}({d_from} ~ {day}) 에 값이 없음 — '
@@ -511,6 +516,10 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
         'sigma': None, 'out_cnt': 0, 'spread': None, 'drift': None,
         'eqp': [], 'checks': [], 'reasons': [], 'severity': 0,
     }
+    r['span'] = r_span
+    # ★ 차트는 이 파라미터에 값이 있는 날짜만 그린다.
+    #   예전엔 LOT_CD 만 걸러서, 그 파라미터가 없는 더 최신 날짜까지
+    #   그려졌다 — '점검 구간 뒤에 점이 있다' 는 그 때문이다.
     r['series'] = _series(cur, table, lot_cd, param)
 
     if not b_n or b_avg is None:
