@@ -41,6 +41,10 @@ from psycopg2.extras import execute_values
 # 단계별 행수 / 진단 로그
 VERBOSE = True
 
+# 전체 교체 시 허용하는 최소 비율 — 기존의 이보다 적으면 저장을 멈춘다.
+#   조회가 일부만 성공한 채로 덮어써서 데이터가 조용히 줄어드는 것을 막는다.
+SHRINK_GUARD = 0.5
+
 
 def _rows(d):
     """행수 (None/빈 df 는 0)"""
@@ -1939,6 +1943,32 @@ def save_analysis_df(df, oper_id, date_from=None):
               f"어디서 0이 됐는지 확인할 것")
         return
 
+    # ★ 조회 결과가 기존 데이터보다 크게 줄었으면 멈춘다.
+    #   전체 교체는 지우고 다시 넣는 것이라, 조회가 일부만 성공한 상태로
+    #   저장하면 멀쩡하던 데이터가 그만큼 사라진다.
+    #   '적재가 실패했다' 는 알아챌 수 있지만 '조용히 줄었다' 는 놓친다.
+    if not date_from:
+        try:
+            with connections['analysis_db'].cursor() as _cur:
+                _cur.execute("SELECT to_regclass(%s) IS NOT NULL",
+                             [_table_name(oper_id)])
+                if _cur.fetchone()[0]:
+                    _cur.execute(f'SELECT COUNT(*) FROM {_table_name(oper_id)}')
+                    old_n = _cur.fetchone()[0] or 0
+                    if old_n and len(df) < old_n * SHRINK_GUARD:
+                        raise RuntimeError(
+                            f'조회 결과가 기존의 {len(df)/old_n:.0%} 밖에 '
+                            f'안 됩니다 ({old_n:,}행 → {len(df):,}행). '
+                            f'일부 조회가 실패했을 수 있어 저장을 멈춥니다 — '
+                            f'로그에서 실패한 LOT_CD 를 확인하세요. '
+                            f'의도한 축소라면 drop_analysis_table() 로 '
+                            f'테이블을 지우고 다시 적재하세요.')
+        except RuntimeError:
+            raise
+        except Exception as e:
+            print(f'[{oper_id}] 기존 행수 확인 생략: '
+                  f'{e.__class__.__name__}: {e}')
+
     df = df.copy()
     df.columns = df.columns.str.upper()
     df = df.loc[:, ~df.columns.duplicated()]      # 중복 컬럼 방어
@@ -2012,17 +2042,27 @@ def save_analysis_df(df, oper_id, date_from=None):
     data    = [tuple(r) for r in df.itertuples(index=False, name=None)]
     lot_cds = df['LOT_CD'].dropna().unique().tolist() if 'LOT_CD' in df.columns else []
 
-    with conn.cursor() as cur:
-        for lc in lot_cds:
-            if date_from:
-                # 증분 — 다시 조회한 구간만 교체한다
-                cur.execute(f'DELETE FROM {table} '
-                            f'WHERE "LOT_CD" = %s AND "DATE" >= %s',
-                            [lc, date_from])
-            else:
-                cur.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s', [lc])
-        execute_values(cur.cursor, f'INSERT INTO {table} ({col_str}) VALUES %s',
-                       data, page_size=1000)
+    # ★ DELETE 와 INSERT 를 한 덩어리로 묶는다.
+    #   전체 교체는 LOT_CD 의 45일치를 통째로 지우고 다시 넣는 것이라,
+    #   그 사이에 연결이 끊기거나 오류가 나면 그 device 데이터가
+    #   통째로 사라진다. 트랜잭션으로 감싸면 실패해도 옛 데이터가
+    #   그대로 살아남는다 — 없느니만 못한 상태를 막는다.
+    from django.db import transaction
+
+    with transaction.atomic(using='analysis_db'):
+        with conn.cursor() as cur:
+            for lc in lot_cds:
+                if date_from:
+                    # 다시 조회한 구간만 교체한다
+                    cur.execute(f'DELETE FROM {table} '
+                                f'WHERE "LOT_CD" = %s AND "DATE" >= %s',
+                                [lc, date_from])
+                else:
+                    cur.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s',
+                                [lc])
+            execute_values(cur.cursor,
+                           f'INSERT INTO {table} ({col_str}) VALUES %s',
+                           data, page_size=1000)
 
     mode = f'{date_from} 이후 교체' if date_from else '전체 교체'
     print(f"[{oper_id}] 저장 완료 {len(df):,}행 ({mode} · lot_cd: {lot_cds})")
