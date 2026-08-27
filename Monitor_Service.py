@@ -57,16 +57,27 @@ from django.db import connections
 from . import param_types as pt
 
 # ══ 판정 기준 — 조정은 여기서만 ═══════════════════════════
-SIGMA_WARN   = 1.0     # 평균 이탈 주의
-SIGMA_ALERT  = 2.0     # 평균 이탈 이상
-OUT_WARN     = 1       # 30일 범위 밖 웨이퍼 주의
-OUT_ALERT    = 3       # 이상
-EQP_SIGMA    = 2.0     # 장비/챔버 단독 이탈 기준
-SPREAD_WARN  = 1.5     # 표준편차가 기준의 몇 배면 주의
-SPREAD_ALERT = 2.0     # 이상
+# ── 판정 임계값 ──────────────────────────────────────────
+#   ★ 정규분포에서 |z| >= k 인 비율:
+#       1.0σ → 32%   1.5σ → 13%   2.0σ → 4.6%   3.0σ → 0.3%
+#     파라미터 300개 × device 2 = 600건이면 1.0σ 기준으로 190건이
+#     '정상인데도' 걸린다. 그래서 전부 이상해 보였다.
+#   ★ 실제로 볼 것만 남기려면 2σ 이상이어야 한다.
+SIGMA_WARN   = 2.0     # 평균 이탈 주의 (600건 중 우연히 ~27건)
+SIGMA_ALERT  = 3.0     # 평균 이탈 이상 (우연히 ~2건)
+OUT_WARN     = 3       # 30일 범위 밖 웨이퍼 주의 (1장은 흔하다)
+OUT_ALERT    = 5       # 이상
+EQP_SIGMA    = 2.5     # 장비/챔버 단독 이탈 기준
+SPREAD_WARN  = 2.0     # 표준편차가 기준의 몇 배면 주의
+SPREAD_ALERT = 3.0     # 이상
 DRIFT_DAYS   = 7       # 드리프트 판정 기간
-DRIFT_SIGMA  = 1.0     # 기간 동안 σ 단위로 이만큼 이동하면 드리프트
+DRIFT_SIGMA  = 1.5     # 기간 동안 σ 단위로 이만큼 이동하면 드리프트
 MIN_N        = 5       # 최근일 웨이퍼가 이보다 적으면 신뢰도 낮음
+
+# ★ 근거가 하나뿐이면 '주의' 로만 둔다.
+#   평균 이탈·산포 확대·범위 밖이 겹칠 때가 실제 문제인 경우가 많다.
+#   하나만 걸린 것을 '이상' 으로 올리면 목록이 이상으로 가득 찬다.
+NEED_CHECKS_FOR_ALERT = 2
 
 # 소모품(PART) 판정 여부
 #   Pad/Head/Disk 사용량은 누적되며 단조 증가하고 PM 에서 리셋된다.
@@ -677,6 +688,21 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
 
     if r['low_n']:
         reasons.append(f'{span_label} 웨이퍼 {d_n}장 — 표본이 적어 신뢰도 낮음')
+
+    # ── 등급 보정 ────────────────────────────────────────
+    #   ★ 근거가 하나뿐이면 '이상' 으로 올리지 않는다.
+    #     평균 이탈만, 또는 산포 확대만 걸린 것은 우연히도 자주 나온다.
+    #     둘 이상이 겹칠 때가 실제로 볼 만한 경우다.
+    #   ★ 표본이 적으면 한 단계 낮춘다 — 5장으로 낸 σ 는 믿기 어렵다.
+    kinds = {c.split('-')[0] for c in checks}
+    if level == 2 and len(kinds) < NEED_CHECKS_FOR_ALERT:
+        level = 1
+        reasons.append(f'근거가 하나뿐이라 주의로 낮춤 '
+                       f'(이상 판정은 {NEED_CHECKS_FOR_ALERT}가지 이상)')
+
+    if r['low_n'] and level > 0:
+        level -= 1
+        reasons.append('표본이 적어 한 단계 낮춤')
 
     r['status']  = ['정상', '주의', '이상'][level]
     r['checks']  = checks
