@@ -190,6 +190,7 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 .qs { font-size:10px; font-weight:800; border-radius:20px; padding:2px 8px; }
 .qs.run { color:#0f6e56; background:rgba(15,110,86,.13); }
 .qs.wait { color:#854f0b; background:rgba(133,79,11,.13); }
+tr.more td { text-align: center; padding: 10px; background: var(--bg-2); }
 .dp-note { font-size: 11px; font-weight: 700; color: var(--tx-2);
   padding: 5px 10px 0; }
 .hint { font-size:11px; font-weight:600; color:var(--tx-muted);
@@ -279,6 +280,12 @@ let allResults = [];
 let filterStatus = '';
 let openKey = null;
 
+/* ★ 한 번에 그리는 행 수.
+   파라미터 300개 × device 2 면 600행이고, 행마다 SVG 스파크라인을
+   그리므로 그것만으로 화면이 멈춘다. 나눠 그리고 '더 보기' 로 잇는다. */
+const PAGE_ROWS = 80;
+let shownRows = PAGE_ROWS;
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"]/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -351,7 +358,7 @@ async function startCheck() {
     // ★ 여기서 그냥 return 하면 이전 결과가 화면에 남아
     //   방금 점검한 것처럼 보인다. 반드시 비운다.
     allResults = [];
-    buildFilters(); render();
+    buildFilters(); resetPage(); render();
     info.textContent = '점검할 공정이 없습니다 (기준정보·적재 테이블 확인)';
     btn.disabled = false; btn.textContent = '점검 시작';
     box.classList.remove('on');
@@ -376,7 +383,7 @@ async function startCheck() {
   btn.disabled = false; btn.textContent = '다시 점검';
   setTimeout(() => box.classList.remove('on'), 600);
 
-  buildFilters(); render();
+  buildFilters(); resetPage(); render();
 }
 
 /* 저장된 결과 비우기.
@@ -541,7 +548,7 @@ async function loadSaved() {
   info.textContent = j.run_ts
     ? `최근 점검 ${String(j.run_ts).slice(0, 19)}${dayInfo(allResults)}`
     : '점검 이력이 없습니다. 점검 시작을 눌러주세요.';
-  buildFilters(); render();
+  buildFilters(); resetPage(); render();
 }
 
 function buildFilters() {
@@ -577,6 +584,7 @@ function buildLotFilter() {
 
 function onOperFilter() {
   buildLotFilter();          // 공정이 바뀌면 LOT_CD 목록도 갱신
+  resetPage();
   render();
 }
 
@@ -691,7 +699,12 @@ function render() {
     || String(a.param).localeCompare(String(b.param))
     || String(a.lot_cd).localeCompare(String(b.lot_cd)));
 
-  document.getElementById('tbody').innerHTML = rows.map(r => {
+  // ★ 앞에서부터 shownRows 개만 그린다 (이상 → 주의 → 정상 순이라
+  //   중요한 것이 먼저 온다)
+  const total = rows.length;
+  const view = rows.slice(0, shownRows);
+
+  document.getElementById('tbody').innerHTML = view.map(r => {
     const key = `${r.oper_id}|${r.lot_cd}|${r.param}`;
     const isDef = (r.ptype || '') === 'DEFECT';
     const sig = r.sigma === null || r.sigma === undefined ? '-'
@@ -713,7 +726,14 @@ function render() {
       <td>${sparkline(r)}</td>
       <td><div class="reason">${tags ? tags + '<br>' : ''}${reasons}</div></td>
     </tr>` + (openKey === key ? detailRow(r) : '');
-  }).join('');
+  }).join('') + (total > view.length
+    ? `<tr class="more"><td colspan="9">
+         <button class="btn-clear" onclick="showMore()">
+           ${total - view.length}개 더 보기</button>
+         <button class="btn-clear" onclick="showAll()">전체 보기</button>
+         <span class="hint" style="margin-left:8px;">
+           ${view.length} / ${total}행</span></td></tr>`
+    : '');
 
   if (openKey) {
     const r = rows.find(x => `${x.oper_id}|${x.lot_cd}|${x.param}` === openKey);
@@ -721,7 +741,14 @@ function render() {
   }
 }
 
-function setStatus(s) { filterStatus = s; render(); }
+function showMore() { shownRows += PAGE_ROWS; render(); }
+function showAll()  { shownRows = 1e9; render(); }
+
+/* 필터를 바꾸면 처음부터 다시 — 안 그러면 걸러진 뒤에도
+   앞서 늘려 둔 수만큼 그려 느려진다 */
+function resetPage() { shownRows = PAGE_ROWS; }
+
+function setStatus(s) { filterStatus = s; resetPage(); render(); }
 
 function detailRow(r) {
   const b = r.base_stat || {}, d = r.day_stat || {};
