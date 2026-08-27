@@ -151,8 +151,43 @@ def adhoc_reset(request):
 
 @csrf_exempt
 def adhoc_list(request):
+    """
+    1회성 조회 요청 목록.
+
+    ★ 공정 코드만 보여 주면 무슨 공정인지 알 수 없다.
+      기준정보에서 공정명과 device 목록을 찾아 함께 내려보낸다.
+    """
     try:
-        return JsonResponse({'ok': True, 'jobs': ah.list_jobs()})
+        jobs = ah.list_jobs()
+
+        # 공정 코드 → 공정명, device → 레시피
+        name_of, recipe_of = {}, {}
+        try:
+            from . import config_service as cfg
+            for o in cfg.list_opers():
+                name_of[str(o['oper_id']).upper()] = o.get('oper_desc') or ''
+
+            df = cfg.build_config_df()
+            if df is not None and len(df):
+                for _, r in df.iterrows():
+                    k = (str(r['OPER_ID']).upper(), str(r['LOT_CD']).upper())
+                    rec = str(r.get('RECIPE_ID') or '').strip()
+                    if rec and k not in recipe_of:
+                        recipe_of[k] = rec
+        except Exception as e:
+            print(f'[adhoc] 기준정보 조회 생략: {e.__class__.__name__}: {e}')
+
+        for j in jobs:
+            code = str((j.get('cond') or {}).get('oper_id') or '').upper()
+            j['oper_desc'] = name_of.get(code, '')
+            # device 마다 어떤 레시피인지 — LOT_CD 만으로는 알 수 없다
+            j['lot_info'] = [
+                {'lot_cd': lc,
+                 'recipe': recipe_of.get((code, str(lc).upper()), '')}
+                for lc in (j.get('lot_cds') or [])
+            ]
+
+        return JsonResponse({'ok': True, 'jobs': jobs})
     except Exception as e:
         return _fail(f'목록 조회 실패: {e}', {'jobs': []}, exc=e)
 
