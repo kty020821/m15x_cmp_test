@@ -89,7 +89,9 @@ JUDGE_PART   = False
 DEF_MULT_WARN  = 2.0   # 최근 구간 평균이 30일 중앙값의 몇 배면 주의
 DEF_MULT_ALERT = 3.0   # 이상
 DEF_ZERO_BASE  = 0.5   # 기준 중앙값이 이 이하면 '평소 거의 없음' 으로 본다
-DEF_WINDOW     = 7     # ★ defect 은 '최근일' 이 아니라 최근 N일로 묶는다
+DEF_WINDOW     = 1     # defect 점검 구간 (일). 1 이면 다른 타입과 같이 최근 하루.
+                       #   ★ 여러 날을 묶으면 표본은 늘지만, 어느 날 일이
+                       #     생겼는지가 흐려진다. 파장이 궁금하면 값을 올린다.
 DEF_MIN_N      = 2     # defect 은 검사 장수가 원래 적다 (계측용 MIN_N 과 별도)
 
 CONFIG_TABLE  = 'cmp_gooddocs_config'   # 예전 구닥스 스냅샷 (이관 전 호환)
@@ -472,10 +474,11 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
                         f'적재 단계에서 값이 들어오지 않았는지 확인')
 
     # ── 판정 구간 ────────────────────────────────────────
-    # 계측값은 '최근일' 하루.
-    # ★ defect 은 전수가 아니라 샘플링이라 하루만 보면 검사가 아예 없거나
-    #   한두 장으로 판정하게 된다. 최근 DEF_WINDOW 일을 한 구간으로 묶는다.
-    is_def = (ptype == 'DEFECT')
+    # 기본은 '최근일' 하루.
+    # ★ defect 은 DEF_WINDOW 일을 묶을 수 있다. 샘플 검사라 하루만
+    #   보면 표본이 한두 장뿐일 수 있어서다. 다만 여러 날을 묶으면
+    #   어느 날 일이 생겼는지가 흐려지므로 기본값은 1(하루)이다.
+    is_def = (ptype == 'DEFECT' and int(DEF_WINDOW) > 1)
     if is_def:
         cur.execute(f"SELECT %s::date - {int(DEF_WINDOW) - 1}", [day])
         d_from = cur.fetchone()[0]
@@ -483,7 +486,10 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     else:
         d_from = day
         span_label = '최근일'
-    min_n = DEF_MIN_N if is_def else MIN_N
+    # ★ 표본 기준은 구간 길이가 아니라 타입으로 정한다.
+    #   Defect 은 샘플 검사라 하루 검사 장수가 원래 적다 —
+    #   구간을 하루로 줄여도 그 사실은 그대로다.
+    min_n = DEF_MIN_N if ptype == 'DEFECT' else MIN_N
 
     # 기준선 = 판정 구간 이전 전체
     cur.execute(f'''
