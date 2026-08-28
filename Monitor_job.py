@@ -145,18 +145,37 @@ def _run(job_id, opers):
     """
     notes = []
     try:
+        # ★ 이번 점검에서 나온 공정만 남기고 나머지는 지운다.
+        #   결과는 공정 단위로 덮어써서, 기준정보에서 빠진 공정이나
+        #   파라미터의 결과가 계속 남아 화면에서는 방금 점검한 것처럼
+        #   보였다.
+        #   ★ 먼저 지우지 않는다 — 점검이 통째로 실패하면 아무것도
+        #     안 남는다. 끝난 뒤에 '이번에 안 나온 것' 만 지운다.
+        done_opers = set()
+
         for i, o in enumerate(opers):
             oper_id = o.get('oper_id')
             label = o.get('label') or oper_id
             _progress(job_id, i, label)
             try:
                 r = ms.run_check(oper_id, label)
+                done_opers.add(str(oper_id))
                 if r.get('note'):
                     notes.append(f"{label}: {r['note']}")
             except Exception as e:
                 traceback.print_exc()
                 notes.append(f'{label}: 실패 — {e.__class__.__name__}: {e}')
                 print(f'[monitor] {oper_id} 점검 실패: {e}')
+
+        # 이번에 점검하지 않은 공정의 옛 결과를 지운다
+        try:
+            stale = _drop_stale(done_opers)
+            if stale:
+                notes.append(f'점검 대상에서 빠진 공정 {stale}건의 '
+                             f'옛 결과를 지웠습니다')
+                print(f'[monitor] 옛 결과 {stale}건 정리')
+        except Exception as e:
+            print(f'[monitor] 옛 결과 정리 실패: {e.__class__.__name__}: {e}')
 
         _progress(job_id, len(opers), '')
         _finish(job_id, '완료',
@@ -167,6 +186,23 @@ def _run(job_id, opers):
     except Exception as e:
         traceback.print_exc()
         _finish(job_id, '실패', f'{e.__class__.__name__}: {e}', notes)
+
+
+def _drop_stale(keep_opers):
+    """
+    이번 점검에 나오지 않은 공정의 결과를 지운다.
+
+    ★ 기준정보에서 공정을 빼도 옛 결과가 남아 화면에 계속 보였다.
+      점검이 하나도 성공하지 못했으면 아무것도 지우지 않는다 —
+      그 경우 지우면 멀쩡한 결과까지 잃는다.
+    """
+    if not keep_opers:
+        return 0
+    with _conn().cursor() as cur:
+        ph = ','.join(['%s'] * len(keep_opers))
+        cur.execute(f'DELETE FROM {ms.RESULT_TABLE} '
+                    f'WHERE oper_id NOT IN ({ph})', list(keep_opers))
+        return cur.rowcount or 0
 
 
 def cancel():
