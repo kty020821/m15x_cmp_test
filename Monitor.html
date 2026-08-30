@@ -190,6 +190,9 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 .qs { font-size:10px; font-weight:800; border-radius:20px; padding:2px 8px; }
 .qs.run { color:#0f6e56; background:rgba(15,110,86,.13); }
 .qs.wait { color:#854f0b; background:rgba(133,79,11,.13); }
+.tag-per { font-size: 9.5px; font-weight: 800; color: var(--tx-muted);
+  background: rgba(128,128,128,.14); border-radius: 20px;
+  padding: 0 6px; white-space: nowrap; }
 tr.more td { text-align: center; padding: 10px; background: var(--bg-2); }
 .dp-note { font-size: 11px; font-weight: 700; color: var(--tx-2);
   padding: 5px 10px 0; }
@@ -761,7 +764,10 @@ function render() {
       <td class="num">${r.out_cnt || 0}</td>
       <td class="mono" style="font-size:10.5px;white-space:nowrap;"
           title="${esc((r.span && r.span.label) || '')}">
-        ${esc(spanCell(r))}</td>
+        ${esc(spanCell(r))}
+        ${r.periodic ? `<br><span class="tag-per"
+           title="${esc(r.periodic.label)}마다 반복되는 패턴이라 제외됨"
+           >↻ ${esc(r.periodic.label)}</span>` : ''}</td>
       <td>${sparkline(r)}</td>
       <td><div class="reason">${tags ? tags + '<br>' : ''}${reasons}</div></td>
     </tr>` + (openKey === key ? detailRow(r) : '');
