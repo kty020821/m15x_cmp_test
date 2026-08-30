@@ -513,11 +513,12 @@ function renderEditor() {
     <div class="hint" style="margin-bottom:10px;padding:8px 12px;
          border:1px solid var(--bd);border-radius:10px;">
       <b>엑셀처럼 씁니다</b> —
-      셀을 클릭해 고르고, 끌어서 범위를 잡습니다.
+      셀을 클릭해 고르고, 끌거나 <kbd>Shift</kbd>+클릭으로 범위를 잡습니다
+      (<kbd>Shift</kbd>+방향키도 됩니다).
       선택 영역 오른쪽 아래 <b>작은 사각형을 아래로 끌면</b> 값이 복사됩니다.<br>
+      <b>더블클릭</b>이나 <kbd>F2</kbd> 로 편집하고, 글자를 치면 새로 입력됩니다.
       <kbd>Ctrl+C</kbd> <kbd>Ctrl+V</kbd> 로 엑셀과 주고받고,
-      <kbd>Delete</kbd> 로 비우고, 글자를 치면 바로 편집이 시작됩니다
-      (<kbd>F2</kbd> 나 더블클릭으로도 편집).
+      <kbd>Delete</kbd> 로 비우고, <kbd>Ctrl+A</kbd> 로 전체를 고릅니다.
     </div>
     <div class="sec">
       <div class="sec-h"><h3>${esc(c.oper_desc || c.oper_id || '새 공정')}</h3>
@@ -1037,6 +1038,18 @@ document.addEventListener('mousedown', ev => {
   renderSheet(at.tbl);
 });
 
+/* 더블클릭하면 그 자리에서 편집 — 엑셀과 같다.
+   ★ 글자를 쳐야만 편집이 되면, 이미 있는 값을 조금만 고칠 때
+     불편하다 (다 지우고 새로 쳐야 한다). */
+document.addEventListener('dblclick', ev => {
+  const at = cellOf(ev.target);
+  if (!at) return;
+  ev.preventDefault();
+  dragMode = null;
+  sheetSel = {tbl: at.tbl, r1: at.r, c1: at.c, r2: at.r, c2: at.c};
+  startEdit(at.tbl, at.r, at.c);      // seed 없이 = 기존 값을 그대로 둔다
+});
+
 document.addEventListener('mousemove', ev => {
   if (!dragMode || !sheetSel) return;
   const at = cellOf(ev.target);
@@ -1166,6 +1179,18 @@ document.addEventListener('keydown', ev => {
                        return startEdit(key, n.r2, n.c2);
     case 'Delete':
     case 'Backspace':  ev.preventDefault(); return clearSel();
+    case 'Home':       ev.preventDefault();
+                       return moveSel(key, n.r2, 0, ev.shiftKey);
+    case 'End':        ev.preventDefault();
+                       return moveSel(key, n.r2, maxC, ev.shiftKey);
+  }
+
+  // Ctrl+A — 이 표 전체 선택
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') {
+    ev.preventDefault();
+    sheetSel = {tbl: key, r1: 0, c1: 0, r2: maxR, c2: maxC};
+    renderSheet(key);
+    return;
   }
 
   // 글자를 치면 바로 편집 시작 — 엑셀과 같다
