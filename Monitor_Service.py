@@ -79,6 +79,14 @@ MIN_N        = 5       # 최근일 웨이퍼가 이보다 적으면 신뢰도 �
 #   하나만 걸린 것을 '이상' 으로 올리면 목록이 이상으로 가득 찬다.
 NEED_CHECKS_FOR_ALERT = 2
 
+# ── 주기적 반복 ──────────────────────────────────────────
+#   ★ 매주 같은 요일에 오르내리는 것은 그 공정의 성질이지 이상이 아니다.
+#     매번 알림이 뜨면 진짜 이상이 묻힌다.
+PERIODIC_MIN_DAYS    = 14    # 이보다 짧으면 주기를 논할 수 없다
+PERIODIC_MIN_SAMPLES = 3     # 같은 요일이 최소 몇 번은 있어야 한다
+PERIODIC_MIN_SIGMA   = 0.8   # 그 요일이 이만큼 벗어나 있어야 '패턴'
+PERIODIC_EXPLAIN     = 0.6   # 지금 이탈의 이만큼이 그 패턴으로 설명되면 제외
+
 # 소모품(PART) 판정 여부
 #   Pad/Head/Disk 사용량은 누적되며 단조 증가하고 PM 에서 리셋된다.
 #   '30일 평균 대비 σ' 로 보면 매일 이탈로 잡혀 판정이 무의미하므로
@@ -438,6 +446,81 @@ def _drift(series, base_std):
 # ══════════════════════════════════════════════════════════
 # 파라미터 1건 점검
 # ══════════════════════════════════════════════════════════
+def _periodic(series, day, base_avg, base_std):
+    """
+    지금 값이 '주기적으로 반복되는 패턴' 인지 본다.
+
+    ★ 매주 화요일마다 오르는 것처럼 규칙적으로 반복되는 이탈은
+      그 공정의 성질이지 이상이 아니다. 그런데 매번 알림이 뜨면
+      진짜 이상이 묻힌다.
+
+    ★ 방법: 요일별로 평균을 내어, 오늘 요일이 원래 그런 요일인지 본다.
+      - 오늘 요일의 과거 평균이 전체 평균에서 같은 방향으로 벗어나 있고
+      - 그 정도가 지금 이탈과 비슷하며
+      - 과거에 그 요일이 충분히 여러 번 있었다면
+      주기적 반복으로 본다.
+
+    ★ 요일만 보는 이유: PM·물량 계획이 주 단위로 도는 일이 많고,
+      일별 평균 30~45개로 더 긴 주기를 추정하면 오탐이 늘어난다.
+      (더 긴 주기가 필요해지면 그때 확장한다)
+
+    반환: None 이면 주기성 없음.
+          있으면 {'kind': 'weekday', 'label': ..., 'ratio': ...}
+    """
+    if not base_std or float(base_std) <= 0 or base_avg is None:
+        return None
+
+    pts = [s for s in series
+           if s.get('avg') is not None and s.get('d')]
+    if len(pts) < PERIODIC_MIN_DAYS:
+        return None
+
+    try:
+        today = datetime.strptime(str(day)[:10], '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+    # 요일별로 모은다 (오늘 자신은 뺀다 — 과거 패턴과 비교해야 한다)
+    by_wd = {}
+    for s in pts:
+        try:
+            d = datetime.strptime(str(s['d'])[:10], '%Y-%m-%d').date()
+        except Exception:
+            continue
+        if d >= today:
+            continue
+        by_wd.setdefault(d.weekday(), []).append(float(s['avg']))
+
+    same = by_wd.get(today.weekday(), [])
+    if len(same) < PERIODIC_MIN_SAMPLES:
+        return None
+
+    std = float(base_std)
+    wd_avg = sum(same) / len(same)
+    wd_sigma = (wd_avg - float(base_avg)) / std
+
+    # 이 요일이 원래 벗어나 있는가
+    if abs(wd_sigma) < PERIODIC_MIN_SIGMA:
+        return None
+
+    # 다른 요일과 견주어 이 요일만 두드러지는가 —
+    #   전 요일이 고르게 벗어나 있으면 그건 요일 효과가 아니다
+    others = [v for wd, vals in by_wd.items() if wd != today.weekday()
+              for v in vals]
+    if len(others) >= PERIODIC_MIN_SAMPLES:
+        oth_sigma = (sum(others) / len(others) - float(base_avg)) / std
+        if abs(wd_sigma - oth_sigma) < PERIODIC_MIN_SIGMA:
+            return None
+
+    names = ['월', '화', '수', '목', '금', '토', '일']
+    return {
+        'kind': 'weekday',
+        'label': f'{names[today.weekday()]}요일',
+        'wd_sigma': round(wd_sigma, 2),
+        'n': len(same),
+    }
+
+
 def _no_data(lot_cd, param, ptype, why):
     """
     판정할 데이터가 없을 때 돌려주는 행.
@@ -694,6 +777,26 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
 
     if r['low_n']:
         reasons.append(f'{span_label} 웨이퍼 {d_n}장 — 표본이 적어 신뢰도 낮음')
+
+    # ── 주기적 반복이면 등급을 낮춘다 ────────────────────
+    #   ★ 이번 이탈이 '늘 그 요일에 그러던 것' 과 같은 방향·비슷한 크기면
+    #     새로 생긴 일이 아니다. 지우지는 않고 '반복' 으로 표시해
+    #     기본 목록에서만 빠지게 한다 — 정말 달라졌을 때를 놓치면 안 된다.
+    per = None
+    if level > 0 and r['sigma'] is not None:
+        per = _periodic(r.get('series') or [], day, b_avg, b_std)
+        if per:
+            same_dir = (r['sigma'] > 0) == (per['wd_sigma'] > 0)
+            # 지금 이탈이 그 요일의 평소 이탈로 설명되는 정도
+            explained = abs(per['wd_sigma']) / max(abs(r['sigma']), 1e-9)
+            if same_dir and explained >= PERIODIC_EXPLAIN:
+                level = 0
+                r['periodic'] = per
+                reasons.append(
+                    f"{per['label']}마다 반복되는 패턴 "
+                    f"(그 요일 평소 {per['wd_sigma']:+.1f}σ · "
+                    f"{per['n']}회) — 새로 생긴 이탈이 아닙니다")
+                checks.append('P-반복')
 
     # ── 등급 보정 ────────────────────────────────────────
     #   ★ 근거가 하나뿐이면 '이상' 으로 올리지 않는다.
