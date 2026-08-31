@@ -2234,15 +2234,22 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
     clear_fails()
 
     rng = {'date_from': date_from, 'date_to': date_to}
+    import time as _time
+    _t0 = [_time.time()]
+
     def _n(tag, d):
         """
-        단계별 행수 + 최신 시각 + 병합 접미사 확인.
+        단계별 행수 + 걸린 시간 + 최신 시각 + 병합 접미사 확인.
 
         ★ 어느 단계에서 최신 데이터가 잘리는지, 어느 단계에서
           _X/_Y 접미사가 생겼는지 여기서 바로 보인다.
         """
         if VERBOSE:
-            print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행  {_latest(d)}")
+            # ★ 단계별 소요 시간 — 어디가 느린지 알아야 줄일 수 있다
+            el = _time.time() - _t0[0]
+            _t0[0] = _time.time()
+            print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행 "
+                  f"{el:>6.1f}s  {_latest(d)}")
             try:
                 if d is not None and hasattr(d, 'columns'):
                     bad = [c for c in d.columns
