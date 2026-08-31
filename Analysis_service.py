@@ -2099,6 +2099,24 @@ def save_analysis_df(df, oper_id, date_from=None):
         """, [table])
         exists = {r[0]: r[1] for r in cur.fetchall()}
 
+        # ★ 예전에 만들어진 _X / _Y 컬럼을 지운다.
+        #   병합 접미사는 이제 안 생기지만, 이미 테이블에 만들어진 것은
+        #   ALTER ADD 만으로는 사라지지 않아 값이 빈 채로 계속 보인다.
+        #   이번 조회 결과에 없는 접미사 컬럼만 지운다.
+        stale = [c for c in exists
+                 if (c.upper().endswith('_X') or c.upper().endswith('_Y'))
+                 and c not in df.columns]
+        for c in stale:
+            try:
+                cur.execute(f'ALTER TABLE {table} DROP COLUMN "{c}"')
+            except Exception as e:
+                print(f'  [{oper_id}] {c} 삭제 실패: {e.__class__.__name__}')
+        if stale:
+            print(f'  [{oper_id}] 옛 병합 접미사 컬럼 {len(stale)}개 제거: '
+                  f'{", ".join(stale[:8])}{" ..." if len(stale) > 8 else ""}')
+            for c in stale:
+                exists.pop(c, None)
+
         # 새 컬럼 추가
         added = [c for c in df.columns if c not in exists]
         for c in added:
@@ -2263,6 +2281,31 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
     #     다만 '일부만 적재됐다' 는 사실을 모르고 지나치면 안 되므로
     #     로그에 분명히 남긴다. 호출부는 get_fails() 로 읽어
     #     적재 결과에 함께 표시한다.
+    # ── 등록했는데 안 들어온 파라미터 ────────────────────
+    #   ★ 기준정보에 있는 이름이 Lake 에 없으면 컬럼 자체가 안 생긴다.
+    #     조용히 넘어가면 '등록했는데 화면에 없다' 가 되고,
+    #     원인을 찾기까지 한참 걸린다.
+    try:
+        want = set()
+        for lc in (cond.get('by_lot') or {}).values():
+            want |= {str(p).upper() for p in (lc.get('param_list') or []) if p}
+        if not want:
+            want = {str(p).upper() for p in (cond.get('param_list') or []) if p}
+
+        have = {str(c).upper() for c in (m.columns if m is not None else [])}
+        missing = sorted(want - have)
+        if missing:
+            print(f'\n[{oper_id}] ★ 등록했지만 데이터가 없는 파라미터 '
+                  f'{len(missing)}개')
+            print(f'    {", ".join(missing[:15])}'
+                  f'{" ..." if len(missing) > 15 else ""}')
+            print(f'    Lake 에 그 이름이 없거나, 조회 기간에 측정이 '
+                  f'없었습니다.')
+            print(f'    기준정보의 철자를 확인하세요 — '
+                  f'대소문자·언더바까지 정확해야 합니다.\n')
+    except Exception as e:
+        print(f'[{oper_id}] 파라미터 대조 생략: {e.__class__.__name__}: {e}')
+
     fails = get_fails()
     if fails:
         print(f'\n{"!" * 58}')
