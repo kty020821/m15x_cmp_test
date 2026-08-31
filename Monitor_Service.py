@@ -79,6 +79,17 @@ MIN_N        = 5       # 최근일 웨이퍼가 이보다 적으면 신뢰도 �
 #   하나만 걸린 것을 '이상' 으로 올리면 목록이 이상으로 가득 찬다.
 NEED_CHECKS_FOR_ALERT = 2
 
+# ★ Defect 은 '개수가 늘었다' 하나로 판단하는 게 정상이다.
+#   산포·범위 같은 다른 근거가 붙을 일이 없어, 근거 2가지 규칙을
+#   그대로 적용하면 아무리 늘어도 '주의' 에서 멈춘다.
+DEF_NEED_CHECKS = 1
+
+# ★ 상위 5% 초과 웨이퍼 기준도 Defect 은 따로 둔다.
+#   계측값은 하루 25장을 재지만 Defect 은 두세 장이라,
+#   같은 '5장' 기준을 쓰면 아무리 나빠도 걸리지 않는다.
+DEF_OUT_WARN  = 1      # 상위 5% 초과 웨이퍼 주의
+DEF_OUT_ALERT = 2      # 이상
+
 # ── 주기적 반복 ──────────────────────────────────────────
 #   ★ 매주 같은 요일에 오르내리는 것은 그 공정의 성질이지 이상이 아니다.
 #     매번 알림이 뜨면 진짜 이상이 묻힌다.
@@ -678,12 +689,13 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
             ''', [lot_cd, d_from, day, b_p95])
             over = cur.fetchone()[0]
             r['out_cnt'] = over
-            if over >= OUT_ALERT:
+            # ★ Defect 은 검사 장수가 적어 계측값과 같은 기준을 쓸 수 없다
+            if over >= DEF_OUT_ALERT:
                 level = 2
                 reasons.append(f'30일 상위 5%({_f(b_p95)}) 초과 웨이퍼 {over}장 '
                                f'({span_label})')
                 checks.append('D-상위초과')
-            elif over >= OUT_WARN:
+            elif over >= DEF_OUT_WARN:
                 level = max(level, 1)
                 reasons.append(f'30일 상위 5% 초과 웨이퍼 {over}장')
                 checks.append('D-상위초과')
@@ -782,8 +794,10 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     #   ★ 이번 이탈이 '늘 그 요일에 그러던 것' 과 같은 방향·비슷한 크기면
     #     새로 생긴 일이 아니다. 지우지는 않고 '반복' 으로 표시해
     #     기본 목록에서만 빠지게 한다 — 정말 달라졌을 때를 놓치면 안 된다.
+    #   ★ Defect 은 제외한다 — sigma 칸에 '배수' 를 담고 있어
+    #     σ 기준으로 만든 주기 판정과 단위가 맞지 않는다.
     per = None
-    if level > 0 and r['sigma'] is not None:
+    if level > 0 and r['sigma'] is not None and ptype != 'DEFECT':
         per = _periodic(r.get('series') or [], day, b_avg, b_std)
         if per:
             same_dir = (r['sigma'] > 0) == (per['wd_sigma'] > 0)
@@ -804,12 +818,15 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     #     둘 이상이 겹칠 때가 실제로 볼 만한 경우다.
     #   ★ 표본이 적으면 한 단계 낮춘다 — 5장으로 낸 σ 는 믿기 어렵다.
     kinds = {c.split('-')[0] for c in checks}
-    if level == 2 and len(kinds) < NEED_CHECKS_FOR_ALERT:
+    need = DEF_NEED_CHECKS if ptype == 'DEFECT' else NEED_CHECKS_FOR_ALERT
+    if level == 2 and len(kinds) < need:
         level = 1
         reasons.append(f'근거가 하나뿐이라 주의로 낮춤 '
-                       f'(이상 판정은 {NEED_CHECKS_FOR_ALERT}가지 이상)')
+                       f'(이상 판정은 {need}가지 이상)')
 
-    if r['low_n'] and level > 0:
+    #   ★ Defect 은 표본이 적은 게 정상이라 여기서 낮추지 않는다.
+    #     샘플 검사라 하루 두세 장인 날이 흔하다.
+    if r['low_n'] and level > 0 and ptype != 'DEFECT':
         level -= 1
         reasons.append('표본이 적어 한 단계 낮춤')
 
