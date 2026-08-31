@@ -907,6 +907,7 @@ function renderLinks()   { renderSheet('links'); }
 let sheetSel = null;    // {tbl, r1, c1, r2, c2} — 선택 범위
 let sheetEdit = null;   // {tbl, r, c} — 편집 중인 셀
 let dragMode = null;    // 'select' | 'fill'
+let lastClick = null;   // 더블클릭 판정용 — {tbl, r, c, t}
 let fillFrom = null;    // 채우기 시작 범위
 
 function selNorm(s) {
@@ -1029,6 +1030,23 @@ document.addEventListener('mousedown', ev => {
   ev.preventDefault();
   if (sheetEdit) finishEdit();
 
+  /* ★ 더블클릭은 dblclick 이벤트로 잡을 수 없다.
+     첫 mousedown 에서 표를 다시 그리면 눌렸던 <td> 가 사라지는데,
+     브라우저는 '같은 요소를 두 번' 눌러야 dblclick 을 내기 때문이다.
+     그래서 여기서 직접 잰다 — 같은 칸을 400ms 안에 다시 누르면 편집. */
+  const now = Date.now();
+  const same = lastClick && lastClick.tbl === at.tbl
+               && lastClick.r === at.r && lastClick.c === at.c
+               && (now - lastClick.t) < 400;
+  lastClick = {tbl: at.tbl, r: at.r, c: at.c, t: now};
+
+  if (same && !ev.shiftKey) {
+    dragMode = null;
+    sheetSel = {tbl: at.tbl, r1: at.r, c1: at.c, r2: at.r, c2: at.c};
+    startEdit(at.tbl, at.r, at.c);      // 기존 값을 그대로 두고 편집
+    return;
+  }
+
   if (ev.shiftKey && sheetSel && sheetSel.tbl === at.tbl) {
     sheetSel = {...sheetSel, r2: at.r, c2: at.c};
   } else {
@@ -1036,18 +1054,6 @@ document.addEventListener('mousedown', ev => {
     dragMode = 'select';
   }
   renderSheet(at.tbl);
-});
-
-/* 더블클릭하면 그 자리에서 편집 — 엑셀과 같다.
-   ★ 글자를 쳐야만 편집이 되면, 이미 있는 값을 조금만 고칠 때
-     불편하다 (다 지우고 새로 쳐야 한다). */
-document.addEventListener('dblclick', ev => {
-  const at = cellOf(ev.target);
-  if (!at) return;
-  ev.preventDefault();
-  dragMode = null;
-  sheetSel = {tbl: at.tbl, r1: at.r, c1: at.c, r2: at.r, c2: at.c};
-  startEdit(at.tbl, at.r, at.c);      // seed 없이 = 기존 값을 그대로 둔다
 });
 
 document.addEventListener('mousemove', ev => {
