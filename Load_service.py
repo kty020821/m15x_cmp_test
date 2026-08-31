@@ -45,6 +45,18 @@ DEFAULT_DAYS = 45
 #     겹친 구간은 저장할 때 그만큼만 지우고 다시 넣으므로 중복이 안 생긴다.
 OVERLAP_DAYS = 3
 
+# 동시에 적재할 공정 수.
+#   ★ 시간의 대부분은 Lake 응답 대기다. 순차로 돌리면 공정 수에
+#     그대로 비례해 늘어난다.
+#   ★ 너무 크게 잡으면 Lake 쪽 부담과 메모리가 늘고, 512MiB 웹서버에서는
+#     여러 DataFrame 을 동시에 들고 있다 죽을 수 있다.
+LOAD_WORKERS = 4
+
+# 증분을 쓸 수 있는 최대 지연(시간).
+#   ★ 마지막 데이터가 이보다 오래됐으면 증분이 어딘가에서 막힌 것이다.
+#     그대로 두면 계속 그 자리에 머무므로, 기본 기간으로 다시 받는다.
+INC_MAX_AGE_H = 72
+
 # '실행중' 인데 이 시간이 지나면 멈춘 것으로 본다
 STALE_MINUTES = 120
 
@@ -338,6 +350,17 @@ def incremental_range(oper_id, overlap_days=OVERLAP_DAYS):
     if not mx:
         return None                          # 테이블은 있는데 비어 있음
 
+    # ★ 마지막 데이터가 너무 오래됐으면 증분을 쓰지 않는다.
+    #   증분은 '마지막 시각 이후' 만 받으므로, 그 시각이 한 번 잘못
+    #   굳으면 계속 그 자리에 머문다 — 예전에 며칠씩 밀린 채
+    #   아무도 모르고 지나간 적이 있다.
+    #   오래 밀렸으면 기본 기간으로 통째로 다시 받아 바로잡는다.
+    age_h = (datetime.now() - mx).total_seconds() / 3600
+    if age_h > INC_MAX_AGE_H:
+        print(f'[load] {oper_id} 마지막 데이터가 {age_h/24:.1f}일 전 '
+              f'({str(mx)[:19]}) — 증분 대신 기본 기간으로 다시 받습니다')
+        return None
+
     start = mx - timedelta(days=int(overlap_days))
     return (start.strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d'),
             str(mx)[:19])
@@ -367,14 +390,23 @@ def run_oper(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None,
         progress(job_id, '기준정보 조회 중')
         df_info = svc.get_config()
 
-        # ── 전체 교체 ────────────────────────────────────
-        #   ★ 증분을 쓰지 않는다.
-        #     마지막 데이터 시각을 기준으로 이어 붙이면, 그 시각 산정이
-        #     한 번이라도 어긋나면 그 뒤로 계속 어긋난 채 쌓인다.
-        #     매번 기간 전체를 새로 받아 통째로 갈아 끼우는 편이
-        #     상태가 분명하고 되돌릴 것도 없다.
+        # ── 증분 적재 ────────────────────────────────────
+        #   마지막 데이터 시각부터 지금까지만 받는다.
+        #   처음 적재하는 공정이면 기본 기간을 그대로 쓴다.
+        #   ★ 겹침(OVERLAP_DAYS)을 두는 이유는 두 가지다 —
+        #     경계에 걸친 웨이퍼를 놓치지 않기 위해,
+        #     그리고 Lake 에 늦게 들어온 데이터를 반영하기 위해.
         last_at = None
-        print(f'[load] {oper_id} 전체 교체 — 최근 {days}일 조회')
+        if incremental and not date_from and not date_to:
+            rng = incremental_range(oper_id)
+            if rng:
+                date_from, date_to, last_at = rng
+                print(f'[load] {oper_id} 증분 — 마지막 데이터 {last_at} · '
+                      f'{date_from} ~ {date_to} 조회')
+            else:
+                print(f'[load] {oper_id} 첫 적재 — 최근 {days}일 조회')
+        else:
+            print(f'[load] {oper_id} 전체 교체 — 최근 {days}일 조회')
 
         span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
                 else f'최근 {days}일')
@@ -428,9 +460,13 @@ def run_many(oper_ids, days=DEFAULT_DAYS, user='',
     ★ 이미 다른 사람이 잡고 있는 공정은 건너뛴다 — 전체가 멈추지 않게.
     """
     from . import analysis_service as svc
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _time
 
     results, skipped = [], []
-    lake = None
+
+    # 이미 남이 잡고 있는 공정은 건너뛴다
+    todo = []
     for oper_id in oper_ids:
         with _conn().cursor() as cur:
             cur.execute(f"SELECT requested_by FROM {T_JOB} "
@@ -438,15 +474,45 @@ def run_many(oper_ids, days=DEFAULT_DAYS, user='',
             r = cur.fetchone()
         if r:
             skipped.append({'oper_id': oper_id, 'by': r[0] or ''})
-            continue
+        else:
+            todo.append(oper_id)
 
-        if lake is None:
-            lake = svc.get_lake()
-        print(f'[load] {oper_id} 적재 시작 (최근 {days}일)')
-        results.append({'oper_id': oper_id,
-                        **run_oper(oper_id, days=days, user=user, lake=lake,
-                                   date_from=date_from, date_to=date_to,
-                                   incremental=incremental)})
+    if not todo:
+        return {'done': 0, 'results': [], 'skipped': skipped}
+
+    # ★ 공정을 병렬로 돌린다.
+    #   대부분의 시간은 Lake 응답을 기다리는 데 쓰인다 — 순차로 돌리면
+    #   공정 수에 그대로 비례해 늘어난다. 동시에 던지면 대기 시간이 겹친다.
+    #   ★ 너무 많이 띄우면 Lake 쪽에 부담이 되고 메모리도 늘어나므로
+    #     LOAD_WORKERS 로 제한한다.
+    t0 = _time.time()
+    print(f'[load] {len(todo)}개 공정 적재 시작 '
+          f'(동시 {LOAD_WORKERS}개 · 최근 {days}일)')
+
+    def _one(oper_id):
+        # ★ Lake 연결은 스레드마다 따로 만든다 —
+        #   하나를 공유하면 동시에 쓰다가 응답이 뒤섞인다.
+        lake = svc.get_lake()
+        return {'oper_id': oper_id,
+                **run_oper(oper_id, days=days, user=user, lake=lake,
+                           date_from=date_from, date_to=date_to,
+                           incremental=incremental)}
+
+    with ThreadPoolExecutor(max_workers=LOAD_WORKERS) as ex:
+        futs = {ex.submit(_one, o): o for o in todo}
+        for f in as_completed(futs):
+            oper_id = futs[f]
+            try:
+                results.append(f.result())
+            except Exception as e:
+                traceback.print_exc()
+                results.append({'oper_id': oper_id, 'ok': False,
+                                'error': f'{e.__class__.__name__}: {e}'})
+                print(f'[load] {oper_id} 실패: {e}')
+
+    el = _time.time() - t0
+    print(f'[load] 전체 완료 — {len(results)}개 공정 · {el/60:.1f}분 '
+          f'(공정당 평균 {el/max(len(results),1):.0f}초)')
 
     return {'done': len(results), 'results': results, 'skipped': skipped}
 
@@ -639,9 +705,11 @@ def _do_load(job):
     progress(job_id, '기준정보 조회 중')
     df_info = svc.get_config()
 
-    # ★ 증분을 쓰지 않는다 — 매번 기간 전체를 새로 받아 갈아 끼운다.
-    #   이어 붙이는 방식은 기준 시각이 한 번 어긋나면 계속 어긋난다.
     last_at = None
+    if job['incremental'] and not date_from and not date_to:
+        rng = incremental_range(oper_id)
+        if rng:
+            date_from, date_to, last_at = rng
 
     span = (f'{date_from} ~ {date_to}' if (date_from and date_to)
             else f'최근 {days}일')
@@ -666,8 +734,10 @@ def _do_load(job):
         print(f'[load] {oper_id} 연계 병합 실패 — 본공정만 저장: {e}')
 
     progress(job_id, f'{len(df):,}행 저장 중')
-    # ★ date_from 을 넘기지 않는다 = LOT_CD 전체를 지우고 새로 넣는다
-    svc.save_analysis_df(df, oper_id)
+    # ★ 증분이면 다시 조회한 구간만 교체한다 (last_at 이 있을 때).
+    #   전체 조회면 date_from 없이 = LOT_CD 전체를 갈아 끼운다.
+    svc.save_analysis_df(df, oper_id,
+                         date_from=date_from if last_at else None)
 
     # ★ 최신 데이터 날짜는 지금 손에 든 DataFrame 에서 바로 얻는다.
     #   나중에 테이블을 훑는 것보다 훨씬 싸다.
@@ -679,6 +749,14 @@ def _do_load(job):
             dmax = str(v)[:19] if v is not None else None
     except Exception:
         pass
+
+    # ★ 증분인데 최신 시각이 그대로면 정체다.
+    #   조회는 성공했는데 새 데이터가 하나도 없다는 뜻이라,
+    #   조용히 넘어가면 며칠씩 밀린 채 아무도 모른다.
+    if last_at and dmax and str(dmax)[:19] <= str(last_at)[:19]:
+        print(f'[load] ★ {oper_id} 증분인데 최신 시각이 그대로입니다 '
+              f'({last_at}) — Lake 에 새 데이터가 없거나 조회 조건을 '
+              f'확인하세요')
 
     # ★ 일부 LOT_CD 가 실패했으면 그 사실을 결과에 남긴다.
     #   '완료' 로만 표시하면 빠진 데이터를 모르고 지나친다.
