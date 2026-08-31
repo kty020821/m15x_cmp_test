@@ -6,6 +6,8 @@ run_analysis_load.py   (프로젝트 루트 · manage.py 옆)
   python run_analysis_load.py                  전체 공정, 30일
   python run_analysis_load.py --oper OP100     특정 공정만
   python run_analysis_load.py --days 7         기간 변경
+  python run_analysis_load.py --jobs 4         동시 4개 처리 (빠름)
+  python run_analysis_load.py --full           증분 없이 전체 다시 받기
   python run_analysis_load.py --dry-run        조회만 하고 저장 안 함
 
 [스케줄러 환경 대응]
@@ -25,6 +27,8 @@ import atexit
 import logging
 import argparse
 import traceback
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
@@ -171,6 +175,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--oper',    default=None,   help='특정 oper_id 만 처리')
     ap.add_argument('--days',    type=int, default=30, help='조회 기간(일)')
+    ap.add_argument('--full',    action='store_true',
+                    help='증분을 쓰지 않고 기간 전체를 다시 받습니다')
+    ap.add_argument('--jobs',    type=int, default=1,
+                    help='동시에 처리할 공정 수 (기본 1=순차). '
+                         '대부분 Lake 대기 시간이라 4 정도면 크게 빨라진다. '
+                         '메모리가 빠듯하면 올리지 말 것')
     ap.add_argument('--dry-run', action='store_true',  help='저장하지 않고 조회만')
     ap.add_argument('--force',   action='store_true',
                     help='남아 있는 락을 무시하고 실행')
@@ -236,38 +246,81 @@ def main():
     # ── 공정별 처리 ───────────────────────────────────────
     ok, fail, empty = 0, 0, 0
     failed_opers = []
+    _lock = threading.Lock()
 
-    for _, row in opers.iterrows():
-        oper_id   = row['OPER_ID']
-        oper_desc = row.get('OPER_DESC', '')
+    def _one(oper_id, oper_desc):
+        """공정 하나 — 성공/빈결과/실패 중 하나를 돌려준다"""
+        nonlocal ok, fail, empty
         t0 = time.time()
         df = None
         try:
             logging.info(f"── [{oper_id}] {oper_desc}")
-            df = build_analysis_df(lake, df_info, oper_id, days=args.days)
+            # ★ Lake 연결은 스레드마다 따로 만든다 — 하나를 공유하면
+            #   동시에 쓰다가 응답이 뒤섞인다.
+            lk = get_lake() if args.jobs > 1 else lake
+
+            # ★ 증분 — 마지막 데이터 이후만 받는다.
+            #   매시간 45일치를 통째로 받으면 공정 수만큼 시간이 늘어난다.
+            #   마지막 데이터가 너무 오래됐으면(정체) 자동으로 전체 조회로
+            #   돌아간다 — incremental_range 가 그때 None 을 준다.
+            d_from = d_to = None
+            last_at = None
+            if not args.full:
+                try:
+                    from equipment import load_service as _ls
+                    rng = _ls.incremental_range(oper_id)
+                    if rng:
+                        d_from, d_to, last_at = rng
+                        logging.info(f"   증분 {d_from} ~ {d_to} "
+                                     f"(마지막 {last_at})")
+                except Exception as e:
+                    logging.warning(f"   증분 범위 계산 실패, 전체 조회: {e}")
+
+            df = build_analysis_df(lk, df_info, oper_id, days=args.days,
+                                   date_from=d_from, date_to=d_to)
 
             if df is None or df.empty:
-                empty += 1
-                logging.warning(f"   데이터 없음 (건너뜀)")
-                continue
+                with _lock:
+                    empty += 1
+                logging.warning(f"   [{oper_id}] 데이터 없음 (건너뜀)")
+                return
 
             if args.dry_run:
-                logging.info(f"   [dry-run] {len(df):,}행 · {len(df.columns)}컬럼 "
-                             f"({time.time()-t0:.0f}s)")
+                logging.info(f"   [{oper_id}] [dry-run] {len(df):,}행 · "
+                             f"{len(df.columns)}컬럼 ({time.time()-t0:.0f}s)")
             else:
-                save_analysis_df(df, oper_id)
-                logging.info(f"   완료 {len(df):,}행 ({time.time()-t0:.0f}s)")
-            ok += 1
+                # 증분이면 그 구간만 교체한다
+                save_analysis_df(df, oper_id,
+                                 date_from=d_from if last_at else None)
+                logging.info(f"   [{oper_id}] 완료 {len(df):,}행 "
+                             f"({time.time()-t0:.0f}s)")
+            with _lock:
+                ok += 1
 
         except Exception:
-            fail += 1
-            failed_opers.append(str(oper_id))
+            with _lock:
+                fail += 1
+                failed_opers.append(str(oper_id))
             logging.error(f"   [{oper_id}] 실패")
             logging.error(traceback.format_exc())
         finally:
             # 공정 수가 많으므로 매번 정리 (메모리 누적 방지)
             df = None
             gc.collect()
+
+    rows = [(r['OPER_ID'], r.get('OPER_DESC', ''))
+            for _, r in opers.iterrows()]
+
+    if args.jobs > 1:
+        # ★ 시간의 대부분은 Lake 응답 대기다. 동시에 던지면 그만큼 겹친다.
+        #   다만 DataFrame 이 함께 메모리에 올라오므로, 메모리가 빠듯한
+        #   환경에서는 --jobs 1 (기본)로 두는 편이 안전하다.
+        logging.info(f"동시 {args.jobs}개로 처리합니다 ({len(rows)}개 공정)")
+        with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            list(ex.map(lambda t: _one(*t), rows))
+    else:
+        for oid, desc in rows:
+            _one(oid, desc)
 
     # ── 결과 ──────────────────────────────────────────────
     logging.info("=" * 56)
