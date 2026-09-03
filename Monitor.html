@@ -796,11 +796,10 @@ function resetPage() { shownRows = PAGE_ROWS; }
 /* 점검일 — 계측값은 하루, Defect 은 며칠이라 길이가 다르다 */
 function spanCell(r) {
   const sp = r.span || {};
+  // 최신 데이터 시각까지 — 판정 구간이 24시간임이 드러난다
+  if (sp.ts_to) return sp.ts_to.slice(5, 16);
   const to = sp.to || r.day || '';
-  const from = sp.from || r.day_from || to;
-  if (!to) return '-';
-  if (from === to) return String(to).slice(5);        // MM-DD
-  return `${String(from).slice(5)}~${String(to).slice(5)}`;
+  return to ? String(to).slice(5) : '-';
 }
 
 function setStatus(s) { filterStatus = s; resetPage(); render(); }
@@ -1025,14 +1024,18 @@ async function drawDetail(r) {
      '최신 데이터가 점검에서 빠졌다' 고 오해하기 쉬운 지점이다. */
   const note = document.getElementById('dp-note');
   if (note) {
-    const span = dFrom === dTo ? dTo : `${dFrom} ~ ${dTo}`;
+    // ★ 판정은 '최신 데이터로부터 24시간' 이다. 시각까지 보여야
+    //   '오늘 하루' 로 오해하지 않는다.
+    const span = (sp.ts_from && sp.ts_to)
+      ? `${sp.ts_from.slice(5, 16)} ~ ${sp.ts_to.slice(5, 16)}`
+      : (dFrom === dTo ? dTo : `${dFrom} ~ ${dTo}`);
 
     /* ★ 구간 길이가 타입마다 다르다 — 그 이유를 밝힌다.
        계측값은 매 웨이퍼 측정되니 하루면 충분하지만,
        Defect 은 샘플링이라 하루만 보면 검사가 없거나 한두 장뿐이다. */
-    const why = (dFrom !== dTo)
-      ? ' <span style="color:var(--tx-muted);">— 여러 날을 묶어 봅니다</span>'
-      : ' <span style="color:var(--tx-muted);">— 최근 하루로 판정합니다</span>';
+    const why = ' <span style="color:var(--tx-muted);">— '
+      + esc((r.span && r.span.label) || '최근 24시간')
+      + ' 기준입니다 (달력 하루가 아니라 최신 데이터부터 거슬러)</span>';
 
     note.innerHTML = `점검 구간 <b>${esc(span)}</b>${why}`
       + (after
