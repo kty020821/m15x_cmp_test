@@ -50,7 +50,7 @@ Defect 파라미터는 위 규칙을 쓰지 않는다
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.db import connections
 
@@ -557,11 +557,16 @@ def _no_data(lot_cd, param, ptype, why):
 
 
 def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
+    # ★ 판정 구간은 "달력 하루" 가 아니라 "최신 데이터로부터 24시간" 이다.
+    #   달력 기준이면 최신 데이터가 07:00 일 때 00:00~07:00 —
+    #   7시간치로 판정하게 된다. 매시간 적재하므로 점검할 때마다
+    #   표본 크기가 들쭉날쭉해지고, 그만큼 판정도 흔들린다.
     cur.execute(f'''
-        SELECT MAX("DATE"::date) FROM {table}
+        SELECT MAX("DATE") FROM {table}
         WHERE "LOT_CD" = %s AND "{param}" IS NOT NULL
     ''', [lot_cd])
-    day = cur.fetchone()[0]
+    last_ts = cur.fetchone()[0]
+    day = last_ts.date() if last_ts else None
     if day is None:
         return _no_data(lot_cd, param, ptype,
                         f'이 LOT_CD 에 {param} 값이 하나도 없음 — '
@@ -573,13 +578,12 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
     #   보면 표본이 한두 장뿐일 수 있어서다. 다만 여러 날을 묶으면
     #   어느 날 일이 생겼는지가 흐려지므로 기본값은 1(하루)이다.
     is_def = (ptype == 'DEFECT' and int(DEF_WINDOW) > 1)
-    if is_def:
-        cur.execute(f"SELECT %s::date - {int(DEF_WINDOW) - 1}", [day])
-        d_from = cur.fetchone()[0]
-        span_label = f'최근 {DEF_WINDOW}일'
-    else:
-        d_from = day
-        span_label = '최근일'
+    hours = int(DEF_WINDOW) * 24 if is_def else 24
+    ts_from = last_ts - timedelta(hours=hours)
+    ts_to = last_ts
+    span_label = f'최근 {DEF_WINDOW}일' if is_def else '최근 24시간'
+    # 화면·이력 표시는 날짜로 (기존 형식 유지)
+    d_from = ts_from.date()
     # ★ 표본 기준은 구간 길이가 아니라 타입으로 정한다.
     #   Defect 은 샘플 검사라 하루 검사 장수가 원래 적다 —
     #   구간을 하루로 줄여도 그 사실은 그대로다.
@@ -592,8 +596,8 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
                PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY "{param}"),
                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY "{param}")
         FROM {table}
-        WHERE "LOT_CD" = %s AND "DATE"::date < %s AND "{param}" IS NOT NULL
-    ''', [lot_cd, d_from])
+        WHERE "LOT_CD" = %s AND "DATE" <= %s AND "{param}" IS NOT NULL
+    ''', [lot_cd, ts_from])
     b_n, b_avg, b_std, b_min, b_max, b_med, b_p95 = cur.fetchone()
 
     # 판정 구간
@@ -601,18 +605,21 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
         SELECT COUNT(*), AVG("{param}"), STDDEV("{param}"),
                MIN("{param}"), MAX("{param}")
         FROM {table}
-        WHERE "LOT_CD" = %s AND "DATE"::date BETWEEN %s AND %s
+        WHERE "LOT_CD" = %s AND "DATE" > %s AND "DATE" <= %s
           AND "{param}" IS NOT NULL
-    ''', [lot_cd, d_from, day])
+    ''', [lot_cd, ts_from, ts_to])
     d_n, d_avg, d_std, d_min, d_max = cur.fetchone()
 
     # ★ 판정 구간을 결과에 남긴다.
     #   차트가 '어디까지가 점검 대상인지' 를 표시할 수 있어야
     #   구간 뒤에 점이 보일 때 그게 정상인지 판단할 수 있다.
-    r_span = {'from': str(d_from), 'to': str(day), 'label': span_label}
+    r_span = {'from': str(d_from), 'to': str(day), 'label': span_label,
+              # ★ 시각까지 — '어제 07시부터 오늘 07시까지' 임을 알 수 있게
+              'ts_from': str(ts_from)[:19], 'ts_to': str(ts_to)[:19]}
     if not d_n:
         return _no_data(lot_cd, param, ptype,
-                        f'{span_label}({d_from} ~ {day}) 에 값이 없음 — '
+                        f'{span_label}({str(ts_from)[:16]} ~ '
+                        f'{str(ts_to)[:16]}) 에 값이 없음 — '
                         f'해당 기간 측정이 없었을 수 있음')
 
     r = {
@@ -684,9 +691,9 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
         if b_p95 is not None:
             cur.execute(f'''
                 SELECT COUNT(*) FROM {table}
-                WHERE "LOT_CD" = %s AND "DATE"::date BETWEEN %s AND %s
+                WHERE "LOT_CD" = %s AND "DATE" > %s AND "DATE" <= %s
                   AND "{param}" > %s
-            ''', [lot_cd, d_from, day, b_p95])
+            ''', [lot_cd, ts_from, ts_to, b_p95])
             over = cur.fetchone()[0]
             r['out_cnt'] = over
             # ★ Defect 은 검사 장수가 적어 계측값과 같은 기준을 쓸 수 없다
@@ -719,10 +726,10 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
         # R 범위이탈
         cur.execute(f'''
             SELECT COUNT(*) FROM {table}
-            WHERE "LOT_CD" = %s AND "DATE"::date BETWEEN %s AND %s
+            WHERE "LOT_CD" = %s AND "DATE" > %s AND "DATE" <= %s
               AND "{param}" IS NOT NULL
               AND ("{param}" < %s OR "{param}" > %s)
-        ''', [lot_cd, d_from, day, b_min, b_max])
+        ''', [lot_cd, ts_from, ts_to, b_min, b_max])
         out_cnt = cur.fetchone()[0]
         r['out_cnt'] = out_cnt
         if out_cnt >= OUT_ALERT:
@@ -764,11 +771,11 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
         cur.execute(f'''
             SELECT "{key_col}", COUNT(*), AVG("{param}")
             FROM {table}
-            WHERE "LOT_CD" = %s AND "DATE"::date BETWEEN %s AND %s
+            WHERE "LOT_CD" = %s AND "DATE" > %s AND "DATE" <= %s
               AND "{param}" IS NOT NULL
               AND COALESCE("{key_col}", '') <> ''
             GROUP BY "{key_col}" ORDER BY 1
-        ''', [lot_cd, d_from, day])
+        ''', [lot_cd, ts_from, ts_to])
         for eqp, n, avg in cur.fetchall():
             es = None
             if b_std and float(b_std) > 0:
