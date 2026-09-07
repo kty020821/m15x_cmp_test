@@ -53,7 +53,10 @@ PARAM_TYPES = pt.TYPES
 # 구닥스가 주던 평면 컬럼 (순서 유지 — 기존 코드가 이 이름으로 읽는다)
 FLAT_COLS = ['FAB', 'LOT_CD', 'OPER_ID', 'OPER_DESC', 'EQ_MODEL', 'RECIPE_ID',
              'PARAM', 'PRE_OPER_ID', 'PRE_OPER_DESC', 'PRE_OPER_PARAM',
-             'PARAM_TYPE']
+             'PARAM_TYPE',
+             # ★ 조회에 실제로 쓸 공정 코드 — device 마다 다를 수 있다.
+             #   비어 있으면 OPER_ID 를 그대로 쓴다.
+             'REAL_OPER']
 
 
 def _conn():
@@ -98,9 +101,15 @@ def ensure_tables():
               oper_id   VARCHAR(100),
               lot_cd    VARCHAR(50),
               recipe_id VARCHAR(200),
+              -- ★ 같은 공정이라도 device 마다 실제 공정 코드가 다를 수 있다.
+              --   비워 두면 위 oper_id 를 그대로 쓴다.
+              real_oper VARCHAR(100),
               use_yn    VARCHAR(1) DEFAULT 'Y'
             )
         ''')
+        # 예전 표에는 없던 칸
+        cur.execute(f'ALTER TABLE {T_LOT} '
+                    f'ADD COLUMN IF NOT EXISTS real_oper VARCHAR(100)')
         cur.execute(f'''
             CREATE TABLE IF NOT EXISTS {T_PARAM} (
               id BIGSERIAL PRIMARY KEY,
@@ -199,10 +208,11 @@ def get_oper(oper_id):
             return None
 
         cur.execute(f'''
-            SELECT lot_cd, recipe_id, use_yn FROM {T_LOT}
+            SELECT lot_cd, recipe_id, use_yn, real_oper FROM {T_LOT}
             WHERE oper_id = %s ORDER BY lot_cd, recipe_id
         ''', [oper_id])
         lots = [{'lot_cd': r[0] or '', 'recipe_id': r[1] or '',
+                 'real_oper': (r[3] if len(r) > 3 else '') or '',
                  'use_yn': r[2] or 'Y'} for r in cur.fetchall()]
 
         cur.execute(f'''
@@ -364,7 +374,9 @@ def save_oper(d, user=''):
         if key in seen:
             continue
         seen.add(key)
-        lots.append((lot, rec, 'N' if _up(it.get('use_yn')) == 'N' else 'Y'))
+        # ★ device 마다 실제 공정 코드가 다를 수 있다 (비우면 대표 코드 사용)
+        lots.append((lot, rec, 'N' if _up(it.get('use_yn')) == 'N' else 'Y',
+                     _up(it.get('real_oper'))))
 
     params, pseen = [], set()
     for p in d.get('params', []):
@@ -425,10 +437,10 @@ def save_oper(d, user=''):
         for t in (T_LOT, T_PARAM, T_DEFECT, T_RESP):
             cur.execute(f'DELETE FROM {t} WHERE oper_id = %s', [oper_id])
 
-        for lot, rec, use in lots:
+        for lot, rec, use, real in lots:
             cur.execute(f'INSERT INTO {T_LOT} (oper_id, lot_cd, recipe_id, '
-                        f'use_yn) VALUES (%s,%s,%s,%s)',
-                        [oper_id, lot, rec, use])
+                        f'use_yn, real_oper) VALUES (%s,%s,%s,%s,%s)',
+                        [oper_id, lot, rec, use, real])
         for name, t, use in params:
             cur.execute(f'INSERT INTO {T_PARAM} (oper_id, param, param_type, '
                         f'use_yn) VALUES (%s,%s,%s,%s)',
@@ -494,10 +506,11 @@ def build_config_df(include_unused=False):
         if not opers:
             return pd.DataFrame(columns=FLAT_COLS)
 
-        cur.execute(f'SELECT oper_id, lot_cd, recipe_id FROM {T_LOT} {cond}')
+        cur.execute(f'SELECT oper_id, lot_cd, recipe_id, real_oper '
+                    f'FROM {T_LOT} {cond}')
         lots = {}
-        for o, lot, rec in cur.fetchall():
-            lots.setdefault(o, []).append((lot or '', rec or ''))
+        for o, lot, rec, real in cur.fetchall():
+            lots.setdefault(o, []).append((lot or '', rec or '', real or ''))
 
         cur.execute(f'SELECT oper_id, param, param_type FROM {T_PARAM} {cond}')
         params = {}
@@ -511,7 +524,7 @@ def build_config_df(include_unused=False):
         if not ls or not ps:
             # device 나 파라미터가 없으면 조회 조건을 만들 수 없다
             continue
-        for (lot, rec) in ls:
+        for (lot, rec, real) in ls:
             for (pname, ptype) in ps:
                 rows.append({
                     'FAB': fab or '', 'LOT_CD': lot,
@@ -522,6 +535,8 @@ def build_config_df(include_unused=False):
                     'PRE_OPER_PARAM': pre_param or '',
                     # 지정 타입이 없으면 이름으로 자동 분류해서 내려보낸다
                     'PARAM_TYPE': pt.resolve(pname, ptype),
+                    # 비어 있으면 조회 때 OPER_ID 로 대체된다
+                    'REAL_OPER': real or '',
                 })
 
     return pd.DataFrame(rows, columns=FLAT_COLS)
