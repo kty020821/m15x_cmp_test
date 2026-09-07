@@ -231,6 +231,25 @@ def _recipe_like_cond(recipe_list, col='eqp_recipe_id'):
     return f"and ({col} is null or {ors})"
 
 
+def _oper_tuple(cond):
+    """
+    조회할 공정 코드 목록 — SQL IN 절 형태.
+
+    ★ 같은 공정이라도 device 마다 실제 공정 코드가 다를 수 있다.
+      기준정보에서 device 별로 적어 두면 그것들을 모두 조회한다.
+      비워 둔 device 는 대표 코드를 쓴다.
+    """
+    ids = {str(cond.get('oper_id') or '').strip()}
+    for lc in (cond.get('by_lot') or {}).values():
+        v = str(lc.get('real_oper') or '').strip()
+        if v:
+            ids.add(v)
+    ids = sorted(i for i in ids if i)
+    if not ids:
+        return "('')"
+    return "(" + ",".join("'" + i.replace("'", "''") + "'" for i in ids) + ")"
+
+
 def _param_tuple(param_list):
     """구닥스 PARAM 목록 → SQL IN 용 튜플 문자열"""
     params = [str(p) for p in param_list if p]
@@ -384,6 +403,10 @@ def get_oper_cond(df_info, oper_id):
         gf = g.iloc[0]
         by_lot[str(lot_cd)] = {
             'lot_cd':         str(lot_cd),
+            # ★ device 마다 실제 공정 코드가 다를 수 있다.
+            #   기준정보에 따로 적었으면 그것을, 비웠으면 대표 코드를 쓴다.
+            'real_oper':      str(gf.get('REAL_OPER') or '').strip()
+                              or str(oper_id),
             'recipe_list':    [r for r in g['RECIPE_ID'].unique().tolist()
                                if str(r).strip()],
             'param_list':     _expand_chamber_params(
@@ -490,7 +513,7 @@ from (
     where a.dt between '{dt_s}' and '{dt_e}'
       and b.dt between '{dt_s}' and '{dt_e}'
       and c.mt between '{mt_s}' and '{mt_e}'
-      and c.operation_id = '{cond['oper_id']}'
+      and c.operation_id in {_oper_tuple(cond)}
       and ( a.model_name like '%CMP%'
          or a.model_name like '%KCC88%'
          or a.model_name like '%KCC01%' )
@@ -551,6 +574,8 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
     for lot_code in cond['lot_cd_list']:
         # ── 이 device 의 조건 ────────────────────────────
         lc = by_lot.get(str(lot_code), {})
+        # ★ 이 device 의 실제 공정 코드 (기준정보에 따로 적었으면 그것)
+        q_oper = lc.get('real_oper') or oper_id
         param_in = _param_tuple(lc.get('param_list') or cond['param_list'])
         recipe_list = [r for r in (lc.get('recipe_list')
                                    or cond['recipe_list']) if r]
@@ -561,7 +586,9 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
         use_pre = bool(pre_oper)
 
         if VERBOSE:
-            print(f'  [SRC] {lot_code} — param {len(param_in.split(chr(44)))}개 · '
+            print(f'  [SRC] {lot_code} — 공정 {q_oper}'
+                  f'{" (대표와 다름)" if q_oper != oper_id else ""} · '
+                  f'param {len(param_in.split(chr(44)))}개 · '
                   f'recipe {len(recipe_list)}개 · '
                   f'사전공정 {pre_oper or "(없음)"}')
 
@@ -622,7 +649,7 @@ WITH src AS (
             where ( SUBSTRING(lot_id, 2, {lot_len}) = '{lot_code}'
                  or SUBSTRING(lot_id, 2, 2) = 'XC'
                  or SUBSTRING(lot_id, 1, 1) = 'S' )
-              and oper_id = '{oper_id}'
+              and oper_id = '{q_oper}'
               and dt between '{dt_s}' and '{dt_e}'
         ) d
         where d.recipe_rank = 1
@@ -630,7 +657,7 @@ WITH src AS (
     where a.mt between '{mt_s}' and '{mt_e}'
       and a.end_tm >= '{dt_start}'
       and a.end_tm <= '{dt_end}'
-      and a.oper_id = '{oper_id}'
+      and a.oper_id = '{q_oper}'
       and right(a.lot_cd, 3) = '{lot_code}'
       {recipe_cond}
       and a.param_nm in {param_in}
