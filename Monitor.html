@@ -190,6 +190,9 @@ tr.detail > td { background: var(--bg-2); padding: 0; }
 .qs { font-size:10px; font-weight:800; border-radius:20px; padding:2px 8px; }
 .qs.run { color:#0f6e56; background:rgba(15,110,86,.13); }
 .qs.wait { color:#854f0b; background:rgba(133,79,11,.13); }
+.tag-gap { font-size: 9.5px; font-weight: 800; color: #b45309;
+  background: rgba(180,83,9,.13); border-radius: 20px;
+  padding: 0 6px; white-space: nowrap; }
 .tag-per { font-size: 9.5px; font-weight: 800; color: var(--tx-muted);
   background: rgba(128,128,128,.14); border-radius: 20px;
   padding: 0 6px; white-space: nowrap; }
@@ -767,7 +770,11 @@ function render() {
         ${esc(spanCell(r))}
         ${r.periodic ? `<br><span class="tag-per"
            title="${esc(r.periodic.label)}마다 반복되는 패턴이라 제외됨"
-           >↻ ${esc(r.periodic.label)}</span>` : ''}</td>
+           >↻ ${esc(r.periodic.label)}</span>` : ''}
+        ${r.eqp_gap ? `<br><span class="tag-gap"
+           title="${esc(r.eqp_gap.days)}일 연속 ${esc(r.eqp_gap.unit)} 간 차이 —
+                  ${esc(r.eqp_gap.high)} 높음 / ${esc(r.eqp_gap.low)} 낮음"
+           >⇅ ${esc(r.eqp_gap.gap_sigma)}σ</span>` : ''}</td>
       <td>${sparkline(r)}</td>
       <td><div class="reason">${tags ? tags + '<br>' : ''}${reasons}</div></td>
     </tr>` + (openKey === key ? detailRow(r) : '');
@@ -901,8 +908,15 @@ async function drawDetail(r) {
   //   그 파라미터에 값이 없어서 판정에서 빠진 날이다
   const after = pts.filter(p => (p.date || '').slice(0, 10) > dTo).length;
 
-  // 장비 키 — 챔버까지 있으면 챔버 단위가 더 유용하다
-  const keyOf = p => p.EQP_CH_ID || p.EQP_ID || '(미확인)';
+  /* 범례 기준 — 장비 모델에 따라 다르다.
+     ★ OPTA 는 챔버가 여러 개여도 한 장비로 묶어 보는 게 맞다
+       (챔버별로 나누면 선이 너무 많아지고, 실제 차이는 장비 단위로 난다).
+       그 외 모델은 챔버 단위 차이가 실제로 있어 챔버로 나눈다. */
+  const model = (pts.find(p => p.EQP_MODEL) || {}).EQP_MODEL || '';
+  const isOpta = /OPTA/i.test(String(model));
+  const keyOf = p => (isOpta
+    ? (p.EQP_ID || p.EQP_CH_ID)
+    : (p.EQP_CH_ID || p.EQP_ID)) || '(미확인)';
   const hasEqp = pts.some(p => p.EQP_CH_ID || p.EQP_ID);
 
   const mk = (arr, o) => ({
