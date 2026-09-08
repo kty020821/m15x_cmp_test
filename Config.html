@@ -417,6 +417,56 @@ const API_CLASSIFY   = "{% url 'config-classify' %}";
 const API_RECLASSIFY = "{% url 'config-reclassify' %}";
 const API_MISMATCH   = "{% url 'config-mismatch' %}";
 
+/* 열 정의 — 종류에 따라 편집 방식이 갈린다.
+     text   글자 그대로
+     upper  대문자로 (코드성 값)
+     sel    정해진 목록 중 하나 */
+const COLDEF = {
+  lots: [
+    {k: 'lot_cd',    t: 'upper', w: 110, label: 'LOT_CD *', a: 'c'},
+    {k: 'recipe_id', t: 'text',  w: 240, label: 'RECIPE_ID'},
+    {k: 'real_oper', t: 'upper', w: 130, label: 'OPER_ID', a: 'c'},
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  params: [
+    {k: 'param',      t: 'upper', w: 220, label: 'PARAM *', a: 'c'},
+    {k: 'param_type', t: 'sel',   w: 130, label: '타입', a: 'c', optsFrom: 'type'},
+    {k: 'use_yn',     t: 'sel',   w: 80,  label: '사용', a: 'c',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  resps: [
+    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD', a: 'c'},
+    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *', a: 'c'},
+    {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
+    {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *', a: 'c'},
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  defects: [
+    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD', a: 'c'},
+    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *', a: 'c'},
+    {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
+    {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *', a: 'c'},
+    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+  links: [
+    {k: 'lot_cd',  t: 'sel',   w: 90,  label: 'LOT_CD', a: 'c', optsFrom: 'lot'},
+    {k: 'kind',    t: 'sel',   w: 80,  label: '타입', a: 'c',
+     opts: [['SRC', 'SRC'], ['REP', 'REP'], ['DEF', 'DEF']]},
+    {k: 'alias',   t: 'upper', w: 150, label: '공정명 *', a: 'c'},
+    {k: 'link_id', t: 'upper', w: 130, label: '공정·스텝 *', a: 'c'},
+    {k: 'param',   t: 'upper', w: 130, label: '관리 PARAM', a: 'c'},
+    {k: '_col',    t: 'calc',  w: 190, label: '생성 컬럼'},
+    {k: 'scope',   t: 'sel',   w: 90,  label: '용도', a: 'c',
+     opts: [['both', '둘 다'], ['mon', '모니터링'], ['ana', '분석']]},
+    {k: 'use_yn',  t: 'sel',   w: 80,  label: '사용', a: 'c',
+     opts: [['Y', '사용'], ['N', '제외']]},
+  ],
+};
+
+
 const PARAM_TYPES = {{ param_types|safe }};
 /* [[값, 표시명], ...] — 분류 규칙과 같은 소재지(param_types.py)에서 온다 */
 const TYPE_OPTS = [
@@ -545,8 +595,8 @@ function renderEditor() {
     <div class="sec">
       <div class="sec-h"><h3>Device</h3>
         <span class="sub" id="lcnt"></span>
-        <span class="sub">— LOT_CD 와 레시피 · 공정 코드가 device 마다
-          다르면 <b>공정 코드</b> 칸에 적으세요 (비우면 위 공정 코드 사용)</span>
+        <span class="sub">— LOT_CD 와 레시피 · OPER_ID 가 device 마다
+          다르면 <b>OPER_ID</b> 칸에 적으세요 (비우면 위 공정 코드 사용)</span>
         <span class="right">
           <button class="btn sm" onclick="addSheetRow('lots', 1)">+ 행</button>
           <button class="btn sm" onclick="addSheetRow('lots', 10)">+ 10행</button>
@@ -656,7 +706,7 @@ function renderEditor() {
 }
 
 /* ── device (LOT_CD + RECIPE) ──────────────── */
-function addLot() { cur.lots.push({lot_cd:'', recipe_id:'', use_yn:'Y'}); renderLots(); }
+function addLot() { addSheetRow('lots'); }
 function delLot(i) { cur.lots.splice(i,1); renderLots(); }
 
 /* 적재 테이블에 실제로 있는 LOT_CD 를 후보로 채운다 */
@@ -668,7 +718,10 @@ async function suggestLots() {
   const have = new Set(cur.lots.map(l => l.lot_cd));
   let added = 0;
   (j.lots || []).forEach(v => {
-    if (!have.has(v)) { cur.lots.push({lot_cd:v, recipe_id:'', use_yn:'Y'}); added++; }
+    // ★ blank() 로 만들어야 새로 생긴 칸(공정 코드 등)이 빠지지 않는다
+    if (!have.has(v)) {
+      cur.lots.push({...TBL.lots.blank(), lot_cd: v}); added++;
+    }
   });
   renderLots();
   edMsg(added ? `LOT_CD ${added}개를 추가했습니다 — 레시피는 직접 입력하세요`
@@ -800,55 +853,6 @@ document.addEventListener('mousemove', ev => {
        방향키·Enter·Tab   이동
        타이핑             그 자리에서 편집 시작
    ══════════════════════════════════════════════════ */
-
-/* 열 정의 — 종류에 따라 편집 방식이 갈린다.
-     text   글자 그대로
-     upper  대문자로 (코드성 값)
-     sel    정해진 목록 중 하나 */
-const COLDEF = {
-  lots: [
-    {k: 'lot_cd',    t: 'upper', w: 110, label: 'LOT_CD *', a: 'c'},
-    {k: 'recipe_id', t: 'text',  w: 240, label: 'RECIPE_ID'},
-    {k: 'real_oper', t: 'upper', w: 130, label: '공정 코드', a: 'c'},
-    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
-     opts: [['Y', '사용'], ['N', '제외']]},
-  ],
-  params: [
-    {k: 'param',      t: 'upper', w: 220, label: 'PARAM *', a: 'c'},
-    {k: 'param_type', t: 'sel',   w: 130, label: '타입', a: 'c', optsFrom: 'type'},
-    {k: 'use_yn',     t: 'sel',   w: 80,  label: '사용', a: 'c',
-     opts: [['Y', '사용'], ['N', '제외']]},
-  ],
-  resps: [
-    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD', a: 'c'},
-    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *', a: 'c'},
-    {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
-    {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *', a: 'c'},
-    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
-     opts: [['Y', '사용'], ['N', '제외']]},
-  ],
-  defects: [
-    {k: 'lot_cd',    t: 'upper', w: 100, label: 'LOT_CD', a: 'c'},
-    {k: 'step_id',   t: 'upper', w: 130, label: 'STEP_ID *', a: 'c'},
-    {k: 'step_desc', t: 'text',  w: 180, label: '스텝 이름'},
-    {k: 'param',     t: 'upper', w: 180, label: '관리 PARAM *', a: 'c'},
-    {k: 'use_yn',    t: 'sel',   w: 80,  label: '사용', a: 'c',
-     opts: [['Y', '사용'], ['N', '제외']]},
-  ],
-  links: [
-    {k: 'lot_cd',  t: 'sel',   w: 90,  label: 'LOT_CD', a: 'c', optsFrom: 'lot'},
-    {k: 'kind',    t: 'sel',   w: 80,  label: '타입', a: 'c',
-     opts: [['SRC', 'SRC'], ['REP', 'REP'], ['DEF', 'DEF']]},
-    {k: 'alias',   t: 'upper', w: 150, label: '공정명 *', a: 'c'},
-    {k: 'link_id', t: 'upper', w: 130, label: '공정·스텝 *', a: 'c'},
-    {k: 'param',   t: 'upper', w: 130, label: '관리 PARAM', a: 'c'},
-    {k: '_col',    t: 'calc',  w: 190, label: '생성 컬럼'},
-    {k: 'scope',   t: 'sel',   w: 90,  label: '용도', a: 'c',
-     opts: [['both', '둘 다'], ['mon', '모니터링'], ['ana', '분석']]},
-    {k: 'use_yn',  t: 'sel',   w: 80,  label: '사용', a: 'c',
-     opts: [['Y', '사용'], ['N', '제외']]},
-  ],
-};
 
 /* 드롭박스 항목 — 화면 상태에 따라 달라지는 것 */
 function colOpts(def) {
