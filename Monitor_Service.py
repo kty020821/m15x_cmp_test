@@ -98,6 +98,20 @@ PERIODIC_MIN_SAMPLES = 3     # 같은 요일이 최소 몇 번은 있어야 한�
 PERIODIC_MIN_SIGMA   = 0.8   # 그 요일이 이만큼 벗어나 있어야 '패턴'
 PERIODIC_EXPLAIN     = 0.6   # 지금 이탈의 이만큼이 그 패턴으로 설명되면 제외
 
+# ── 장비 간 지속 차이 ────────────────────────────────────
+#   ★ 전체 평균은 스펙 안인데 A 장비만 늘 높고 B 는 늘 낮으면,
+#     상쇄되어 아무 신호도 안 뜬다. 그게 실제 장비 상태 차이일 수 있다.
+EQP_GAP_DAYS    = 7     # 최근 며칠을 보나
+EQP_GAP_MIN_DAYS = 4    # 장비가 둘 이상인 날이 이만큼은 있어야 판단
+EQP_GAP_MIN_N   = 3     # 하루 그 장비 웨이퍼가 이보다 적으면 그 날은 제외
+EQP_GAP_SIGMA   = 1.0   # 매일 이만큼(σ) 이상 벌어져 있어야
+EQP_GAP_KEEP    = 0.75  # 같은 장비가 이 비율 이상 위/아래를 지켜야
+
+# ★ Defect 검사가 며칠째 없으면 그 자체가 이상이다.
+#   결함이 생겨도 검사를 안 하면 드러나지 않는다 — '정상' 으로 두면
+#   문제가 없는 것처럼 보인다.
+DEF_NO_DATA_DAYS = 2
+
 # 소모품(PART) 판정 여부
 #   Pad/Head/Disk 사용량은 누적되며 단조 증가하고 PM 에서 리셋된다.
 #   '30일 평균 대비 σ' 로 보면 매일 이탈로 잡혀 판정이 무의미하므로
@@ -457,6 +471,83 @@ def _drift(series, base_std):
 # ══════════════════════════════════════════════════════════
 # 파라미터 1건 점검
 # ══════════════════════════════════════════════════════════
+def _eqp_persistent_gap(cur, table, lot_cd, param, ts_to, has_eqp, has_ch,
+                        base_std):
+    """
+    스펙 안이어도 장비 간 차이가 꾸준한 경우를 잡는다.
+
+    ★ 지금 판정은 '오늘 평균이 기준에서 벗어났나' 만 본다.
+      전체 평균은 멀쩡한데 A 장비만 늘 높고 B 는 늘 낮으면,
+      상쇄되어 아무 신호도 안 뜬다. 그런데 그게 실제로는
+      장비 상태 차이라 언젠가 문제가 된다.
+
+    ★ 방법: 최근 EQP_GAP_DAYS 일을 하루 단위로 나눠, 날마다
+      '가장 높은 장비 - 가장 낮은 장비' 차이를 σ 로 잰다.
+      그 차이가 매일 EQP_GAP_SIGMA 이상이고, 같은 장비가 계속
+      위/아래를 차지하면 '지속 차이' 로 본다.
+
+    ★ 하루만 벌어진 것은 걸러야 한다 — 그건 우연이거나
+      그날 물량 배분 때문일 수 있다. 그래서 '며칠 연속' 을 본다.
+
+    반환: None 이면 해당 없음.
+    """
+    key_col = 'EQP_CH_ID' if has_ch else ('EQP_ID' if has_eqp else None)
+    if not key_col or not base_std or float(base_std) <= 0:
+        return None
+
+    std = float(base_std)
+    cur.execute(f'''
+        SELECT "DATE"::date AS d, "{key_col}", AVG("{param}"), COUNT(*)
+        FROM {table}
+        WHERE "LOT_CD" = %s AND "{param}" IS NOT NULL
+          AND "{key_col}" IS NOT NULL
+          AND "DATE" > %s AND "DATE" <= %s
+        GROUP BY d, "{key_col}"
+        HAVING COUNT(*) >= %s
+        ORDER BY d
+    ''', [lot_cd, ts_to - timedelta(days=EQP_GAP_DAYS), ts_to, EQP_GAP_MIN_N])
+
+    by_day = {}
+    for d, eqp, avg, n in cur.fetchall():
+        by_day.setdefault(str(d), []).append((str(eqp), float(avg), n))
+
+    # 장비가 둘 이상인 날만 의미가 있다
+    days = [(d, v) for d, v in sorted(by_day.items()) if len(v) >= 2]
+    if len(days) < EQP_GAP_MIN_DAYS:
+        return None
+
+    tops, bots, gaps = [], [], []
+    for d, v in days:
+        v.sort(key=lambda x: x[1])
+        lo, hi = v[0], v[-1]
+        gap = (hi[1] - lo[1]) / std
+        gaps.append(gap)
+        tops.append(hi[0])
+        bots.append(lo[0])
+
+    # 매일 벌어져 있어야 한다 — 하루만 튄 것은 제외
+    if min(gaps) < EQP_GAP_SIGMA:
+        return None
+
+    # 같은 장비가 계속 위/아래인가 — 순서가 뒤바뀌면 그건 산포지 차이가 아니다
+    top = max(set(tops), key=tops.count)
+    bot = max(set(bots), key=bots.count)
+    if top == bot:
+        return None
+    keep = (tops.count(top) + bots.count(bot)) / (2 * len(days))
+    if keep < EQP_GAP_KEEP:
+        return None
+
+    return {
+        'days': len(days),
+        'high': top, 'low': bot,
+        'gap_sigma': round(sum(gaps) / len(gaps), 2),
+        'min_gap': round(min(gaps), 2),
+        'keep': round(keep, 2),
+        'unit': '챔버' if has_ch else '장비',
+    }
+
+
 def _periodic(series, day, base_avg, base_std):
     """
     지금 값이 '주기적으로 반복되는 패턴' 인지 본다.
@@ -532,7 +623,8 @@ def _periodic(series, day, base_avg, base_std):
     }
 
 
-def _no_data(lot_cd, param, ptype, why):
+def _no_data(lot_cd, param, ptype, why, status='데이터없음',
+             severity=0, checks=None, last_ts=None):
     """
     판정할 데이터가 없을 때 돌려주는 행.
 
@@ -551,8 +643,9 @@ def _no_data(lot_cd, param, ptype, why):
                       'max': None, 'med': None, 'p95': None},
         'low_n': True, 'sigma': None, 'out_cnt': 0,
         'spread': None, 'drift': None, 'eqp': [], 'series': [],
-        'checks': [], 'status': '데이터없음', 'reasons': [why],
-        'severity': 0,
+        'checks': checks or [], 'status': status, 'reasons': [why],
+        'last_ts': str(last_ts)[:19] if last_ts else None,
+        'severity': severity,
     }
 
 
@@ -617,10 +710,26 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
               # ★ 시각까지 — '어제 07시부터 오늘 07시까지' 임을 알 수 있게
               'ts_from': str(ts_from)[:19], 'ts_to': str(ts_to)[:19]}
     if not d_n:
+        # ★ Defect 은 '검사가 없다' 자체가 신호다.
+        #   계측값은 그날 그 항목을 안 잴 수 있지만, Defect 검사가
+        #   며칠째 멈춰 있으면 결함이 있어도 못 보고 지나간다.
+        #   그 상태를 정상처럼 두면 안 된다.
+        if ptype == 'DEFECT':
+            age_d = (datetime.now() - last_ts).total_seconds() / 86400
+            if age_d >= DEF_NO_DATA_DAYS:
+                return _no_data(
+                    lot_cd, param, ptype,
+                    f'Defect 검사 데이터가 {age_d:.1f}일째 없습니다 '
+                    f'(마지막 {str(last_ts)[:16]}) — 검사가 멈췄는지 '
+                    f'확인하세요. 결함이 있어도 드러나지 않습니다',
+                    status='이상', severity=250,
+                    checks=['N-검사없음'], last_ts=last_ts)
+
         return _no_data(lot_cd, param, ptype,
                         f'{span_label}({str(ts_from)[:16]} ~ '
                         f'{str(ts_to)[:16]}) 에 값이 없음 — '
-                        f'해당 기간 측정이 없었을 수 있음')
+                        f'해당 기간 측정이 없었을 수 있음',
+                        last_ts=last_ts)
 
     r = {
         'oper_id': None, 'lot_cd': lot_cd, 'param': param, 'ptype': ptype,
@@ -793,6 +902,25 @@ def _check_param(cur, table, lot_cd, param, ptype, has_eqp, has_ch):
                                f"({hot[0]['sigma']:+.1f}σ, {hot[0]['n']}장) "
                                f"— 다른 설비는 기준 근처")
                 checks.append('E-단독이탈')
+
+    # ── 장비 간 지속 차이 ────────────────────────────────
+    #   ★ 스펙 안이어도 특정 장비만 꾸준히 높거나 낮으면 신호다.
+    #     전체 평균으로는 상쇄되어 안 보인다.
+    try:
+        gap = _eqp_persistent_gap(cur, table, lot_cd, param, ts_to,
+                                  has_eqp, has_ch, b_std)
+        if gap:
+            r['eqp_gap'] = gap
+            level = max(level, 1)
+            reasons.append(
+                f"{gap['days']}일 연속 {gap['unit']} 간 차이 "
+                f"평균 {gap['gap_sigma']}σ "
+                f"({gap['high']} 높음 / {gap['low']} 낮음) — "
+                f"기준 범위 안이지만 한쪽으로 치우쳐 있습니다")
+            checks.append('G-지속차이')
+    except Exception as e:
+        print(f'[monitor] {param} 장비 차이 판정 생략: '
+              f'{e.__class__.__name__}: {e}')
 
     if r['low_n']:
         reasons.append(f'{span_label} 웨이퍼 {d_n}장 — 표본이 적어 신뢰도 낮음')
@@ -1138,7 +1266,10 @@ def wafer_detail(oper_id, lot_cd, param, days=30):
         if param.upper() not in cols_up:
             return {'points': []}
 
-        extra = [c for c in ('EQP_ID', 'EQP_CH_ID', 'LOT_ID', 'WF_ID', 'IDLE')
+        # ★ EQP_MODEL 도 함께 — 차트 범례를 모델에 따라 다르게 잡는다
+        #   (OPTA 는 장비 단위, 그 외는 챔버 단위)
+        extra = [c for c in ('EQP_ID', 'EQP_CH_ID', 'EQP_MODEL',
+                             'LOT_ID', 'WF_ID', 'IDLE')
                  if c in cols_up]
         sel = "".join(f', "{c}"' for c in extra)
         cur.execute(f'''
