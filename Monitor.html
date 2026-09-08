@@ -211,6 +211,8 @@ tr.more td { text-align: center; padding: 10px; background: var(--bg-2); }
 
   <div class="run-bar">
     <button class="btn-run" id="btn-run" onclick="startCheck()">점검 시작</button>
+    <button class="btn-clear" id="btn-stop" onclick="stopCheck()"
+            style="display:none;">점검 중단</button>
     <button class="btn-clear" id="btn-clear" onclick="clearResults()">결과 초기화</button>
     <button class="btn-clear" id="btn-diag" onclick="runDiag()">상태 진단</button>
     <span style="width:1px;height:20px;background:var(--bd);"></span>
@@ -392,6 +394,24 @@ async function startCheck() {
    ★ 페이지를 새로 열어도 돌고 있으면 이어서 보여 준다. */
 let pollTimer = null;
 
+/* 돌고 있는 점검을 멈춘다.
+   ★ 서버가 재시작되거나 스레드가 죽으면 '실행중' 이 그대로 남아
+     다시 시작할 수 없다. 그때 이걸로 푼다.
+     (진행이 20분 넘게 없으면 자동으로도 풀린다) */
+async function stopCheck() {
+  if (!confirm('진행 중인 점검을 중단할까요?')) return;
+  const j = await postJSON(API_MON_JOBSTOP, {});
+  const info = document.getElementById('run-info');
+  if (j && j.ok) {
+    info.textContent = j.cancelled
+      ? '점검을 중단했습니다. 다시 시작할 수 있습니다.'
+      : '중단할 점검이 없습니다.';
+  } else {
+    info.textContent = (j && j.error) || '중단 실패';
+  }
+  pollCheck();
+}
+
 async function pollCheck() {
   clearTimeout(pollTimer);
 
@@ -403,14 +423,27 @@ async function pollCheck() {
   const j = await postJSON(API_MON_JOBSTAT, {});
   if (!j || !j.ok) return;
 
+  const stop = document.getElementById('btn-stop');
+
   if (j.running) {
     box.classList.add('on');
     btn.disabled = true; btn.textContent = '점검중...';
+    if (stop) stop.style.display = '';
     const pct = j.total ? (j.done / j.total * 100) : 0;
     bar.style.width = pct.toFixed(1) + '%';
+    // ★ 마지막 진행 시각을 함께 보여 준다 — 멈춘 건지 오래 걸리는 건지
+    //   구분이 안 되면 무작정 기다리게 된다.
+    const since = j.beat_at || j.started_at || '';
+    let stale = '';
+    if (since) {
+      const m = Math.round((Date.now() - new Date(since.replace(' ', 'T')))
+                           / 60000);
+      if (m >= 3) stale = ` · ${m}분째 진행 없음`;
+    }
     info.textContent =
       `${j.now_label || ''} 점검중 (${j.done}/${j.total})`
-      + (j.started_by ? ` · ${j.started_by} 시작` : '');
+      + (j.started_by ? ` · ${j.started_by} 시작` : '')
+      + stale;
     pollTimer = setTimeout(pollCheck, 3000);
     return;
   }
@@ -418,6 +451,7 @@ async function pollCheck() {
   // 끝났다 — 결과를 불러온다
   bar.style.width = '100%';
   btn.disabled = false; btn.textContent = '다시 점검';
+  if (stop) stop.style.display = 'none';
   setTimeout(() => box.classList.remove('on'), 600);
 
   if ((j.notes || []).length) console.info('[monitor]', j.notes.join(' / '));
