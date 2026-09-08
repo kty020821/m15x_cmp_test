@@ -33,8 +33,9 @@ from datetime import date, datetime, timedelta
 from django.db import connections
 from psycopg2.extras import execute_values
 
-# ★ 사내 모듈 — 기존 코드에서 쓰던 import 문을 그대로 넣을 것
-# from ??? import lakes
+# ★ 사내 모듈
+#   lakes 는 get_lake() 안에서 import 한다 — 임포트만으로도 무거운
+#   초기화가 일어나므로, 서버가 뜰 때가 아니라 실제로 쓸 때 부른다.
 # from ??? import goodDocsGetData
 
 
@@ -82,6 +83,8 @@ def _idle_dist(sr):
 # ══════════════════════════════════════════════════════════
 def get_lake():
     """Lake(StarRocks) 연결. 공정 여러 개 돌 때 한 번만 만들어 재사용."""
+    import lakes
+
     lake = lakes.LakeHouse(real_user_id='')
     lake.ensure_running(cluster_type='starrocks')
     return lake
@@ -600,11 +603,6 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
             dt_start = pd.to_datetime(dt_s).strftime("%Y-%m-%d 00:00:00")
             dt_end   = pd.to_datetime(dt_e).strftime("%Y-%m-%d 23:59:59")
 
-            # SUBSTRING 길이는 lot_code 자릿수에 맞춘다.
-            #   길이를 고정하면(2 또는 3) 다른 자릿수를 쓰는 공정에서
-            #   절대 일치하지 않아 DCP 조인이 통째로 실패하고,
-            #   recipe 필터가 걸린 공정만 조용히 0행이 된다.
-            lot_len = len(str(lot_code))
             # ── 사전공정 조인(b) — 필요할 때만 만든다 ──────
             #   m10/m11/m14/m15 UNION 이 이 쿼리에서 가장 무겁다.
             if use_pre:
@@ -619,12 +617,12 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
           and operation_id like '{pre_oper_r1}%'
           and resource_type = 'INDEPENDENT'
         group by lot_id, slot_id, wf_id, eqp_id, module_id"""
-                    for u in units) + "\n    ) b on a.lot_id = b.lot_id and a.wf_id = b.wf_id\n"
+                    for u in units) + "\n    ) b on a.lot_id = b.lot_id and a.wf_id = b.slot_id\n"
             else:
                 # 조인을 안 하므로 컬럼은 NULL 로 채운다 (뒤 단계 구조 유지)
                 pre_cols = """CAST(NULL as VARCHAR) as pre_eqp_id,
            CAST(NULL as VARCHAR) as pre_eqp_ch,
-           CAST(NULL as TIMESTAMP) as pre_oper_time,"""
+           CAST(NULL as DATETIME) as pre_oper_time,"""
                 pre_join = ""
 
             # rework 전(ASC) / 후(DESC) — SRC_PICK 으로 정한다
@@ -646,7 +644,7 @@ WITH src AS (
             select lot_id, crt_tm, eqp_recipe_id,
                    rank() over (partition by lot_id order by crt_tm asc) recipe_rank
             from lake_catalog.dcp.dcp_dcp_dcoldata_inf_{fab}
-            where ( SUBSTRING(lot_id, 2, {lot_len}) = '{lot_code}'
+            where ( SUBSTRING(lot_id, 1, 3) = '{lot_code}'
                  or SUBSTRING(lot_id, 2, 2) = 'XC'
                  or SUBSTRING(lot_id, 1, 1) = 'S' )
               and oper_id = '{q_oper}'
