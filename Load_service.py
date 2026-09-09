@@ -57,6 +57,11 @@ LOAD_WORKERS = 4
 #     그대로 두면 계속 그 자리에 머무므로, 기본 기간으로 다시 받는다.
 INC_MAX_AGE_H = 72
 
+# 워커 안의 정기 적재를 쓸지.
+#   ★ 사내 스케줄러로 돌리고 있으면 꺼 둔다 — 둘 다 켜면 중복이다.
+#     켜면 워커가 예약 시각을 확인해 전 공정을 큐에 넣는다.
+ENABLE_INTERNAL_SCHEDULE = False
+
 # '실행중' 인데 이 시간이 지나면 멈춘 것으로 본다
 STALE_MINUTES = 120
 
@@ -584,6 +589,13 @@ def enqueue(oper_ids, days=DEFAULT_DAYS, user='', date_from=None,
                  tag, str(user)[:100], now])
             queued.append(oper_id)
 
+    # ★ 누가 무엇을 넣었는지 남긴다 — '하나만 눌렀는데 전체가 돈다' 를
+    #   추적하려면 큐에 들어간 경로가 보여야 한다.
+    if queued:
+        print(f'[load] 큐 등록 {len(queued)}개 ({source} · {user or "?"}): '
+              f'{", ".join(queued[:8])}'
+              f'{" ..." if len(queued) > 8 else ""}')
+
     ensure_worker()
     return {'ok': True, 'queued': queued, 'skipped': skipped,
             'days': days, 'incremental': bool(incremental)}
@@ -627,9 +639,16 @@ def _worker_loop():
     while True:
         try:
             reset_stale()                 # 굳은 잠금 정리
-            due = _due_schedule()         # 예약된 정기 적재
-            if due:
-                _enqueue_schedule(due)
+
+            # ★ 워커 안의 정기 적재는 기본으로 꺼 둔다.
+            #   사내 스케줄러(run_analysis_load.py)로 돌리고 있어
+            #   둘 다 켜면 같은 공정을 두 번 받는다.
+            #   게다가 화면에서 예약 UI 를 없앤 뒤로는 끌 방법이 없어,
+            #   버튼 하나 눌렀을 뿐인데 전 공정이 따라 도는 일이 있었다.
+            if ENABLE_INTERNAL_SCHEDULE:
+                due = _due_schedule()
+                if due:
+                    _enqueue_schedule(due)
 
             job = _take_next()
             if not job:
