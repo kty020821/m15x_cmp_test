@@ -94,15 +94,20 @@
 .ap-wrap { border: 1px solid var(--bd); border-radius: 14px;
   overflow: auto; max-height: 62vh; background: var(--bg-3); }
 table.ap { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+/* ★ 전부 가운데 정렬 — 값이 짧은 코드·숫자라 왼쪽 정렬이면
+   열 사이가 벌어져 어느 값이 어느 열인지 눈이 헤맨다. */
 table.ap thead th { position: sticky; top: 0; z-index: 2;
   background: var(--bg-2); font-size: 11px; font-weight: 800;
-  color: var(--tx-1); text-align: left; padding: 9px 12px;
+  color: var(--tx-1); text-align: center; padding: 9px 12px;
   border-bottom: 2px solid var(--bd); white-space: nowrap; }
 table.ap td { padding: 7px 12px; border-bottom: 1px solid rgba(128,128,128,.1);
-  vertical-align: top; }
+  vertical-align: middle; text-align: center; }
 table.ap tbody tr:hover td { background: rgba(128,128,128,.05); }
 
 td.item { font-weight: 700; color: var(--tx-1); }
+td.para { font-weight: 700; color: var(--tx-1);
+  font-family: var(--ap-mono); font-size: 11.5px;
+  word-break: break-all; }
 td.val { font-family: var(--ap-mono); font-size: 11.5px;
   word-break: break-all; max-width: 260px; }
 td.val.gone { color: var(--tx-muted); font-style: italic; }
@@ -117,8 +122,6 @@ tr.r-only { background: rgba(245,158,11,.05); }
 .tag.t-same { color: var(--tx-muted); background: rgba(128,128,128,.14); }
 
 td.area { font-size: 11px; color: var(--tx-muted); white-space: nowrap; }
-td.key  { font-size: 11px; color: var(--tx-2); font-family: var(--ap-mono);
-  max-width: 220px; word-break: break-all; }
 
 .none-row { text-align: center; color: var(--tx-muted); padding: 34px;
   font-size: 13px; }
@@ -202,11 +205,11 @@ td.key  { font-size: 11px; color: var(--tx-2); font-family: var(--ap-mono);
     <div class="ap-wrap">
       <table class="ap">
         <thead><tr>
-          <th style="width:96px;">영역</th>
-          <th style="width:190px;">설정 대상</th>
-          <th style="width:200px;">항목</th>
-          <th>기준 값</th>
-          <th>대상 값</th>
+          <th style="width:100px;">구분</th>
+          <th style="width:200px;">설정 대상</th>
+          <th style="width:180px;">항목</th>
+          <th id="th-ref">기준</th>
+          <th id="th-tgt">대상</th>
           <th style="width:80px;">판정</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
@@ -296,6 +299,10 @@ async function runCompare() {
       return `<option value="${esc(a)}">${esc(r ? r.area_name : a)}</option>`;
     }).join('');
 
+  // ★ 열 제목을 장비 호기로 — '기준/대상' 보다 어느 장비인지가 중요하다
+  document.getElementById('th-ref').textContent = j.ref_label || '기준';
+  document.getElementById('th-tgt').textContent = j.tgt_label || '대상';
+
   const s = j.summary || {};
   msg(`기준 ${s.ref_rows || 0}행 · 대상 ${s.tgt_rows || 0}행 조회`
       + (j.pair_ch ? ' · 챔버 짝 묶음' : ''));
@@ -352,7 +359,7 @@ function render() {
     if (!statusFilter && !showSame && r.status === 'same') return false;
     if (fa && r.area !== fa) return false;
     if (fx) {
-      const hay = `${r.item} ${r.key} ${r.ref ?? ''} ${r.tgt ?? ''}`
+      const hay = `${r.item} ${r.para} ${r.ref ?? ''} ${r.tgt ?? ''}`
                   .toUpperCase();
       if (!hay.includes(fx)) return false;
     }
@@ -371,12 +378,7 @@ function render() {
     return `
     <tr class="${rowCls}">
       <td class="area">${esc(r.area_name)}</td>
-      <td class="key">${
-        r.ref_key && r.tgt_key && r.ref_key !== r.tgt_key
-          ? `${esc(r.ref_key)}<br><span style="color:var(--tx-muted);"
-             >↕ ${esc(r.tgt_key)}</span>`
-          : esc(r.ref_key || r.tgt_key || r.key)
-      }</td>
+      <td class="para">${esc(r.para)}</td>
       <td class="item">${esc(r.item)}</td>
       <td class="val ${r.ref == null ? 'gone' : ''}">${cell(r.ref)}</td>
       <td class="val ${r.tgt == null ? 'gone' : ''}">${cell(r.tgt)}</td>
@@ -399,9 +401,11 @@ function copyDiff() {
   const rows = (data.rows || []).filter(r => r.status !== 'same');
   if (!rows.length) { msg('다른 항목이 없습니다'); return; }
 
-  const head = ['영역', '대상', '항목', '기준', '대상값', '판정'].join('\t');
+  const head = ['구분', '설정 대상', '항목',
+                data.ref_label || '기준', data.tgt_label || '대상',
+                '판정'].join('\t');
   const body = rows.map(r => [
-    r.area_name, r.key, r.item,
+    r.area_name, r.para, r.item,
     r.ref ?? '', r.tgt ?? '', r.status,
   ].join('\t')).join('\n');
 
