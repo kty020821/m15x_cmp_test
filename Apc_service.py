@@ -20,6 +20,7 @@ APC 설정 비교
 ════════════════════════════════════════════════════════════
 """
 import json
+import re
 
 import pandas as pd
 import requests
@@ -65,7 +66,7 @@ def check(fab='m15x', eqp_id='*', recipe_id='*'):
         return
 
     api_name = f'{str(fab).lower()}-cmp-apc-modeling-table1'
-    url = f"{API_URL}/{c['project']}/{api_name}/page"
+    url = f"{API_URL}/{c['project']}/{api_name}"
     print(f'요청 주소   : {url}')
 
     try:
@@ -100,7 +101,7 @@ def fetch(fab, eqp_id, recipe_id):
         raise ValueError('FAB 을 입력하세요')
 
     api_name = f'{fab}-cmp-apc-modeling-table1'
-    url = f"{API_URL}/{c['project']}/{api_name}/page"
+    url = f"{API_URL}/{c['project']}/{api_name}"
     headers = {'Content-Type': 'application/json', 'h-api-token': c['key']}
 
     # 빈 값은 * (전체)로 — API 의 와일드카드
@@ -109,60 +110,99 @@ def fetch(fab, eqp_id, recipe_id):
     bind = (f'EQP_ID={eq};PROCESS_ID=*;OPERATION_ID=*;'
             f'RECIPE_ID={rc};%')
 
-    pages, page_no = [], 1
-    while True:
-        body = {'pageNumber': page_no, 'pageSize': PAGE_SIZE,
-                'sortBy': 'RAWID', 'sortOrder': 'ASC',
-                'bindParams': [bind]}
+    body = {'bindParams': [bind]}
 
-        # ★ 실패하면 왜 실패했는지 남긴다.
-        #   '응답 오류' 만으로는 주소가 틀린 건지, 키가 틀린 건지,
-        #   조건이 안 맞는 건지 알 수 없다.
-        res, last = None, ''
-        for i in range(RETRY):
-            try:
-                res = requests.post(url, headers=headers,
-                                    data=json.dumps(body), timeout=TIMEOUT)
-                if res.status_code == 200:
-                    break
-                last = (f'HTTP {res.status_code} · '
-                        f'{(res.text or "")[:300]}')
-                print(f'[apc] 시도 {i + 1}/{RETRY} — {last}')
-            except Exception as e:
-                last = f'{e.__class__.__name__}: {e}'
-                print(f'[apc] 시도 {i + 1}/{RETRY} — {last}')
-            res = None
-
-        if res is None:
-            hint = ''
-            if 'HTTP 401' in last or 'HTTP 403' in last:
-                hint = ' — API 키(APC_API_KEY)를 확인하세요'
-            elif 'HTTP 404' in last:
-                hint = (f' — 주소나 이름이 틀렸을 수 있습니다 '
-                        f'(api_name: {api_name})')
-            elif 'Timeout' in last or 'Connection' in last:
-                hint = ' — 서버에서 dp.skhynix.com 으로 나갈 수 있는지 확인하세요'
-            raise RuntimeError(f'APC API 응답 오류: {last}{hint}\n'
-                               f'  요청: {url}\n'
-                               f'  조건: {bind}')
-
+    # ★ 실패하면 왜 실패했는지 남긴다.
+    #   '응답 오류' 만으로는 주소가 틀린 건지, 키가 틀린 건지,
+    #   조건이 안 맞는 건지 알 수 없다.
+    res, last = None, ''
+    for i in range(RETRY):
         try:
-            content = json.loads(res.text).get('Content') or []
+            res = requests.post(url, headers=headers,
+                                data=json.dumps(body), timeout=TIMEOUT)
+            if res.status_code == 200:
+                break
+            last = (f'HTTP {res.status_code} · '
+                    f'{(res.text or "")[:300]}')
+            print(f'[apc] 시도 {i + 1}/{RETRY} — {last}')
         except Exception as e:
-            raise RuntimeError(f'APC 응답을 해석하지 못했습니다: {e}')
+            last = f'{e.__class__.__name__}: {e}'
+            print(f'[apc] 시도 {i + 1}/{RETRY} — {last}')
+        res = None
 
-        if not content:
-            break
-        pages.append(pd.DataFrame(content))
-        page_no += 1
+    if res is None:
+        hint = ''
+        if 'HTTP 401' in last or 'HTTP 403' in last:
+            hint = ' — API 키(APC_API_KEY)를 확인하세요'
+        elif 'HTTP 404' in last:
+            hint = (f' — 주소나 이름이 틀렸을 수 있습니다 '
+                    f'(api_name: {api_name})')
+        elif 'Timeout' in last or 'Connection' in last:
+            hint = ' — 서버에서 dp.skhynix.com 으로 나갈 수 있는지 확인하세요'
+        raise RuntimeError(f'APC API 응답 오류: {last}{hint}\n'
+                           f'  요청: {url}\n'
+                           f'  조건: {bind}')
 
-        # 마지막 페이지면 그만 (한 페이지 분량이 안 될 때)
-        if len(content) < PAGE_SIZE:
-            break
+    try:
+        content = json.loads(res.text).get('Content') or []
+    except Exception as e:
+        raise RuntimeError(f'APC 응답을 해석하지 못했습니다: {e}')
 
-    if not pages:
+    if not content:
         return pd.DataFrame()
-    return pd.concat(pages, ignore_index=True)
+    return pd.DataFrame(content)
+
+
+# ── 챔버 짝 ──────────────────────────────────────────────
+#   같은 자리를 뜻하는 챔버끼리 묶어 본다.
+#   ★ 왼쪽/오른쪽(또는 AB/CD)으로 나뉜 장비는 챔버 이름만 다르고
+#     같은 위치를 가리킨다. 이름이 다르다고 '다름' 으로 잡으면
+#     실제 차이가 그 속에 묻힌다.
+#   ★ 단, 레시피에 _AB / _CD / _L / _R 이 붙은 경우에만 적용한다.
+#     그 표기가 없으면 챔버 이름이 진짜로 다른 설정을 뜻한다.
+CH_PAIRS = [
+    ('PA', 'PC'),
+    ('PB', 'PD'),
+    ('PL1', 'PR1'),
+    ('PL2', 'PR2'),
+    ('PL', 'PR'),
+    ('P1', 'P2'),
+]
+
+# 이 꼬리표가 레시피에 있을 때만 짝을 묶는다
+CH_SUFFIX = ('_AB', '_CD', '_L', '_R')
+
+# 짝 → 대표 이름 (긴 것부터 봐야 PL1 이 PL 로 잘못 잡히지 않는다)
+_CH_MAP = {}
+for _a, _b in CH_PAIRS:
+    _CH_MAP[_a] = f'{_a}/{_b}'
+    _CH_MAP[_b] = f'{_a}/{_b}'
+_CH_KEYS = sorted(_CH_MAP, key=len, reverse=True)
+
+
+def has_ch_suffix(recipe):
+    """레시피에 _AB / _CD / _L / _R 이 붙어 있나"""
+    r = str(recipe or '').strip().upper()
+    return any(r.endswith(sfx) or f'{sfx}_' in r or f'{sfx}.' in r
+               for sfx in CH_SUFFIX)
+
+
+def normalize_ch(text, enabled):
+    """
+    챔버 이름을 대표 이름으로 바꾼다 (PA → PA/PC).
+
+    ★ enabled 가 False 면 그대로 둔다 — 꼬리표가 없는 레시피에서는
+      챔버 이름이 진짜 다른 설정을 뜻한다.
+    ★ 단어 경계로만 바꾼다. 'PART' 안의 'PA' 까지 바꾸면 안 된다.
+    ★ 한 번에 바꾼다 — 차례로 치환하면 'PA' → 'PA/PC' 로 바뀐 결과에
+      다시 'PA' 가 들어 있어 또 걸린다.
+    """
+    if not enabled:
+        return text
+
+    pat = '|'.join(re.escape(k) for k in _CH_KEYS)
+    return re.sub(rf'(?<![0-9A-Za-z])({pat})(?![0-9A-Za-z])',
+                  lambda m: _CH_MAP[m.group(1)], str(text or ''))
 
 
 def _split_pairs(text):
@@ -184,7 +224,7 @@ def _split_pairs(text):
     return out
 
 
-def to_items(df):
+def to_items(df, pair_ch=True):
     """
     조회 결과를 '항목 하나 = 한 줄' 로 펼친다.
 
@@ -192,6 +232,10 @@ def to_items(df):
       area  SETUP_KEY_RAWID (434/437)
       key   그 설정이 붙은 대상 (EQP_ID/RECIPE_ID 조합)
       item  설정 항목 이름
+
+    ★ pair_ch 가 True 면 챔버 짝을 대표 이름으로 묶는다 (PA → PA/PC).
+      레시피에 _AB/_CD/_L/_R 이 붙은 행에만 적용한다 — 그 표기가
+      없으면 챔버 이름이 진짜 다른 설정을 뜻하기 때문이다.
     """
     out = {}
     if df is None or df.empty:
@@ -209,20 +253,26 @@ def to_items(df):
         area = str(r[c_area]) if c_area else ''
         kv = _split_pairs(r[c_key])
 
+        # 이 행에 챔버 짝을 적용할지 — 레시피 표기로 판단한다
+        pair = pair_ch and has_ch_suffix(kv.get('RECIPE_ID', ''))
+
         # 이 설정이 어느 대상의 것인지 — 사람이 읽을 수 있게 압축
-        key = ' · '.join(f'{k}={v}' for k, v in kv.items()
-                         if v and v != '*')
+        key = ' · '.join(f'{k}={normalize_ch(v, pair)}'
+                         for k, v in kv.items() if v and v != '*')
 
         for item, value in _split_pairs(r[c_val]).items():
-            out[(area, key, item)] = value
+            # 항목 이름과 값 양쪽에 챔버가 들어갈 수 있다
+            out[(area, key, normalize_ch(item, pair))] = \
+                normalize_ch(value, pair)
     return out
 
 
-def compare(ref, tgt):
+def compare(ref, tgt, pair_ch=True):
     """
     두 대상을 항목별로 맞춰 본다.
 
       ref, tgt  {'fab','eqp_id','recipe_id'}
+      pair_ch   챔버 짝을 묶어 볼지 (PA↔PC 등)
 
     반환: {'rows': [...], 'summary': {...}, 'ref': ..., 'tgt': ...}
       rows 의 status 는 넷 중 하나
@@ -234,12 +284,27 @@ def compare(ref, tgt):
     df_r = fetch(ref.get('fab'), ref.get('eqp_id'), ref.get('recipe_id'))
     df_t = fetch(tgt.get('fab'), tgt.get('eqp_id'), tgt.get('recipe_id'))
 
-    a, b = to_items(df_r), to_items(df_t)
+    a, b = to_items(df_r, pair_ch), to_items(df_t, pair_ch)
+
+    # ★ 서로 다른 장비·레시피를 비교하는 것이므로 key(EQP_ID·RECIPE_ID)는
+    #   당연히 다르다. 그걸 비교 기준에 넣으면 모든 항목이
+    #   '한쪽에만 있음' 으로 잡혀 아무것도 맞춰지지 않는다.
+    #   맞추는 기준은 (영역, 항목) 이고, key 는 참고로만 남긴다.
+    def _fold(d):
+        out = {}
+        for (area, key, item), v in d.items():
+            out[(area, item)] = {'value': v, 'key': key}
+        return out
+
+    fa, fb = _fold(a), _fold(b)
 
     rows = []
-    for k in sorted(set(a) | set(b)):
-        area, key, item = k
-        va, vb = a.get(k), b.get(k)
+    for k in sorted(set(fa) | set(fb)):
+        area, item = k
+        ra, rb = fa.get(k), fb.get(k)
+        va = ra['value'] if ra else None
+        vb = rb['value'] if rb else None
+        key = (ra or rb or {}).get('key', '')
 
         if va is None:
             status = 'tgt_only'
@@ -254,6 +319,9 @@ def compare(ref, tgt):
             'area': area, 'area_name': AREA_NAME.get(area, area or '(미지정)'),
             'key': key, 'item': item,
             'ref': va, 'tgt': vb, 'status': status,
+            # 어느 대상의 설정인지 (기준·대상이 다를 수 있다)
+            'ref_key': (ra or {}).get('key', ''),
+            'tgt_key': (rb or {}).get('key', ''),
         })
 
     cnt = {'same': 0, 'diff': 0, 'ref_only': 0, 'tgt_only': 0}
@@ -266,4 +334,5 @@ def compare(ref, tgt):
                     'ref_rows': len(df_r), 'tgt_rows': len(df_t)},
         'ref': dict(ref), 'tgt': dict(tgt),
         'areas': sorted({r['area'] for r in rows}),
+        'pair_ch': bool(pair_ch),
     }
