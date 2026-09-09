@@ -1259,7 +1259,9 @@ def pivot_steps(df, kind):
             return f'{pre}_{st}_{pm}' if st else f'{pre}_{pm}'
 
     d = df.copy()
-    d['__col'] = [colname(kind, (sd or si), p)
+    # ★ Defect 은 STEP_ID 로만 컬럼을 만든다 (config_service 와 같은 규칙).
+    #   스텝 이름은 사람이 적는 값이라 바뀌면 컬럼이 따라 바뀐다.
+    d['__col'] = [colname(kind, (si if kind == 'def' else (sd or si)), p)
                   for sd, si, p in zip(d.get('step_desc', ''),
                                        d['step_id'], d['param'])]
     d = d[d['__col'] != '']
@@ -2274,16 +2276,23 @@ def save_analysis_df(df, oper_id, date_from=None):
         #   병합 접미사는 이제 안 생기지만, 이미 테이블에 만들어진 것은
         #   ALTER ADD 만으로는 사라지지 않아 값이 빈 채로 계속 보인다.
         #   이번 조회 결과에 없는 접미사 컬럼만 지운다.
+        # ★ 계측 컬럼(DEF_·RESP_)도 이름 규칙이 바뀌면 옛 이름이 남는다.
+        #   Defect 컬럼을 STEP_ID 기준으로 바꾸면서 DEF_AEI_MASC 같은
+        #   옛 이름이 값 없이 남게 되므로, 이번 결과에 없는 것은 지운다.
+        #   ★ 본공정 파라미터는 건드리지 않는다 — 조회에 실패한 파라미터가
+        #     사라지면 그동안 쌓인 데이터를 잃는다.
+        want = set(df.columns)
         stale = [c for c in exists
-                 if (c.upper().endswith('_X') or c.upper().endswith('_Y'))
-                 and c not in df.columns]
+                 if c not in want
+                 and (c.upper().endswith('_X') or c.upper().endswith('_Y')
+                      or c.upper().startswith(('DEF_', 'RESP_')))]
         for c in stale:
             try:
                 cur.execute(f'ALTER TABLE {table} DROP COLUMN "{c}"')
             except Exception as e:
                 print(f'  [{oper_id}] {c} 삭제 실패: {e.__class__.__name__}')
         if stale:
-            print(f'  [{oper_id}] 옛 병합 접미사 컬럼 {len(stale)}개 제거: '
+            print(f'  [{oper_id}] 더 이상 안 쓰는 컬럼 {len(stale)}개 제거: '
                   f'{", ".join(stale[:8])}{" ..." if len(stale) > 8 else ""}')
             for c in stale:
                 exists.pop(c, None)
