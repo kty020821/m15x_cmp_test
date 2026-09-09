@@ -250,18 +250,37 @@ def _split_pairs(text):
     return out
 
 
+# 비교 단위가 되는 항목 — SETUP_DATA_VALUE 안에 들어 있다
+PARA_KEY = 'RECIPE_PARA'
+
+
+def _is_rawid(name):
+    """
+    RAWID 계열 항목인가 — 비교에서 뺀다.
+
+    ★ RAWID 는 시스템이 매기는 일련번호라 장비마다 당연히 다르다.
+      비교하면 전부 '다름' 으로 잡혀 진짜 차이가 묻힌다.
+    ★ 단, SETUP_KEY_RAWID(434/437)는 Modeling/Condition 구분이라
+      따로 쓰므로 여기서 걸러지든 말든 상관없다 —
+      그건 컬럼에서 직접 읽는다.
+    """
+    return 'RAWID' in str(name or '').upper()
+
+
 def to_items(df, pair_ch=True):
     """
     조회 결과를 '항목 하나 = 한 줄' 로 펼친다.
 
-    반환: {(area, key, item): value}
-      area  SETUP_KEY_RAWID (434/437)
-      key   그 설정이 붙은 대상 (EQP_ID/RECIPE_ID 조합)
+    반환: {(area, para, item): value}
+      area  SETUP_KEY_RAWID (434 Modeling / 437 Condition)
+      para  RECIPE_PARA — 어느 파라미터의 설정인가
       item  설정 항목 이름
 
-    ★ pair_ch 가 True 면 챔버 짝을 대표 이름으로 묶는다 (PA → PA/PC).
-      레시피에 _AB/_CD/_L/_R 이 붙은 행에만 적용한다 — 그 표기가
-      없으면 챔버 이름이 진짜 다른 설정을 뜻하기 때문이다.
+    ★ SETUP_DATA_VALUE 하나에 RECIPE_PARA 와 그 설정들이 함께 있다.
+      RECIPE_PARA 를 꺼내 비교 단위로 삼고, 나머지를 항목으로 펼친다.
+    ★ EQP_ID·RECIPE_ID 는 두 대상이 당연히 다르므로 기준에 안 넣는다.
+      기준에 넣으면 아무것도 맞춰지지 않는다.
+    ★ RAWID 계열은 뺀다 — 시스템 일련번호라 비교할 의미가 없다.
     """
     out = {}
     if df is None or df.empty:
@@ -272,27 +291,32 @@ def to_items(df, pair_ch=True):
     c_val = cols.get('SETUP_DATA_VALUE')
     c_area = cols.get('SETUP_KEY_RAWID')
 
-    if not c_key or not c_val:
+    if not c_val:
         # ★ 컬럼 이름이 다르면 조용히 빈 결과가 된다 —
         #   '조회는 됐는데 아무것도 안 나온다' 가 가장 찾기 어렵다.
-        print(f'[apc] SETUP_KEY_VALUE / SETUP_DATA_VALUE 컬럼이 없습니다. '
+        print(f'[apc] SETUP_DATA_VALUE 컬럼이 없습니다. '
               f'실제 컬럼: {", ".join(map(str, df.columns))}')
         return out
 
     for _, r in df.iterrows():
         area = str(r[c_area]) if c_area else ''
-        kv = _split_pairs(r[c_key])
+        dv = _split_pairs(r[c_val])
 
         # 이 행에 챔버 짝을 적용할지 — 레시피 표기로 판단한다
-        pair = pair_ch and has_ch_suffix(kv.get('RECIPE_ID', ''))
+        recipe = ''
+        if c_key:
+            recipe = _split_pairs(r[c_key]).get('RECIPE_ID', '')
+        pair = pair_ch and has_ch_suffix(recipe or dv.get('RECIPE_ID', ''))
 
-        # 이 설정이 어느 대상의 것인지 — 사람이 읽을 수 있게 압축
-        key = ' · '.join(f'{k}={normalize_ch(v, pair)}'
-                         for k, v in kv.items() if v and v != '*')
+        para = dv.get(PARA_KEY, '')
+        if not para:
+            continue                     # 비교 단위가 없으면 건너뛴다
+        para = normalize_ch(para, pair)
 
-        for item, value in _split_pairs(r[c_val]).items():
-            # 항목 이름과 값 양쪽에 챔버가 들어갈 수 있다
-            out[(area, key, normalize_ch(item, pair))] = \
+        for item, value in dv.items():
+            if item == PARA_KEY or _is_rawid(item):
+                continue
+            out[(area, para, normalize_ch(item, pair))] = \
                 normalize_ch(value, pair)
     return out
 
@@ -316,25 +340,10 @@ def compare(ref, tgt, pair_ch=True):
 
     a, b = to_items(df_r, pair_ch), to_items(df_t, pair_ch)
 
-    # ★ 서로 다른 장비·레시피를 비교하는 것이므로 key(EQP_ID·RECIPE_ID)는
-    #   당연히 다르다. 그걸 비교 기준에 넣으면 모든 항목이
-    #   '한쪽에만 있음' 으로 잡혀 아무것도 맞춰지지 않는다.
-    #   맞추는 기준은 (영역, 항목) 이고, key 는 참고로만 남긴다.
-    def _fold(d):
-        out = {}
-        for (area, key, item), v in d.items():
-            out[(area, item)] = {'value': v, 'key': key}
-        return out
-
-    fa, fb = _fold(a), _fold(b)
-
     rows = []
-    for k in sorted(set(fa) | set(fb)):
-        area, item = k
-        ra, rb = fa.get(k), fb.get(k)
-        va = ra['value'] if ra else None
-        vb = rb['value'] if rb else None
-        key = (ra or rb or {}).get('key', '')
+    for k in sorted(set(a) | set(b)):
+        area, para, item = k
+        va, vb = a.get(k), b.get(k)
 
         if va is None:
             status = 'tgt_only'
@@ -347,11 +356,8 @@ def compare(ref, tgt, pair_ch=True):
 
         rows.append({
             'area': area, 'area_name': AREA_NAME.get(area, area or '(미지정)'),
-            'key': key, 'item': item,
+            'para': para, 'item': item,
             'ref': va, 'tgt': vb, 'status': status,
-            # 어느 대상의 설정인지 (기준·대상이 다를 수 있다)
-            'ref_key': (ra or {}).get('key', ''),
-            'tgt_key': (rb or {}).get('key', ''),
         })
 
     cnt = {'same': 0, 'diff': 0, 'ref_only': 0, 'tgt_only': 0}
@@ -365,4 +371,7 @@ def compare(ref, tgt, pair_ch=True):
         'ref': dict(ref), 'tgt': dict(tgt),
         'areas': sorted({r['area'] for r in rows}),
         'pair_ch': bool(pair_ch),
+        # 화면의 열 제목에 쓴다 (기준·대상 장비 호기)
+        'ref_label': str(ref.get('eqp_id') or '기준'),
+        'tgt_label': str(tgt.get('eqp_id') or '대상'),
     }
