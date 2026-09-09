@@ -46,6 +46,28 @@ VERBOSE = True
 #   조회가 일부만 성공한 채로 덮어써서 데이터가 조용히 줄어드는 것을 막는다.
 SHRINK_GUARD = 0.5
 
+# 한 번에 INSERT 할 행 수.
+#   ★ 전체를 한꺼번에 튜플 리스트로 만들면 DataFrame 과 별개로
+#     그만큼 메모리를 또 쓴다. 45일치처럼 큰 조회에서 512MiB 를 넘긴다.
+#   ★ 나눠 넣어도 트랜잭션 안이라 중간에 실패하면 통째로 되돌아간다.
+SAVE_CHUNK = 20000
+
+# 한 번에 조회할 최대 기간(일).
+#   ★ 이보다 길면 나눠서 조회한다. 한 번에 받은 결과가 메모리에
+#     다 올라오지 못하면 워커가 죽는다 (512MiB).
+#   ★ 나눠도 결과는 같다 — 마지막에 이어 붙인다.
+CHUNK_DAYS = 30
+
+# APC 도 같은 폭으로 나눈다 (30일).
+#   ★ APC 는 웨이퍼 하나에 여러 행이 나와(input_name 마다 한 행)
+#     SRC 보다 몇 배 크지만, 30일까지는 문제없이 조회된다.
+#     미리 잘게 나누면 왕복만 늘어 오히려 느리다.
+#   ★ 그보다 커서 Lake 가 결과를 못 모으면
+#     (Total size of serialized results ... maxResultSize)
+#     그때 자동으로 하루씩 다시 받는다 — _apc_by_day 참고.
+#     우리 쪽 메모리가 아니라 Lake 한계라 받는 쪽을 고쳐도 소용없다.
+APC_CHUNK_DAYS = CHUNK_DAYS
+
 # SRC 와 APC 를 어떻게 붙일지.
 #   'inner'  APC 에 있는 웨이퍼만 남긴다 — rework 가 자동으로 걸러지지만,
 #            APC(R2R 이력)가 늦게 쌓이면 그 최신 구간이 통째로 빠진다.
@@ -122,6 +144,148 @@ def note_fail(stage, key, err):
 
 def get_fails():
     return list(_FETCH_FAILS)
+
+
+def _apc_sql(cond, fab, dt_s, dt_e, mt_s, mt_e):
+    """APC 조회 쿼리 — 기간만 바꿔 여러 번 던질 수 있게 따로 뺀다"""
+    return f"""
+select distinct *
+from (
+    select a.request_dtts, c.process_id, c.recipe_id, c.operation_id,
+           c.lot_id, c.eqp_id, a.substrate_id, a.input_name, a.r2r_status,
+           a.input_value, b.item_name, b.item_value,
+           RANK() over(partition by a.substrate_id order by a.request_dtts DESC) r2r_rank,
+           c.qty
+    from lake_catalog.apc.apc_inquiry_hst_r2r_{fab} a
+    left join lake_catalog.apc.apc_inquiry_ext_hst_r2r_{fab} b
+           on a.rawid = b.inquiry_hst_rawid
+    left join lake_catalog.apc.apc_lot_hst_r2r_{fab} c
+           on a.lot_hst_rawid = c.rawid
+    where a.dt between '{dt_s}' and '{dt_e}'
+      and b.dt between '{dt_s}' and '{dt_e}'
+      and c.mt between '{mt_s}' and '{mt_e}'
+      and c.operation_id in {_oper_tuple(cond)}
+      and ( a.model_name like '%CMP%'
+         or a.model_name like '%KCC88%'
+         or a.model_name like '%KCC01%' )
+      and a.input_value is not null
+      and b.item_name in ('FORMULA', 'PROCESS_OFFSET_MES_IDLE_FLAG_IDLE',
+                          'IDLE_TIME', 'PROCESS_OFFSET_WAFER_SEQ')
+      and c.lot_status = 'JobEnd'
+) d
+where d.r2r_rank = 1
+{_recipe_cond(cond['recipe_list'])}
+"""
+
+
+def _is_too_big(e):
+    """
+    Lake 가 결과를 못 모아 실패했나.
+
+    ★ Spark 드라이버가 모든 태스크 결과를 한곳에 모을 때
+      maxResultSize 를 넘으면 이 오류가 난다. 우리 쪽 메모리가
+      아니라 Lake 한계라, 받는 쪽을 고쳐도 소용없다 —
+      더 잘게 나눠 던지는 수밖에 없다.
+    """
+    t = str(e)
+    return ('maxResultSize' in t
+            or 'bigger than spark.driver' in t
+            or 'Total size of serialized results' in t)
+
+
+def _apc_by_day(lake, cond, fab, dt_s, dt_e, run_query, depth=0, state=None):
+    """
+    구간이 너무 커서 실패했을 때, 절반으로 나눠 다시 받는다.
+
+    ★ 30일이 실패했다고 하루씩 30번 던지는 건 과하다.
+      15일이면 되는 경우가 대부분이라, 되는 크기를 찾을 때까지만
+      절반으로 줄인다 (30 → 15 → 7 → 3 → 1).
+    ★ 하루치도 실패하면 더 나눌 수 없다 — 그날만 건너뛰고 기록한다.
+      그 하루 때문에 전체가 멈추면 안 된다.
+    """
+    d1 = datetime.strptime(dt_s, '%Y%m%d').date()
+    d2 = datetime.strptime(dt_e, '%Y%m%d').date()
+    span = (d2 - d1).days + 1
+
+    # ★ 이미 실패한 폭은 다시 시도하지 않는다.
+    #   30일이 실패했는데 뒤쪽 15일에서 또 15일을 던져 보는 건 낭비다.
+    #   한 번 실패한 폭 이상이면 바로 나눈다.
+    state = state if state is not None else {'fail_at': None}
+    fail_at = state.get('fail_at')
+
+    too_wide = (depth == 1 and span > 1) or \
+               (fail_at is not None and span >= fail_at and span > 1)
+    if too_wide:
+        return _apc_split(lake, cond, fab, d1, d2, span, run_query,
+                          depth, state)
+
+    # 한 덩어리로 시도
+    try:
+        sub = run_query(lake, _apc_sql(cond, fab, dt_s, dt_e,
+                                       d1.strftime('%Y%m'),
+                                       d2.strftime('%Y%m')))
+        return sub if sub is not None else pd.DataFrame()
+    except Exception as e:
+        if not _is_too_big(e) or span <= 1:
+            # 하루치인데도 실패 = 더 나눌 수 없다
+            print(f'  [APC] {dt_s}~{dt_e} 실패, 건너뜁니다: '
+                  f'{e.__class__.__name__}: {str(e)[:120]}')
+            note_fail('APC', f'{dt_s}~{dt_e}', e)
+            return pd.DataFrame()
+        # 이 폭은 안 된다고 기록 — 다음 구간부터 바로 나눈다
+        if fail_at is None or span < fail_at:
+            state['fail_at'] = span
+
+    return _apc_split(lake, cond, fab, d1, d2, span, run_query, depth, state)
+
+
+def _apc_split(lake, cond, fab, d1, d2, span, run_query, depth, state):
+    """구간을 절반으로 나눠 각각 다시 받는다"""
+    mid = d1 + timedelta(days=span // 2 - 1)
+    print(f'  [APC] {d1:%Y%m%d}~{d2:%Y%m%d} ({span}일) → '
+          f'{span // 2}일 + {span - span // 2}일')
+
+    out = []
+    for a, b in ((d1, mid), (mid + timedelta(days=1), d2)):
+        r = _apc_by_day(lake, cond, fab, a.strftime('%Y%m%d'),
+                        b.strftime('%Y%m%d'), run_query, depth + 1, state)
+        if r is not None and not r.empty:
+            out.append(r)
+
+    if not out:
+        return pd.DataFrame()
+    return pd.concat(out, ignore_index=True).drop_duplicates()
+
+
+def _ranges(days=30, date_from=None, date_to=None, chunk_days=None):
+    """
+    조회 기간 — 길면 나눈다.
+
+    ★ 기본은 한 번에 던진다. Lake 는 대용량이라 나눠도 이득이 없고
+      왕복만 늘어난다.
+    ★ 다만 CHUNK_DAYS 를 넘으면 한 번에 받은 결과가 메모리에
+      다 올라오지 못한다 (512MiB). 그때만 나눈다.
+    """
+    width = int(chunk_days or CHUNK_DAYS)
+    dt_s, dt_e, mt_s, mt_e = _full_range(days, date_from, date_to)
+
+    d1 = datetime.strptime(dt_s, '%Y%m%d').date()
+    d2 = datetime.strptime(dt_e, '%Y%m%d').date()
+    span = (d2 - d1).days + 1
+    if span <= width:
+        return [(dt_s, dt_e, mt_s, mt_e)]
+
+    out, cur_d = [], d1
+    while cur_d <= d2:
+        end = min(cur_d + timedelta(days=width - 1), d2)
+        out.append((cur_d.strftime('%Y%m%d'), end.strftime('%Y%m%d'),
+                    cur_d.strftime('%Y%m'), end.strftime('%Y%m')))
+        cur_d = end + timedelta(days=1)
+
+    if VERBOSE:
+        print(f'  [조회] {span}일 → {len(out)}개 구간으로 나눔 '
+              f'(한 번에 {width}일씩)')
+    return out
 
 
 def _full_range(days=30, date_from=None, date_to=None):
@@ -470,65 +634,47 @@ def _step_cond(oper_id, kind):
     for _, r in df.iterrows():
         prm = str(r['PARAM'] or '').strip()
         if not prm:
-            continue                     # 관리 파라미터가 없으면 조회할 게 없다
+            continue
         k = str(r['STEP_ID'] or '').strip().upper()
         if not k:
             continue
         o = out.setdefault(k, {'step_id': k,
                                'step_desc': str(r['STEP_DESC'] or '').strip(),
                                'lot_cds': [], 'params': []})
-        if prm not in o['params']:
-            o['params'].append(prm)
-        lc = str(r['LOT_CD'] or '').strip().upper()
+        lc = str(r.get('LOT_CD') or '').strip().upper()
         if lc and lc not in o['lot_cds']:
             o['lot_cds'].append(lc)
+        if prm not in o['params']:
+            o['params'].append(prm)
     return list(out.values())
 
 
-# ══════════════════════════════════════════════════════════
-# 2. APC 조회
-#    idle / layer_change 플래그 + APC 파라미터
-#    ※ c.eqp_id 필수 (a 에는 없음)
-# ══════════════════════════════════════════════════════════
 def fetch_apc(lake, cond, days=30, date_from=None, date_to=None,
               on_progress=None):
     fab = cond['fab']
     dfs = []
 
-    # ★ 기간을 나누지 않고 한 번에 던진다
-    chunks = [_full_range(days, date_from=date_from, date_to=date_to)]
+    # ★ APC 는 웨이퍼당 여러 행이라 다른 조회보다 훨씬 크다.
+    #   Lake 의 Spark 드라이버가 결과를 모으다 터지므로 잘게 나눈다.
+    chunks = _ranges(days, date_from=date_from, date_to=date_to,
+                     chunk_days=APC_CHUNK_DAYS)
     total, done = max(1, len(chunks)), 0
 
     for dt_s, dt_e, mt_s, mt_e in chunks:
-        query = f"""
-select distinct *
-from (
-    select a.request_dtts, c.process_id, c.recipe_id, c.operation_id,
-           c.lot_id, c.eqp_id, a.substrate_id, a.input_name, a.r2r_status,
-           a.input_value, b.item_name, b.item_value,
-           RANK() over(partition by a.substrate_id order by a.request_dtts DESC) r2r_rank,
-           c.qty
-    from lake_catalog.apc.apc_inquiry_hst_r2r_{fab} a
-    left join lake_catalog.apc.apc_inquiry_ext_hst_r2r_{fab} b
-           on a.rawid = b.inquiry_hst_rawid
-    left join lake_catalog.apc.apc_lot_hst_r2r_{fab} c
-           on a.lot_hst_rawid = c.rawid
-    where a.dt between '{dt_s}' and '{dt_e}'
-      and b.dt between '{dt_s}' and '{dt_e}'
-      and c.mt between '{mt_s}' and '{mt_e}'
-      and c.operation_id in {_oper_tuple(cond)}
-      and ( a.model_name like '%CMP%'
-         or a.model_name like '%KCC88%'
-         or a.model_name like '%KCC01%' )
-      and a.input_value is not null
-      and b.item_name in ('FORMULA', 'PROCESS_OFFSET_MES_IDLE_FLAG_IDLE',
-                          'IDLE_TIME', 'PROCESS_OFFSET_WAFER_SEQ')
-      and c.lot_status = 'JobEnd'
-) d
-where d.r2r_rank = 1
-{_recipe_cond(cond['recipe_list'])}
-"""
-        df = run_query(lake, query)
+        query = _apc_sql(cond, fab, dt_s, dt_e, mt_s, mt_e)
+
+        # ★ 그래도 크면 하루씩 다시 나눠 던진다.
+        #   공정마다 웨이퍼 수가 달라 고정 폭으로는 못 맞춘다.
+        try:
+            df = run_query(lake, query)
+        except Exception as e:
+            if not _is_too_big(e):
+                raise
+            print(f'  [APC] {dt_s}~{dt_e} 결과가 너무 큽니다 — '
+                  f'절반씩 줄여 다시 받습니다')
+            df = _apc_by_day(lake, cond, fab, dt_s, dt_e, run_query,
+                             depth=1)
+
         if df is not None and not df.empty:
             dfs.append(df)
 
@@ -569,7 +715,7 @@ def fetch_src(lake, cond, days=30, date_from=None, date_to=None,
         print('  [SRC] 사전공정 미지정 — wafer-history 조인 생략 (조회가 빨라집니다)')
 
     # ★ 기간을 나누지 않고 한 번에 던진다
-    chunks = [_full_range(days, date_from=date_from, date_to=date_to)]
+    chunks = _ranges(days, date_from=date_from, date_to=date_to)
     total  = max(1, len(cond['lot_cd_list']) * len(chunks))
     done   = 0
 
@@ -811,7 +957,7 @@ def fetch_mes(lake, cond, df_src, days=30, date_from=None, date_to=None,
 
     dfs = []
     # ★ 기간을 나누지 않고 한 번에 던진다
-    _mes_chunks = [_full_range(days, date_from=date_from, date_to=date_to)]
+    _mes_chunks = _ranges(days, date_from=date_from, date_to=date_to)
     _mes_total, _mes_done = max(1, len(_mes_chunks)), 0
 
     for dt_s, dt_e, _, _ in _mes_chunks:
@@ -2169,12 +2315,18 @@ def save_analysis_df(df, oper_id, date_from=None):
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_lot  ON {table} ("LOT_CD")')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_date ON {table} ("DATE")')
 
-    df = df.astype(object).where(pd.notnull(df), None)
-
     cols    = list(df.columns)
     col_str = ", ".join(f'"{c}"' for c in cols)
-    data    = [tuple(r) for r in df.itertuples(index=False, name=None)]
-    lot_cds = df['LOT_CD'].dropna().unique().tolist() if 'LOT_CD' in df.columns else []
+    lot_cds = (df['LOT_CD'].dropna().unique().tolist()
+               if 'LOT_CD' in df.columns else [])
+
+    # ★ 예전에는 df.astype(object) 사본을 만들고, 거기서 다시
+    #   전체 행을 튜플 리스트로 펼쳤다. 원본까지 셋이 동시에 메모리에
+    #   올라와, 45일치처럼 큰 조회에서 512MiB 를 넘겼다.
+    #   이제 덩어리로 나눠 그때그때 만들고 버린다.
+    def _rows_of(sub):
+        sub = sub.astype(object).where(pd.notnull(sub), None)
+        return [tuple(r) for r in sub.itertuples(index=False, name=None)]
 
     # ★ DELETE 와 INSERT 를 한 덩어리로 묶는다.
     #   전체 교체는 LOT_CD 의 45일치를 통째로 지우고 다시 넣는 것이라,
@@ -2194,9 +2346,17 @@ def save_analysis_df(df, oper_id, date_from=None):
                 else:
                     cur.execute(f'DELETE FROM {table} WHERE "LOT_CD" = %s',
                                 [lc])
-            execute_values(cur.cursor,
-                           f'INSERT INTO {table} ({col_str}) VALUES %s',
-                           data, page_size=1000)
+            # 덩어리로 나눠 넣는다 — 한 번에 만드는 튜플 수를 제한한다
+            total = len(df)
+            for i in range(0, total, SAVE_CHUNK):
+                chunk = _rows_of(df.iloc[i:i + SAVE_CHUNK])
+                execute_values(cur.cursor,
+                               f'INSERT INTO {table} ({col_str}) VALUES %s',
+                               chunk, page_size=500)
+                del chunk
+                if VERBOSE and total > SAVE_CHUNK:
+                    done = min(i + SAVE_CHUNK, total)
+                    print(f'  [{oper_id}] 저장 {done:,}/{total:,}행')
 
     mode = f'{date_from} 이후 교체' if date_from else '전체 교체'
     print(f"[{oper_id}] 저장 완료 {len(df):,}행 ({mode} · lot_cd: {lot_cds})")
@@ -2270,11 +2430,23 @@ def build_analysis_df(lake, df_info, oper_id, days=30,
           _X/_Y 접미사가 생겼는지 여기서 바로 보인다.
         """
         if VERBOSE:
-            # ★ 단계별 소요 시간 — 어디가 느린지 알아야 줄일 수 있다
+            # ★ 단계별 소요 시간 + 메모리 — 어디가 느리고 어디서
+            #   메모리를 먹는지 알아야 줄일 수 있다.
             el = _time.time() - _t0[0]
             _t0[0] = _time.time()
+
+            mem = ''
+            try:
+                if d is not None and hasattr(d, 'memory_usage'):
+                    mb = d.memory_usage(deep=True).sum() / 1e6
+                    mem = f' {mb:>6.0f}MB'
+                    if mb > 200:
+                        mem += ' ★큼'
+            except Exception:
+                pass
+
             print(f"[{oper_id}] {tag:<12} {_rows(d):>8,}행 "
-                  f"{el:>6.1f}s  {_latest(d)}")
+                  f"{el:>6.1f}s{mem}  {_latest(d)}")
             try:
                 if d is not None and hasattr(d, 'columns'):
                     bad = [c for c in d.columns
