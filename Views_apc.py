@@ -55,7 +55,10 @@ def apc_compare(request):
             return _fail(f'{name}의 EQP_ID 를 입력하세요')
 
     try:
-        return JsonResponse({'ok': True, **apc.compare(ref, tgt)})
+        # 챔버 짝 묶기 — 화면에서 끌 수 있다
+        pair = b.get('pair_ch')
+        pair = True if pair is None else bool(pair)
+        return JsonResponse({'ok': True, **apc.compare(ref, tgt, pair)})
     except ValueError as e:
         return _fail(str(e))
     except Exception as e:
