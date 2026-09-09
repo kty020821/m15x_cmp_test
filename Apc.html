@@ -227,6 +227,9 @@ function g(id) { return (document.getElementById(id).value || '').trim(); }
 function msg(t, err) {
   const el = document.getElementById('msg');
   el.className = 'ap-msg' + (err ? ' err' : '');
+  /* ★ 에러는 여러 줄로 온다 (요청 주소·조건까지). 한 줄로 뭉개면
+     정작 원인이 잘려 안 보인다. */
+  el.style.whiteSpace = 'pre-line';
   el.textContent = t;
 }
 
