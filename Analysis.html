@@ -101,9 +101,15 @@
 .step[data-state="done"]::before { background: rgba(22,163,74,.28); }
 
 /* ── 필터 ────────────────────────────────────────── */
+/* ★ 한 줄 정렬 — 칸마다 높이가 달라(합치기 버튼) flex-end 로 맞추면
+   드롭박스 줄이 어긋난다. 위쪽 기준으로 맞추고 버튼만 따로 내린다. */
 .filter-panel { background: var(--bg-3); border: 1px solid var(--bd); border-radius: var(--r-lg);
-  padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
-.filter-group { display: flex; flex-direction: column; gap: 7px; min-width: 178px; }
+  padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 14px;
+  align-items: flex-start; }
+.filter-group { display: flex; flex-direction: column; gap: 7px; min-width: 150px; }
+/* 드롭박스 줄에 맞춰 내려온다 (라벨 높이 + gap) */
+.filter-panel > .btn-run { margin-top: 25px; }
+.filter-panel > .msg { margin-top: 30px; }
 .filter-label { font-size: var(--fs-xs); font-weight: var(--fw-heavy); color: var(--tx-muted);
   letter-spacing: .03em; }
 
@@ -304,7 +310,7 @@
     </div>
     <div class="step-body">
       <div class="filter-panel">
-        <div class="filter-group">
+        <div class="filter-group" style="flex:0 0 150px;">
           <span class="filter-label">TECH</span>
           <div class="ss" id="ss-tech"></div>
           {# 옵션 공급용 — 화면에는 보이지 않음 #}
@@ -312,21 +318,23 @@
             {% for t in tech_list %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
           </select>
         </div>
-        <div class="filter-group">
+        <div class="filter-group" style="flex:0 0 150px;">
           <span class="filter-label">LOT_CD</span>
           <div class="ss" id="ss-lot"></div>
         </div>
-        <div class="filter-group" style="min-width:250px;">
+        <div class="filter-group" style="flex:1;min-width:240px;">
           <span class="filter-label">OPER</span>
           <div class="ss" id="ss-oper"></div>
         </div>
-        <div class="filter-group" style="min-width:230px;">
+        <!-- ★ 파라미터는 이름이 길어 가장 넓게 둔다.
+             합치기 버튼은 그 아래 — 어떤 칸에 딸린 기능인지 분명해진다. -->
+        <div class="filter-group" style="flex:1.6;min-width:320px;">
           <span class="filter-label">PARAMETER</span>
           <div class="ss" id="ss-param"></div>
           <button class="btn-run" id="btn-overlay" onclick="toggleOverlayBox()"
                   style="background:transparent;color:var(--tx-2);
                          border:1px solid var(--bd);padding:6px 12px;
-                         font-size:11px;margin-left:6px;"
+                         font-size:11px;align-self:flex-start;"
                   title="여러 파라미터를 한 덩어리로 합쳐 그립니다 (구분은 범례)">+ 파라미터 합치기</button>
         </div>
         <button class="btn-run" id="btn-run" disabled onclick="runQuery()">조회</button>
@@ -355,7 +363,7 @@
             <span class="chart-title">Trend</span>
             <div class="chart-ctrls">
               <span class="mini-label">범례</span>
-              <div class="ss mini" id="ss-legend" style="width:132px;"></div>
+              <div class="ss mini" id="ss-legend" style="width:150px;"></div>
               <select id="raw-legend" hidden>
                 {% for col, disp in legend_options %}<option value="{{ col }}">{{ disp }}</option>{% endfor %}
               </select>
@@ -369,9 +377,9 @@
             <span class="chart-title">Correlation <span class="r2badge" id="js-corr-r2"></span></span>
             <div class="chart-ctrls">
               <span class="mini-label">X</span>
-              <div class="ss mini" id="ss-corr-x" style="width:230px;"></div>
+              <div class="ss mini" id="ss-corr-x" style="width:280px;"></div>
               <span class="mini-label">Y</span>
-              <div class="ss mini" id="ss-corr-y" style="width:230px;"></div>
+              <div class="ss mini" id="ss-corr-y" style="width:280px;"></div>
             </div>
           </div>
           <div class="plot-area" id="js-corr"></div>
