@@ -26,6 +26,7 @@ from . import views_insight as ai      # 분석 AI
 from . import views_adhoc as vh        # 1회성 조회 · 이슈 분석
 from . import views_load as vl         # DB 적재
 from . import views_monitor as vm      # Inline Monitoring
+from . import views_apc as vapc        # APC 설정 비교
 
 urlpatterns = [
 
@@ -108,6 +109,10 @@ urlpatterns = [
     path('api/load/refreshmax/', vl.load_refresh_max, name='load-refresh-max'),
     path('api/load/cancel/',   vl.load_cancel,   name='load-cancel'),
     path('api/load/schedule/', vl.load_schedule, name='load-schedule'),
+
+    # ── APC 설정 비교 ───────────────────────────────────
+    path('apc/',             vapc.apc_page,    name='apc'),
+    path('api/apc/compare/', vapc.apc_compare, name='apc-compare'),
 
     # ── Inline Monitoring ───────────────────────────────
     path('monitor/',             vm.monitor_page,    name='monitor'),
