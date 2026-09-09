@@ -148,10 +148,31 @@ def fetch(fab, eqp_id, recipe_id):
                            f'  요청: {url}\n'
                            f'  조건: {bind}')
 
+    # ★ 응답 형태가 한 가지가 아니다.
+    #   리스트를 바로 주기도 하고, {'Content': [...]} 로 감싸기도 한다.
+    #   어느 쪽이든 받아들인다 — 형태 하나를 가정하면
+    #   'list object has no attribute get' 으로 죽는다.
     try:
-        content = json.loads(res.text).get('Content') or []
+        raw = json.loads(res.text)
     except Exception as e:
-        raise RuntimeError(f'APC 응답을 해석하지 못했습니다: {e}')
+        raise RuntimeError(f'APC 응답을 해석하지 못했습니다: {e}\n'
+                           f'  받은 내용: {(res.text or "")[:300]}')
+
+    if isinstance(raw, list):
+        content = raw
+    elif isinstance(raw, dict):
+        # 흔히 쓰는 이름부터 찾고, 없으면 리스트인 값을 쓴다
+        content = None
+        for k in ('Content', 'content', 'data', 'Data',
+                  'result', 'Result', 'rows'):
+            if isinstance(raw.get(k), list):
+                content = raw[k]
+                break
+        if content is None:
+            content = next((v for v in raw.values()
+                            if isinstance(v, list)), [])
+    else:
+        content = []
 
     if not content:
         return pd.DataFrame()
@@ -252,6 +273,10 @@ def to_items(df, pair_ch=True):
     c_area = cols.get('SETUP_KEY_RAWID')
 
     if not c_key or not c_val:
+        # ★ 컬럼 이름이 다르면 조용히 빈 결과가 된다 —
+        #   '조회는 됐는데 아무것도 안 나온다' 가 가장 찾기 어렵다.
+        print(f'[apc] SETUP_KEY_VALUE / SETUP_DATA_VALUE 컬럼이 없습니다. '
+              f'실제 컬럼: {", ".join(map(str, df.columns))}')
         return out
 
     for _, r in df.iterrows():
