@@ -786,8 +786,14 @@ def run_async(oper_ids, days=DEFAULT_DAYS, user='',
     return res
 
 
-def queue_status():
-    """큐 상태 — 어느 화면에서든 진행 상황을 볼 수 있게 한다"""
+def queue_status(recent_for=None):
+    """
+    큐 상태 — 어느 화면에서든 진행 상황을 볼 수 있게 한다.
+
+    ★ recent_for 에 공정 코드를 주면 그 공정의 '가장 최근 결과' 도 함께
+      돌려준다. 큐에는 대기·실행중만 남아, 끝나는 순간 사라져서
+      화면이 성공했는지 실패했는지 알 수 없기 때문이다.
+    """
     ensure_tables()
     with _conn().cursor() as cur:
         cur.execute(
@@ -807,8 +813,23 @@ def queue_status():
                   'requested_at': str(r[5])[:19] if r[5] else ''}
                  for r in cur.fetchall()]
 
-    return {'waiting': cnt.get('대기', 0), 'running': cnt.get('실행중', 0),
-            'items': items, 'worker': worker_alive()}
+    out = {'waiting': cnt.get('대기', 0), 'running': cnt.get('실행중', 0),
+           'items': items, 'worker': worker_alive()}
+
+    if recent_for:
+        with _conn().cursor() as cur:
+            cur.execute(
+                "SELECT status, message, rows, finished_at FROM " + T_JOB +
+                " WHERE oper_id = %s ORDER BY id DESC LIMIT 1",
+                [str(recent_for).upper()])
+            r = cur.fetchone()
+        if r:
+            out['recent'] = {
+                'oper_id': str(recent_for).upper(), 'status': r[0],
+                'message': r[1] or '', 'rows': r[2] or 0,
+                'finished_at': str(r[3])[:19] if r[3] else '',
+            }
+    return out
 
 
 def cancel(oper_id=None, all_waiting=False):
