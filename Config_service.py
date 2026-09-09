@@ -595,11 +595,18 @@ def _step_config_df(table, include_unused=False):
     out = []
     for r in rows:
         step_id, desc, prm = r[2] or '', r[3] or '', r[4] or ''
+
+        # ★ Defect 은 STEP_ID 로만 컬럼을 만든다.
+        #   스텝 이름은 사람이 적는 값이라 나중에 바꾸면 컬럼 이름이
+        #   따라 바뀌고, 그러면 옛 컬럼이 남은 채 새 컬럼이 생긴다.
+        #   STEP_ID 는 시스템 값이라 변하지 않는다.
+        #   (Response 는 기존대로 — 이름이 붙어 있어야 읽기 쉽다)
+        key = step_id if kind == 'def' else (desc or step_id)
+
         out.append({
             'OPER_ID': r[0], 'LOT_CD': r[1] or '', 'STEP_ID': step_id,
             'STEP_DESC': desc, 'PARAM': prm,
-            # 스텝 이름이 있으면 그것, 없으면 STEP_ID 로 컬럼을 만든다
-            'COLUMN': step_column(kind, desc or step_id, prm),
+            'COLUMN': step_column(kind, key, prm),
         })
     return pd.DataFrame(out, columns=['OPER_ID', 'LOT_CD', 'STEP_ID',
                                       'STEP_DESC', 'PARAM', 'COLUMN'])
