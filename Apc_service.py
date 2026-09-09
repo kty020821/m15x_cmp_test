@@ -27,6 +27,11 @@ import requests
 from django.conf import settings
 
 API_URL = 'http://dp.skhynix.com:8080/datahub/v1/api'
+
+# API 이름 형식 — FAB 이 들어간다 (소문자).
+#   ★ 이 이름이 틀리면 404 (NotFoundException) 가 난다.
+#     형식이 바뀌면 여기만 고치면 된다.
+API_NAME = '{fab}-cmp-apc-modeling-table'
 PAGE_SIZE = 10000
 RETRY = 5
 TIMEOUT = 60
@@ -65,7 +70,7 @@ def check(fab='m15x', eqp_id='*', recipe_id='*'):
         print('→ settings.py 에 APC_PROJECT / APC_API_KEY 를 넣으세요')
         return
 
-    api_name = f'{str(fab).lower()}-cmp-apc-modeling-table1'
+    api_name = API_NAME.format(fab=str(fab).lower())
     url = f"{API_URL}/{c['project']}/{api_name}"
     print(f'요청 주소   : {url}')
 
@@ -100,7 +105,7 @@ def fetch(fab, eqp_id, recipe_id):
     if not fab:
         raise ValueError('FAB 을 입력하세요')
 
-    api_name = f'{fab}-cmp-apc-modeling-table1'
+    api_name = API_NAME.format(fab=fab)
     url = f"{API_URL}/{c['project']}/{api_name}"
     headers = {'Content-Type': 'application/json', 'h-api-token': c['key']}
 
