@@ -53,8 +53,16 @@
 .msg.ok  { color: var(--good); }
 .msg.err { color: var(--bad); }
 
+/* ★ 왼쪽 목록은 따로 스크롤한다. 파라미터가 많아 오른쪽이 길어져도
+   공정 목록은 늘 보이므로, 공정을 옮길 때 위로 올라갈 필요가 없다. */
 .wrap { display: grid; grid-template-columns: 300px 1fr; gap: 16px;
   align-items: start; }
+.wrap > .panel:first-child { position: sticky; top: 16px;
+  max-height: calc(100vh - 32px); display: flex; flex-direction: column; }
+.wrap > .panel:first-child .olist { overflow-y: auto; flex: 1; }
+@media (max-width: 1000px) {
+  .wrap > .panel:first-child { position: static; max-height: none; }
+}
 @media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
 
 .panel { background: var(--bg-3); border: 1px solid var(--bd);
@@ -70,7 +78,7 @@
 
 /* ── 공정 목록 ───────────────────────────────── */
 .olist { display: flex; flex-direction: column; gap: 4px;
-  max-height: 640px; overflow-y: auto; }
+  overflow-y: auto; }   /* 높이는 .wrap 규칙이 화면에 맞춰 정한다 */
 .oitem { padding: 9px 11px; border-radius: var(--r-sm); cursor: pointer;
   border: 1px solid transparent; transition: background .15s; }
 .oitem:hover { background: var(--bg-2); }
@@ -318,6 +326,16 @@ table.sheet .tag.k-SRC { color: #1d4ed8; background: rgba(29,78,216,.13); }
 table.sheet .tag.k-REP { color: #0f6e56; background: rgba(15,110,86,.13); }
 table.sheet .tag.k-DEF { color: #b45309; background: rgba(180,83,9,.13); }
 
+/* 떠 있는 저장 바 — 스크롤과 무관하게 아래에 붙어 있다 */
+.save-bar { position: sticky; bottom: 0; z-index: 20;
+  display: flex; gap: 8px; align-items: center;
+  margin: 16px -18px -18px; padding: 11px 18px;
+  background: var(--bg-3); border-top: 1px solid var(--bd);
+  box-shadow: 0 -6px 14px rgba(0,0,0,.06); }
+.save-hint { margin-left: auto; font-size: 11.5px; font-weight: 700;
+  color: var(--tx-muted); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+
 .sheet-tip { font-size: 11px; color: var(--tx-muted); line-height: 1.6;
   margin: 6px 0 0; }
 .sheet-tip kbd { font-family: var(--cf-mono); font-size: 10px;
@@ -416,6 +434,8 @@ const API_SUGGESTLOT = "{% url 'config-suggest-lot' %}";
 const API_CLASSIFY   = "{% url 'config-classify' %}";
 const API_RECLASSIFY = "{% url 'config-reclassify' %}";
 const API_MISMATCH   = "{% url 'config-mismatch' %}";
+const API_LOAD_RUN   = "{% url 'load-run' %}";
+const API_LOAD_QUEUE = "{% url 'load-queue' %}";
 
 /* 열 정의 — 종류에 따라 편집 방식이 갈린다.
      text   글자 그대로
@@ -535,7 +555,10 @@ async function openOper(id) {
   if (!j.ok) { msg(j.error || '조회 실패', true); return; }
   cur = j.oper;
   cur.resps = cur.resps || [];   // 옛 응답 호환
+  cur.links = cur.links || [];
   FILT.lots = {}; FILT.params = {}; FILT.defects = {}; FILT.resps = {};
+  FILT.links = {};
+  resetSheetState();
   renderEditor();
   loadOpers();
 }
@@ -544,7 +567,8 @@ function newOper() {
   cur = {oper_id: '', oper_desc: '', fab: '', eq_model: '',
          pre_oper_id: '', pre_oper_desc: '', pre_oper_param: '',
          use_yn: 'Y', lots: [], params: [], defects: [], resps: [],
-         _new: true};
+         links: [], _new: true};
+  resetSheetState();
   renderEditor();
   loadOpers();
 }
@@ -566,9 +590,12 @@ function renderEditor() {
       셀을 클릭해 고르고, 끌거나 <kbd>Shift</kbd>+클릭으로 범위를 잡습니다
       (<kbd>Shift</kbd>+방향키도 됩니다).
       선택 영역 오른쪽 아래 <b>작은 사각형을 아래로 끌면</b> 값이 복사됩니다.<br>
-      <b>더블클릭</b>이나 <kbd>F2</kbd> 로 편집하고, 글자를 치면 새로 입력됩니다.
+      <b>더블클릭</b>하면 누른 자리에 커서가 놓입니다 (<kbd>F2</kbd> 도 동일).
+      글자를 바로 치면 새로 입력됩니다.<br>
       <kbd>Ctrl+C</kbd> <kbd>Ctrl+V</kbd> 로 엑셀과 주고받고,
-      <kbd>Delete</kbd> 로 비우고, <kbd>Ctrl+A</kbd> 로 전체를 고릅니다.
+      <b>넓은 범위를 고르고 붙여넣으면</b> 그 범위를 되풀이해 채웁니다.
+      <kbd>Ctrl+Z</kbd> 되돌리기, <kbd>Delete</kbd> 비우기,
+      <kbd>Ctrl+A</kbd> 전체 선택.
     </div>
     <div class="sec">
       <div class="sec-h"><h3>${esc(c.oper_desc || c.oper_id || '새 공정')}</h3>
@@ -689,12 +716,20 @@ function renderEditor() {
       </div>
     </div>
 
-    <div style="margin-top:20px;display:flex;gap:8px;align-items:center;">
+    <!-- ★ 아래에 떠 있는 저장 바.
+         파라미터가 수십 개면 맨 아래까지 스크롤해야 저장할 수 있었다.
+         편집 영역 안에 두어 '지금 보고 있는 공정을 저장한다' 는 것이
+         분명하면서도, 어디를 보고 있든 손이 닿는다. -->
+    <div class="save-bar">
       <button class="btn pri" onclick="saveOper()">저장</button>
       <button class="btn" onclick="validateOne()">이 공정 검증</button>
+      <button class="btn" onclick="buildDb()" id="btn-builddb"
+              ${c._new ? 'disabled title="먼저 저장하세요"' : ''}>DB 만들기</button>
       ${c._new ? '' : `<button class="btn danger" onclick="deleteOper()">삭제</button>`}
       <span class="msg" id="ed-msg"></span>
-    </div>`;
+      <span class="save-hint">${esc(c.oper_desc || c.oper_id || '새 공정')}</span>
+    </div>
+    <div style="height:56px;"></div>`;
 
   restoreFilterInputs();       // 화면을 새로 만들었으므로 필터 값 되살리기
   // 시트 다섯 개 — 헤더를 만들고 내용을 그린다
@@ -909,6 +944,116 @@ function renderResps()   { renderSheet('resps'); }
 function renderDefects() { renderSheet('defects'); }
 function renderLinks()   { renderSheet('links'); }
 
+/* ══════════════════════════════════════════════════
+   이 공정만 DB 만들기
+
+   ★ 셋업을 마치고 바로 확인하고 싶을 때 쓴다. 모니터링 화면까지
+     가서 목록에서 찾을 필요가 없다.
+   ★ 적재는 몇 분 걸리므로 큐에 넣고 진행 상황만 물어본다 —
+     페이지를 떠나도 서버에서 계속 돈다.
+   ══════════════════════════════════════════════════ */
+let dbTimer = null;
+
+async function buildDb() {
+  if (!cur || !cur.oper_id) return;
+  if (cur._new) { edMsg('먼저 저장하세요', true); return; }
+
+  const days = prompt(
+    '며칠치를 받을까요?\n(이미 적재된 공정이면 마지막 데이터 이후만 받습니다)',
+    '45');
+  if (days === null) return;
+
+  const btn = document.getElementById('btn-builddb');
+  if (btn) { btn.disabled = true; btn.textContent = '요청 중…'; }
+
+  const j = await postJSON(API_LOAD_RUN, {
+    opers: [cur.oper_id],
+    days: Math.max(1, Number(days) || 45),
+    incremental: true,
+    user: 'config',
+  });
+
+  if (!j || !j.ok) {
+    edMsg((j && j.error) || '적재 요청 실패', true);
+    if (btn) { btn.disabled = false; btn.textContent = 'DB 만들기'; }
+    return;
+  }
+  edMsg(`${cur.oper_id} 적재를 시작했습니다 — 진행 상황을 확인합니다`);
+  pollDb();
+}
+
+/* 진행 상황을 몇 초마다 물어본다 */
+async function pollDb() {
+  clearTimeout(dbTimer);
+  const btn = document.getElementById('btn-builddb');
+  if (!cur || !cur.oper_id) return;
+
+  const j = await postJSON(API_LOAD_QUEUE, {oper_id: cur.oper_id});
+  if (!j || !j.ok) return;
+
+  const mine = (j.items || []).find(
+    it => String(it.oper_id) === String(cur.oper_id));
+
+  if (mine) {
+    // 아직 큐에 있다 — 대기 또는 실행 중
+    if (btn) { btn.disabled = true; btn.textContent = '적재 중…'; }
+    edMsg(`${mine.status} — ${mine.message || cur.oper_id}`);
+    dbTimer = setTimeout(pollDb, 3000);
+    return;
+  }
+
+  // 큐에서 사라졌다 = 끝났다. 결과는 recent 로 받는다
+  if (btn) { btn.disabled = false; btn.textContent = 'DB 만들기'; }
+  const r = j.recent;
+  if (r) {
+    edMsg(`${r.status} — ${r.message || ''}`
+          + (r.finished_at ? ` (${r.finished_at})` : ''),
+          r.status === '실패');
+  }
+}
+
+/* ── 실행 취소 ─────────────────────────────────────
+   ★ 붙여넣기·채우기·삭제는 한 번에 수십 칸을 바꾼다.
+     잘못 눌렀을 때 되돌릴 수 없으면 처음부터 다시 입력해야 한다.
+   ★ 바꾸기 직전의 표 내용을 통째로 저장한다. 행 수가 많아야 수백이라
+     그대로 복사해도 부담이 없고, 부분 복원보다 확실하다. */
+const UNDO_MAX = 30;
+const undoStack = [];
+
+function pushUndo(key, label) {
+  try {
+    undoStack.push({
+      key, label,
+      rows: JSON.parse(JSON.stringify(cur[key] || [])),
+      sel: sheetSel ? {...sheetSel} : null,
+    });
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+  } catch (e) { /* 되돌리기는 부가 기능 — 실패해도 편집은 계속된다 */ }
+}
+
+function undo() {
+  const u = undoStack.pop();
+  if (!u) { edMsg('되돌릴 작업이 없습니다'); return; }
+  cur[u.key] = u.rows;
+  sheetSel = u.sel;
+  renderSheet(u.key);
+  edMsg(`되돌렸습니다 — ${u.label}`);
+}
+
+/* 공정을 바꿀 때 시트 상태를 지운다.
+   ★ 이전 공정에서 3행을 고른 채로 새 공정을 열면, 표는 비었는데
+     선택은 3행을 가리킨다. 그 상태에서 붙여넣기나 채우기가 돌면
+     빈 행이 그만큼 생긴다. */
+function resetSheetState() {
+  clearTimeout(dbTimer);      // 다른 공정으로 옮기면 이전 폴링은 멈춘다
+  sheetSel = null;
+  sheetEdit = null;
+  dragMode = null;
+  fillFrom = null;
+  lastClick = null;
+  undoStack.length = 0;
+}
+
 /* ── 시트 상태 ────────────────────────────────────── */
 let sheetSel = null;    // {tbl, r1, c1, r2, c2} — 선택 범위
 let sheetEdit = null;   // {tbl, r, c} — 편집 중인 셀
@@ -1049,7 +1194,8 @@ document.addEventListener('mousedown', ev => {
   if (same && !ev.shiftKey) {
     dragMode = null;
     sheetSel = {tbl: at.tbl, r1: at.r, c1: at.c, r2: at.r, c2: at.c};
-    startEdit(at.tbl, at.r, at.c);      // 기존 값을 그대로 두고 편집
+    // 누른 자리에 커서를 놓는다 (기존 값은 그대로)
+    startEdit(at.tbl, at.r, at.c, null, ev.clientX);
     return;
   }
 
@@ -1095,6 +1241,7 @@ function applyFill() {
   const defs = COLDEF[key];
   const rows = cur[key] || [];
   const h = src.r2 - src.r1 + 1;      // 원본 높이
+  pushUndo(key, '채우기');
 
   let n = 0;
   for (let r = src.r2 + 1; r <= dst.r2; r++) {
@@ -1113,7 +1260,7 @@ function applyFill() {
 }
 
 /* ── 편집 ─────────────────────────────────────────── */
-function startEdit(key, r, c, seed) {
+function startEdit(key, r, c, seed, caretX) {
   const def = COLDEF[key][c];
   if (!def || def.t === 'calc') return;      // 계산 칸은 못 고친다
   sheetEdit = {tbl: key, r, c};
@@ -1121,9 +1268,52 @@ function startEdit(key, r, c, seed) {
 
   const el = document.getElementById('sheet-editor');
   if (!el) return;
+
   if (seed != null && el.tagName === 'INPUT') el.value = seed;
   el.focus();
-  if (el.select && seed == null) el.select();
+
+  if (el.tagName !== 'INPUT') return;
+
+  if (seed != null) {
+    // 글자를 쳐서 시작한 경우 — 커서를 맨 뒤로
+    el.setSelectionRange(el.value.length, el.value.length);
+    return;
+  }
+
+  /* ★ 더블클릭한 자리에 커서를 놓는다.
+     el.select() 로 전체를 고르면, 이미 있는 값을 조금만 고칠 때
+     원하는 위치를 다시 찍어야 한다. */
+  if (caretX != null) {
+    const pos = caretFromX(el, caretX);
+    el.setSelectionRange(pos, pos);
+  } else {
+    el.select();
+  }
+}
+
+/* 클릭한 x 좌표에 해당하는 글자 위치를 찾는다.
+   ★ 글자 폭이 제각각이라 계산으로는 안 맞는다. 실제로 재서
+     가장 가까운 지점을 고른다 — 글자 수가 많아야 수십이라 부담이 없다. */
+function caretFromX(el, clientX) {
+  const rect = el.getBoundingClientRect();
+  const st = window.getComputedStyle(el);
+  const padL = parseFloat(st.paddingLeft) || 0;
+  const target = clientX - rect.left - padL;
+  if (target <= 0) return 0;
+
+  const cv = caretFromX._cv
+    || (caretFromX._cv = document.createElement('canvas'));
+  const ctx = cv.getContext('2d');
+  ctx.font = `${st.fontWeight} ${st.fontSize} ${st.fontFamily}`;
+
+  const v = el.value || '';
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i <= v.length; i++) {
+    const w = ctx.measureText(v.slice(0, i)).width;
+    const d = Math.abs(w - target);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
 }
 
 function commitEdit(val) {
@@ -1131,6 +1321,9 @@ function commitEdit(val) {
   const {tbl, r, c} = sheetEdit;
   const def = COLDEF[tbl][c];
   const rows = cur[tbl] || [];
+  if (rows[r] && def && String(rows[r][def.k] ?? '') !== String(val ?? '')) {
+    pushUndo(tbl, '입력');
+  }
   if (rows[r] && def) {
     rows[r][def.k] = def.t === 'upper'
       ? String(val ?? '').trim().toUpperCase() : String(val ?? '');
@@ -1197,6 +1390,13 @@ document.addEventListener('keydown', ev => {
                        return moveSel(key, n.r2, maxC, ev.shiftKey);
   }
 
+  // Ctrl+Z — 되돌리기
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
+    ev.preventDefault();
+    undo();
+    return;
+  }
+
   // Ctrl+A — 이 표 전체 선택
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') {
     ev.preventDefault();
@@ -1231,6 +1431,7 @@ function moveSel(key, r, c, extend) {
 function clearSel() {
   const n = selNorm(sheetSel);
   if (!n) return;
+  pushUndo(n.tbl, '비우기');
   const defs = COLDEF[n.tbl];
   const rows = cur[n.tbl] || [];
   let cnt = 0;
@@ -1276,8 +1477,41 @@ document.addEventListener('paste', ev => {
   ev.preventDefault();
 
   const text = (ev.clipboardData || window.clipboardData).getData('text');
-  pasteSheet(n.tbl, n.r1, n.c1, text);
+
+  /* ★ 선택 범위가 붙여넣을 내용보다 크면 그 범위를 되풀이해 채운다.
+     엑셀과 같은 동작이다 — 한 칸을 복사해 100칸에 붙이거나,
+     두 줄을 복사해 열 줄에 반복해 넣을 때 쓴다. */
+  const grid = String(text || '').replace(/\r/g, '').replace(/\n+$/, '')
+    .split('\n').map(l => l.split('\t'));
+  const wide = (n.r2 - n.r1 + 1) > grid.length
+            || (n.c2 - n.c1 + 1) > grid[0].length;
+
+  if (wide) fillRange(n, grid);
+  else pasteSheet(n.tbl, n.r1, n.c1, text);
 });
+
+/* 선택 범위를 복사한 내용으로 채운다 (모자라면 되풀이) */
+function fillRange(n, grid) {
+  const defs = COLDEF[n.tbl];
+  const rows = cur[n.tbl] || (cur[n.tbl] = []);
+  pushUndo(n.tbl, '범위 채우기');
+
+  while (rows.length <= n.r2) rows.push(TBL[n.tbl].blank());
+
+  let cnt = 0;
+  for (let r = n.r1; r <= n.r2; r++) {
+    const line = grid[(r - n.r1) % grid.length];
+    for (let c = n.c1; c <= n.c2; c++) {
+      const def = defs[c];
+      if (!def || def.t === 'calc') continue;
+      const raw = line[(c - n.c1) % line.length];
+      const v = coerceSheet(def, raw);
+      if (v !== null) { rows[r][def.k] = v; cnt++; }
+    }
+  }
+  renderSheet(n.tbl);
+  edMsg(`선택한 ${n.r2 - n.r1 + 1}행 × ${n.c2 - n.c1 + 1}열에 ${cnt}칸 채움`);
+}
 
 function pasteSheet(key, row0, col0, text) {
   const defs = COLDEF[key];
@@ -1291,6 +1525,7 @@ function pasteSheet(key, row0, col0, text) {
   if (grid.length > 1 && looksLikeHeader(grid[0], defs)) grid.shift();
   if (!grid.length) return;
 
+  pushUndo(key, '붙여넣기');
   while (rows.length < row0 + grid.length) rows.push(TBL[key].blank());
 
   let n = 0;
@@ -1354,6 +1589,7 @@ function addSheetRow(key, n) {
 }
 
 function delSheetRow(key, r) {
+  pushUndo(key, '행 삭제');
   (cur[key] || []).splice(r, 1);
   sheetSel = null;
   renderSheet(key);
@@ -1366,6 +1602,7 @@ function delSelRows() {
   if (!n) { edMsg('지울 행을 먼저 고르세요', true); return; }
   const cnt = n.r2 - n.r1 + 1;
   if (!confirm(`${cnt}개 행을 지울까요?`)) return;
+  pushUndo(n.tbl, `${cnt}개 행 삭제`);
   (cur[n.tbl] || []).splice(n.r1, cnt);
   sheetSel = null;
   renderSheet(n.tbl);
@@ -1504,25 +1741,6 @@ function fillTable(tblKey, grid, startRow, startCol, replace) {
   return filled;
 }
 
-/* ── 표 셀에 직접 붙여넣기 ─────────────────── */
-document.addEventListener('paste', (e) => {
-  const el = e.target;
-  if (!el || !el.dataset || !el.dataset.tbl) return;      // 표 밖이면 기본 동작
-  const text = (e.clipboardData || window.clipboardData).getData('text');
-  if (!text) return;
-
-  // 한 칸만 붙여넣는 경우는 브라우저 기본 동작이 자연스럽다
-  if (!/[\t\n\r]/.test(text)) return;
-
-  e.preventDefault();
-  const tblKey = el.dataset.tbl;
-  const row = parseInt(el.dataset.row, 10) || 0;
-  const col = parseInt(el.dataset.col, 10) || 0;
-  const grid = parseTSV(text);
-  fillTable(tblKey, grid, row, col, false);
-  if (tblKey === 'params') refreshAutoTypes(true);
-  edMsg(`${TBL[tblKey].label} ${grid.length}행을 붙여넣었습니다`);
-});
 
 /* ── 범위 통째로 붙여넣기 ──────────────────── */
 let bulkTbl = null;
@@ -2063,7 +2281,14 @@ async function saveOper() {
         + (j.saved.defects ? ` · defect ${j.saved.defects}` : '')
         + (j.saved.links   ? ` · 연계 ${j.saved.links}` : '')
         + ` (평면 ${j.saved.lots * j.saved.params}행으로 조합됩니다)`);
+
+  const wasNew = !!cur._new;
   await openOper(d.oper_id);
+
+  // ★ openOper 가 화면을 다시 그리며 메시지를 지운다 — 다시 알려 준다.
+  //   새 공정이면 바로 적재해 볼 수 있다는 것도 함께.
+  edMsg(`저장 완료 — device ${j.saved.lots} · param ${j.saved.params}`
+        + (wasNew ? ' · 이제 [DB 만들기] 로 바로 적재할 수 있습니다' : ''));
 }
 
 async function deleteOper() {
