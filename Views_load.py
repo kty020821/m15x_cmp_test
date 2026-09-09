@@ -195,7 +195,11 @@ def load_queue(request):
       요청한 사람이 페이지를 떠나도 계속 돌아간다.
     """
     try:
-        return JsonResponse({'ok': True, **ls.queue_status()})
+        # oper_id 를 주면 그 공정의 최근 결과도 함께 (끝난 뒤에도 보이게)
+        oper_id = _body(request).get('oper_id') if request.method == 'POST' \
+                  else None
+        return JsonResponse({'ok': True,
+                             **ls.queue_status(recent_for=oper_id)})
     except Exception as e:
         return _fail(f'큐 조회 실패: {e}', {'items': []}, exc=e)
 
