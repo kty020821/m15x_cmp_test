@@ -250,36 +250,34 @@ def _split_pairs(text):
     return out
 
 
-# 비교 단위가 되는 항목 — SETUP_DATA_VALUE 안에 들어 있다
+# 비교 단위 — SETUP_KEY_VALUE 안에 들어 있다
 PARA_KEY = 'RECIPE_PARA'
 
 
 def _is_rawid(name):
     """
-    RAWID 계열 항목인가 — 비교에서 뺀다.
+    RAWID 계열인가 — 비교에서 뺀다.
 
     ★ RAWID 는 시스템이 매기는 일련번호라 장비마다 당연히 다르다.
       비교하면 전부 '다름' 으로 잡혀 진짜 차이가 묻힌다.
-    ★ 단, SETUP_KEY_RAWID(434/437)는 Modeling/Condition 구분이라
-      따로 쓰므로 여기서 걸러지든 말든 상관없다 —
-      그건 컬럼에서 직접 읽는다.
     """
     return 'RAWID' in str(name or '').upper()
 
 
 def to_items(df, pair_ch=True):
     """
-    조회 결과를 '항목 하나 = 한 줄' 로 펼친다.
+    'RECIPE_PARA 하나 + 설정 항목 하나 = 한 줄' 로 펼친다.
 
     반환: {(area, para, item): value}
       area  SETUP_KEY_RAWID (434 Modeling / 437 Condition)
-      para  RECIPE_PARA — 어느 파라미터의 설정인가
-      item  설정 항목 이름
+      para  RECIPE_PARA — SETUP_KEY_VALUE 안에 있다
+      item  설정 항목 — SETUP_DATA_VALUE 안에 있다
 
-    ★ SETUP_DATA_VALUE 하나에 RECIPE_PARA 와 그 설정들이 함께 있다.
-      RECIPE_PARA 를 꺼내 비교 단위로 삼고, 나머지를 항목으로 펼친다.
+    ★ 보려는 것은 '파라미터마다 설정이 같은가' 다.
+      그래서 RECIPE_PARA 를 비교 단위로 삼고, 그 파라미터의
+      SETUP_DATA_VALUE 를 항목별로 펼쳐 맞춰 본다.
     ★ EQP_ID·RECIPE_ID 는 두 대상이 당연히 다르므로 기준에 안 넣는다.
-      기준에 넣으면 아무것도 맞춰지지 않는다.
+      넣으면 모든 항목이 '한쪽에만 있음' 이 되어 아무것도 안 맞춰진다.
     ★ RAWID 계열은 뺀다 — 시스템 일련번호라 비교할 의미가 없다.
     """
     out = {}
@@ -291,33 +289,36 @@ def to_items(df, pair_ch=True):
     c_val = cols.get('SETUP_DATA_VALUE')
     c_area = cols.get('SETUP_KEY_RAWID')
 
-    if not c_val:
+    if not c_key or not c_val:
         # ★ 컬럼 이름이 다르면 조용히 빈 결과가 된다 —
         #   '조회는 됐는데 아무것도 안 나온다' 가 가장 찾기 어렵다.
-        print(f'[apc] SETUP_DATA_VALUE 컬럼이 없습니다. '
+        print(f'[apc] SETUP_KEY_VALUE / SETUP_DATA_VALUE 컬럼이 없습니다. '
               f'실제 컬럼: {", ".join(map(str, df.columns))}')
         return out
 
+    miss = 0
     for _, r in df.iterrows():
         area = str(r[c_area]) if c_area else ''
-        dv = _split_pairs(r[c_val])
+        kv = _split_pairs(r[c_key])
 
         # 이 행에 챔버 짝을 적용할지 — 레시피 표기로 판단한다
-        recipe = ''
-        if c_key:
-            recipe = _split_pairs(r[c_key]).get('RECIPE_ID', '')
-        pair = pair_ch and has_ch_suffix(recipe or dv.get('RECIPE_ID', ''))
+        pair = pair_ch and has_ch_suffix(kv.get('RECIPE_ID', ''))
 
-        para = dv.get(PARA_KEY, '')
+        para = kv.get(PARA_KEY, '')
         if not para:
+            miss += 1
             continue                     # 비교 단위가 없으면 건너뛴다
         para = normalize_ch(para, pair)
 
-        for item, value in dv.items():
-            if item == PARA_KEY or _is_rawid(item):
+        for item, value in _split_pairs(r[c_val]).items():
+            if _is_rawid(item):
                 continue
             out[(area, para, normalize_ch(item, pair))] = \
                 normalize_ch(value, pair)
+
+    if miss and not out:
+        print(f'[apc] {PARA_KEY} 가 SETUP_KEY_VALUE 에 없습니다 ({miss}행). '
+              f'예시: {str(df.iloc[0][c_key])[:200]}')
     return out
 
 
