@@ -1,0 +1,406 @@
+{% extends 'base.html' %}
+
+{% block title %}APC 설정 비교{% endblock %}
+
+{#
+  APC 설정 비교
+
+  두 대상(FAB · EQP_ID · RECIPE_ID)의 APC 모델링 설정을 나란히 놓고
+  무엇이 다른지 본다.
+
+  ★ 기본은 '다른 것만' 보여 준다. 설정 항목이 수백 개라 전부 늘어놓으면
+    정작 봐야 할 차이가 묻힌다. 같은 항목은 접어 두고 필요할 때 편다.
+  ★ SETUP_KEY_RAWID(434/437)는 APC 화면의 어느 영역인지를 뜻한다 —
+    섞으면 어느 설정인지 알 수 없어 영역별로 나눠 본다.
+#}
+
+{% block extra_css %}
+<style>
+:root {
+  --ap-font: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+             'Segoe UI', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --ap-mono: 'SF Mono', 'JetBrains Mono', 'Consolas', monospace;
+  --diff: #dc2626;
+  --only: #f59e0b;
+  --same: #94a3b8;
+}
+.ap-page, .ap-page input, .ap-page select, .ap-page button, .ap-page table {
+  font-family: var(--ap-font);
+}
+.ap-page { padding: 26px 30px 80px; }
+.ap-title { font-size: 20px; font-weight: 800; color: var(--tx-1);
+  margin: 0 0 4px; letter-spacing: -.02em; }
+.ap-sub { font-size: 12.5px; color: var(--tx-muted); margin: 0 0 20px; }
+
+/* ── 대상 입력 ─────────────────────────────────── */
+.ap-forms { display: flex; gap: 14px; align-items: stretch;
+  flex-wrap: wrap; margin-bottom: 14px; }
+.ap-card { flex: 1; min-width: 300px; background: var(--bg-3);
+  border: 1px solid var(--bd); border-radius: 16px; padding: 16px 18px; }
+.ap-card.ref { border-left: 3px solid var(--tx-2); }
+.ap-card.tgt { border-left: 3px solid var(--accent); }
+.ap-card h3 { font-size: 13px; font-weight: 800; margin: 0 0 3px;
+  color: var(--tx-1); }
+.ap-card .hint { font-size: 11px; color: var(--tx-muted);
+  margin-bottom: 11px; }
+.ap-row { display: flex; gap: 9px; flex-wrap: wrap; }
+.ap-fld { flex: 1; min-width: 92px; }
+.ap-fld label { display: block; font-size: 10.5px; font-weight: 800;
+  color: var(--tx-muted); letter-spacing: .03em; margin-bottom: 5px; }
+.ap-fld input {
+  width: 100%; box-sizing: border-box; font-size: 13px; font-weight: 600;
+  color: var(--tx-1); background: var(--bg-2);
+  border: 1px solid var(--bd); border-radius: 10px;
+  padding: 9px 11px; outline: none; }
+.ap-fld input:focus { border-color: var(--accent); }
+
+.ap-go { display: flex; gap: 8px; align-items: center; margin-bottom: 18px;
+  flex-wrap: wrap; }
+.btn-go { padding: 11px 30px; background: var(--accent); color: #fff;
+  border: none; border-radius: 12px; font-size: 13.5px; font-weight: 800;
+  cursor: pointer; }
+.btn-go:disabled { opacity: .4; cursor: not-allowed; }
+.btn-lite { padding: 9px 15px; background: transparent; color: var(--tx-2);
+  border: 1px solid var(--bd); border-radius: 10px; font-size: 12px;
+  font-weight: 700; cursor: pointer; }
+.ap-msg { font-size: 12px; font-weight: 700; }
+.ap-msg.err { color: var(--diff); }
+
+/* ── 요약 ──────────────────────────────────────── */
+.ap-sum { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.sum-card { background: var(--bg-3); border: 1px solid var(--bd);
+  border-radius: 12px; padding: 11px 16px; cursor: pointer;
+  min-width: 104px; transition: border-color .15s; }
+.sum-card:hover { border-color: var(--accent); }
+.sum-card.on { border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent); }
+.sum-card .n { font-size: 21px; font-weight: 800; line-height: 1.15;
+  font-family: var(--ap-mono); }
+.sum-card .l { font-size: 11px; font-weight: 700; color: var(--tx-muted);
+  margin-top: 2px; }
+.sum-card.c-diff .n { color: var(--diff); }
+.sum-card.c-only .n { color: var(--only); }
+.sum-card.c-same .n { color: var(--same); }
+
+/* ── 표 ────────────────────────────────────────── */
+.ap-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 9px; }
+.ap-tools input, .ap-tools select {
+  font-size: 12px; font-weight: 600; color: var(--tx-1);
+  background: var(--bg-2); border: 1px solid var(--bd);
+  border-radius: 9px; padding: 7px 10px; outline: none; }
+.ap-tools .grow { flex: 1; min-width: 160px; }
+
+.ap-wrap { border: 1px solid var(--bd); border-radius: 14px;
+  overflow: auto; max-height: 62vh; background: var(--bg-3); }
+table.ap { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.ap thead th { position: sticky; top: 0; z-index: 2;
+  background: var(--bg-2); font-size: 11px; font-weight: 800;
+  color: var(--tx-1); text-align: left; padding: 9px 12px;
+  border-bottom: 2px solid var(--bd); white-space: nowrap; }
+table.ap td { padding: 7px 12px; border-bottom: 1px solid rgba(128,128,128,.1);
+  vertical-align: top; }
+table.ap tbody tr:hover td { background: rgba(128,128,128,.05); }
+
+td.item { font-weight: 700; color: var(--tx-1); }
+td.val { font-family: var(--ap-mono); font-size: 11.5px;
+  word-break: break-all; max-width: 260px; }
+td.val.gone { color: var(--tx-muted); font-style: italic; }
+tr.r-diff td.val { color: var(--diff); font-weight: 700; }
+tr.r-diff { background: rgba(220,38,38,.045); }
+tr.r-only { background: rgba(245,158,11,.05); }
+
+.tag { display: inline-block; font-size: 10px; font-weight: 800;
+  border-radius: 20px; padding: 1px 9px; white-space: nowrap; }
+.tag.t-diff { color: var(--diff); background: rgba(220,38,38,.13); }
+.tag.t-only { color: #b45309; background: rgba(180,83,9,.13); }
+.tag.t-same { color: var(--tx-muted); background: rgba(128,128,128,.14); }
+
+td.area { font-size: 11px; color: var(--tx-muted); white-space: nowrap; }
+td.key  { font-size: 11px; color: var(--tx-2); font-family: var(--ap-mono);
+  max-width: 220px; word-break: break-all; }
+
+.none-row { text-align: center; color: var(--tx-muted); padding: 34px;
+  font-size: 13px; }
+.setup-warn { background: rgba(245,158,11,.1);
+  border: 1px solid rgba(245,158,11,.4); border-radius: 12px;
+  padding: 12px 16px; margin-bottom: 16px; font-size: 12.5px;
+  color: var(--tx-1); line-height: 1.7; }
+.setup-warn code { font-family: var(--ap-mono); font-size: 11.5px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ap-page">
+  <h1 class="ap-title">APC 설정 비교</h1>
+  <p class="ap-sub">두 대상의 APC 모델링 설정을 나란히 놓고 다른 부분을 찾습니다.</p>
+
+  {% if not config_ok %}
+  <div class="setup-warn">
+    <b>설정이 필요합니다</b> — <code>settings.py</code> 에 아래를 추가하세요.<br>
+    <code>APC_PROJECT = '프로젝트명'</code><br>
+    <code>APC_API_KEY = 'API 키'</code>
+  </div>
+  {% endif %}
+
+  <div class="ap-forms">
+    <div class="ap-card ref">
+      <h3>기준 (Reference)</h3>
+      <div class="hint">비교의 기준이 되는 대상</div>
+      <div class="ap-row">
+        <div class="ap-fld"><label>FAB</label>
+          <input id="r-fab" placeholder="m15x"></div>
+        <div class="ap-fld" style="flex:1.4;"><label>EQP_ID</label>
+          <input id="r-eqp" placeholder="CMP01"></div>
+        <div class="ap-fld" style="flex:1.4;"><label>RECIPE_ID</label>
+          <input id="r-rcp" placeholder="비우면 전체"></div>
+      </div>
+    </div>
+
+    <div class="ap-card tgt">
+      <h3>대상 (Target)</h3>
+      <div class="hint">기준과 견줄 대상</div>
+      <div class="ap-row">
+        <div class="ap-fld"><label>FAB</label>
+          <input id="t-fab" placeholder="m15x"></div>
+        <div class="ap-fld" style="flex:1.4;"><label>EQP_ID</label>
+          <input id="t-eqp" placeholder="CMP02"></div>
+        <div class="ap-fld" style="flex:1.4;"><label>RECIPE_ID</label>
+          <input id="t-rcp" placeholder="비우면 전체"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ap-go">
+    <button class="btn-go" id="btn-go" onclick="runCompare()">비교</button>
+    <button class="btn-lite" onclick="swapSides()">기준 ↔ 대상 바꾸기</button>
+    <button class="btn-lite" onclick="copyDiff()">다른 항목 복사</button>
+    <span class="ap-msg" id="msg"></span>
+  </div>
+
+  <div id="result" style="display:none;">
+    <div class="ap-sum" id="summary"></div>
+
+    <div class="ap-tools">
+      <input class="grow" id="f-text" placeholder="항목·값 검색"
+             oninput="render()">
+      <select id="f-area" onchange="render()">
+        <option value="">영역 전체</option>
+      </select>
+      <label style="font-size:12px;font-weight:700;color:var(--tx-2);">
+        <input type="checkbox" id="f-same" onchange="render()"
+               style="vertical-align:middle;"> 같은 항목도 보기</label>
+      <span class="ap-msg" id="cnt" style="margin-left:auto;
+            color:var(--tx-muted);"></span>
+    </div>
+
+    <div class="ap-wrap">
+      <table class="ap">
+        <thead><tr>
+          <th style="width:96px;">영역</th>
+          <th style="width:180px;">대상</th>
+          <th style="width:200px;">항목</th>
+          <th>기준 값</th>
+          <th>대상 값</th>
+          <th style="width:80px;">판정</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const API_COMPARE = "{% url 'apc-compare' %}";
+
+let data = null;        // 서버가 준 비교 결과
+let statusFilter = '';  // 요약 카드로 거른 상태
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function g(id) { return (document.getElementById(id).value || '').trim(); }
+
+function msg(t, err) {
+  const el = document.getElementById('msg');
+  el.className = 'ap-msg' + (err ? ' err' : '');
+  el.textContent = t;
+}
+
+async function postJSON(url, payload) {
+  /* ★ 응답을 글자로 먼저 받는다 — HTML 이 오면 res.json() 은
+     "Unexpected token '<'" 만 남기고 진짜 원인을 숨긴다. */
+  let res, text;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify(payload || {}),
+    });
+    text = await res.text();
+  } catch (e) {
+    return {ok: false, error: `서버에 연결하지 못했습니다: ${e.message}`};
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const head = (text || '').trim().slice(0, 200);
+    console.error('API 응답 오류', url, res.status, head);
+    return {ok: false,
+            error: res.status === 404
+              ? `경로를 찾을 수 없습니다 (404) — urls.py 를 확인하세요`
+              : `서버 오류 (${res.status}) — 서버 로그를 확인하세요`};
+  }
+}
+
+/* ── 비교 실행 ─────────────────────────────────── */
+async function runCompare() {
+  const btn = document.getElementById('btn-go');
+  btn.disabled = true; btn.textContent = '조회 중…';
+  msg('APC 설정을 받아오는 중입니다…');
+
+  const j = await postJSON(API_COMPARE, {
+    ref: {fab: g('r-fab'), eqp_id: g('r-eqp'), recipe_id: g('r-rcp')},
+    tgt: {fab: g('t-fab'), eqp_id: g('t-eqp'), recipe_id: g('t-rcp')},
+  });
+
+  btn.disabled = false; btn.textContent = '비교';
+
+  if (!j || !j.ok) {
+    msg((j && j.error) || '조회 실패', true);
+    return;
+  }
+
+  data = j;
+  statusFilter = '';
+  document.getElementById('result').style.display = '';
+
+  // 영역 목록 채우기
+  const sel = document.getElementById('f-area');
+  sel.innerHTML = '<option value="">영역 전체</option>' +
+    (j.areas || []).map(a => {
+      const r = (j.rows || []).find(x => x.area === a);
+      return `<option value="${esc(a)}">${esc(r ? r.area_name : a)}</option>`;
+    }).join('');
+
+  const s = j.summary || {};
+  msg(`기준 ${s.ref_rows || 0}행 · 대상 ${s.tgt_rows || 0}행 조회`);
+  renderSummary();
+  render();
+}
+
+/* 기준과 대상을 맞바꾼다 — 어느 쪽을 기준으로 볼지 자주 바뀐다 */
+function swapSides() {
+  for (const k of ['fab', 'eqp', 'rcp']) {
+    const a = document.getElementById(`r-${k}`);
+    const b = document.getElementById(`t-${k}`);
+    [a.value, b.value] = [b.value, a.value];
+  }
+  msg('기준과 대상을 바꿨습니다 — 다시 비교하세요');
+}
+
+/* ── 요약 ──────────────────────────────────────── */
+function renderSummary() {
+  const s = (data && data.summary) || {};
+  const card = (key, cls, n, label) => `
+    <div class="sum-card ${cls} ${statusFilter === key ? 'on' : ''}"
+         onclick="setFilter('${key}')">
+      <div class="n">${n || 0}</div><div class="l">${label}</div>
+    </div>`;
+
+  document.getElementById('summary').innerHTML =
+      card('diff',     'c-diff', s.diff,     '값이 다름')
+    + card('ref_only', 'c-only', s.ref_only, '기준에만')
+    + card('tgt_only', 'c-only', s.tgt_only, '대상에만')
+    + card('same',     'c-same', s.same,     '같음')
+    + card('',         '',       s.total,    '전체');
+}
+
+function setFilter(k) {
+  statusFilter = (statusFilter === k) ? '' : k;
+  /* 같음을 고르면 체크박스도 함께 켠다 — 안 그러면 아무것도 안 보인다 */
+  if (statusFilter === 'same') document.getElementById('f-same').checked = true;
+  renderSummary();
+  render();
+}
+
+/* ── 표 ────────────────────────────────────────── */
+function render() {
+  if (!data) return;
+
+  const showSame = document.getElementById('f-same').checked;
+  const fa = document.getElementById('f-area').value;
+  const fx = (document.getElementById('f-text').value || '')
+             .trim().toUpperCase();
+
+  const rows = (data.rows || []).filter(r => {
+    if (statusFilter && r.status !== statusFilter) return false;
+    if (!statusFilter && !showSame && r.status === 'same') return false;
+    if (fa && r.area !== fa) return false;
+    if (fx) {
+      const hay = `${r.item} ${r.key} ${r.ref ?? ''} ${r.tgt ?? ''}`
+                  .toUpperCase();
+      if (!hay.includes(fx)) return false;
+    }
+    return true;
+  });
+
+  const TAG = {diff: ['t-diff', '다름'], ref_only: ['t-only', '기준만'],
+               tgt_only: ['t-only', '대상만'], same: ['t-same', '같음']};
+
+  document.getElementById('tbody').innerHTML = rows.map(r => {
+    const [cls, label] = TAG[r.status] || ['t-same', r.status];
+    const rowCls = r.status === 'diff' ? 'r-diff'
+                 : (r.status === 'same' ? '' : 'r-only');
+    const cell = v => v === null || v === undefined
+      ? '<span class="gone">(없음)</span>' : esc(v);
+    return `
+    <tr class="${rowCls}">
+      <td class="area">${esc(r.area_name)}</td>
+      <td class="key">${esc(r.key)}</td>
+      <td class="item">${esc(r.item)}</td>
+      <td class="val ${r.ref == null ? 'gone' : ''}">${cell(r.ref)}</td>
+      <td class="val ${r.tgt == null ? 'gone' : ''}">${cell(r.tgt)}</td>
+      <td><span class="tag ${cls}">${label}</span></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="6" class="none-row">
+      ${showSame || statusFilter
+        ? '조건에 맞는 항목이 없습니다.'
+        : '다른 항목이 없습니다 — 두 대상의 설정이 같습니다.<br>' +
+          '<span style="font-size:12px;">같은 항목도 보려면 위 체크박스를 켜세요.</span>'}
+    </td></tr>`;
+
+  document.getElementById('cnt').textContent =
+    `${rows.length} / ${(data.rows || []).length}행`;
+}
+
+/* 다른 항목만 탭 구분으로 복사 — 엑셀·메일에 그대로 붙일 수 있게 */
+function copyDiff() {
+  if (!data) { msg('먼저 비교하세요', true); return; }
+  const rows = (data.rows || []).filter(r => r.status !== 'same');
+  if (!rows.length) { msg('다른 항목이 없습니다'); return; }
+
+  const head = ['영역', '대상', '항목', '기준', '대상값', '판정'].join('\t');
+  const body = rows.map(r => [
+    r.area_name, r.key, r.item,
+    r.ref ?? '', r.tgt ?? '', r.status,
+  ].join('\t')).join('\n');
+
+  navigator.clipboard.writeText(head + '\n' + body)
+    .then(() => msg(`${rows.length}행을 복사했습니다`))
+    .catch(() => msg('복사하지 못했습니다', true));
+}
+
+/* Enter 로 바로 비교 */
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Enter' && ev.target.tagName === 'INPUT'
+      && ev.target.closest('.ap-card')) {
+    runCompare();
+  }
+});
+</script>
+{% endblock %}
