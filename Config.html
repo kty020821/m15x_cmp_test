@@ -976,6 +976,7 @@ async function buildDb() {
   if (!j || !j.ok) {
     edMsg((j && j.error) || '적재 요청 실패', true);
     if (btn) { btn.disabled = false; btn.textContent = 'DB 만들기'; }
+    pollDb();          // 남이 이미 돌리는 중이면 그 진행을 따라간다
     return;
   }
   edMsg(`${cur.oper_id} 적재를 시작했습니다 — 진행 상황을 확인합니다`);
@@ -996,8 +997,20 @@ async function pollDb() {
 
   if (mine) {
     // 아직 큐에 있다 — 대기 또는 실행 중
-    if (btn) { btn.disabled = true; btn.textContent = '적재 중…'; }
-    edMsg(`${mine.status} — ${mine.message || cur.oper_id}`);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = mine.status === '대기' ? '대기 중…' : '적재 중…';
+    }
+    /* ★ 대기면 앞에 몇 개가 남았는지 알려 준다.
+       여러 명이 각자 공정을 넣으면 워커가 하나씩 처리하므로,
+       '대기' 라고만 보이면 얼마나 기다릴지 가늠할 수 없다. */
+    let extra = '';
+    if (mine.status === '대기') {
+      extra = mine.ahead ? ` · 앞에 ${mine.ahead}개 대기` : ' · 곧 시작합니다';
+    } else if (mine.by && mine.by !== 'config') {
+      extra = ` · ${mine.by} 요청`;
+    }
+    edMsg(`${mine.status} — ${mine.message || cur.oper_id}${extra}`);
     dbTimer = setTimeout(pollDb, 3000);
     return;
   }
