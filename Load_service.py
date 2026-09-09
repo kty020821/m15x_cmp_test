@@ -274,8 +274,16 @@ def claim(oper_id, days=DEFAULT_DAYS, user='', date_from=None, date_to=None):
         except Exception:
             pass
         if cur_info:
-            return False, {'error': f'{oper_id} 는 이미 적재 중입니다',
-                           'running': cur_info}
+            # ★ 누가 언제 시작했는지 함께 알려 준다 — 기다릴지
+            #   나중에 할지 판단할 수 있어야 한다.
+            who = cur_info['by']
+            when = cur_info['started_at'][11:16] or cur_info['started_at']
+            return False, {
+                'error': f'{oper_id} 는 이미 적재 중입니다 '
+                         f'({who} · {when} 시작'
+                         + (f" · {cur_info['message']}"
+                            if cur_info['message'] else '') + ')',
+                'running': cur_info}
         return False, {'error': f'적재 요청 실패: {e}'}
 
 
@@ -807,11 +815,20 @@ def queue_status(recent_for=None):
             " WHERE status IN ('대기', '실행중')"
             " ORDER BY CASE status WHEN '실행중' THEN 0 ELSE 1 END,"
             " requested_at")
-        items = [{'oper_id': r[0], 'status': r[1], 'message': r[2] or '',
-                  'by': r[3] or '',
-                  'started_at': str(r[4])[:19] if r[4] else '',
-                  'requested_at': str(r[5])[:19] if r[5] else ''}
-                 for r in cur.fetchall()]
+        rows = cur.fetchall()
+
+    # ★ 대기 순번 — 여러 명이 각자 공정을 넣으면 워커가 하나씩 처리한다.
+    #   '대기' 라고만 보이면 몇 번째인지 몰라 무작정 기다리게 된다.
+    items, ahead = [], 0
+    for r in rows:
+        it = {'oper_id': r[0], 'status': r[1], 'message': r[2] or '',
+              'by': r[3] or '',
+              'started_at': str(r[4])[:19] if r[4] else '',
+              'requested_at': str(r[5])[:19] if r[5] else ''}
+        if r[1] == '대기':
+            it['ahead'] = ahead        # 앞에 몇 개가 남았나
+            ahead += 1
+        items.append(it)
 
     out = {'waiting': cnt.get('대기', 0), 'running': cnt.get('실행중', 0),
            'items': items, 'worker': worker_alive()}
