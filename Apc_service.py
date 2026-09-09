@@ -50,6 +50,39 @@ def config_ok():
     return bool(c['project'] and c['key'])
 
 
+def check(fab='m15x', eqp_id='*', recipe_id='*'):
+    """
+    설정과 연결을 확인한다 — 조회가 안 될 때 어디가 문제인지 본다.
+
+    python manage.py shell -c "from equipment import apc_service as a; a.check('m15x','CMP01')"
+    """
+    c = _cfg()
+    print(f"APC_PROJECT : {c['project'] or '(없음)'}")
+    print(f"APC_API_KEY : "
+          f"{(c['key'][:4] + '…' + c['key'][-4:]) if len(c['key']) > 8 else ('설정됨' if c['key'] else '(없음)')}")
+    if not (c['project'] and c['key']):
+        print('→ settings.py 에 APC_PROJECT / APC_API_KEY 를 넣으세요')
+        return
+
+    api_name = f'{str(fab).lower()}-cmp-apc-modeling-table1'
+    url = f"{API_URL}/{c['project']}/{api_name}/page"
+    print(f'요청 주소   : {url}')
+
+    try:
+        df = fetch(fab, eqp_id, recipe_id)
+        print(f'조회 결과   : {len(df):,}행')
+        if len(df):
+            print(f'컬럼        : {", ".join(map(str, df.columns))}')
+            print('\n첫 행:')
+            for k, v in df.iloc[0].items():
+                print(f'  {k}: {str(v)[:120]}')
+        else:
+            print('→ 조건에 맞는 데이터가 없습니다 '
+                  '(FAB·EQP_ID·RECIPE_ID 를 확인하세요)')
+    except Exception as e:
+        print(f'\n실패: {e}')
+
+
 def fetch(fab, eqp_id, recipe_id):
     """
     한 대상의 APC 설정을 받아온다.
@@ -82,22 +115,36 @@ def fetch(fab, eqp_id, recipe_id):
                 'sortBy': 'RAWID', 'sortOrder': 'ASC',
                 'bindParams': [bind]}
 
-        res = None
+        # ★ 실패하면 왜 실패했는지 남긴다.
+        #   '응답 오류' 만으로는 주소가 틀린 건지, 키가 틀린 건지,
+        #   조건이 안 맞는 건지 알 수 없다.
+        res, last = None, ''
         for i in range(RETRY):
             try:
                 res = requests.post(url, headers=headers,
                                     data=json.dumps(body), timeout=TIMEOUT)
                 if res.status_code == 200:
                     break
+                last = (f'HTTP {res.status_code} · '
+                        f'{(res.text or "")[:300]}')
+                print(f'[apc] 시도 {i + 1}/{RETRY} — {last}')
             except Exception as e:
-                if i >= RETRY - 1:
-                    raise RuntimeError(f'APC API 호출 실패: {e}')
+                last = f'{e.__class__.__name__}: {e}'
+                print(f'[apc] 시도 {i + 1}/{RETRY} — {last}')
             res = None
 
-        if res is None or res.status_code != 200:
-            raise RuntimeError(
-                f'APC API 응답 오류'
-                + (f' ({res.status_code})' if res is not None else ''))
+        if res is None:
+            hint = ''
+            if 'HTTP 401' in last or 'HTTP 403' in last:
+                hint = ' — API 키(APC_API_KEY)를 확인하세요'
+            elif 'HTTP 404' in last:
+                hint = (f' — 주소나 이름이 틀렸을 수 있습니다 '
+                        f'(api_name: {api_name})')
+            elif 'Timeout' in last or 'Connection' in last:
+                hint = ' — 서버에서 dp.skhynix.com 으로 나갈 수 있는지 확인하세요'
+            raise RuntimeError(f'APC API 응답 오류: {last}{hint}\n'
+                               f'  요청: {url}\n'
+                               f'  조건: {bind}')
 
         try:
             content = json.loads(res.text).get('Content') or []
