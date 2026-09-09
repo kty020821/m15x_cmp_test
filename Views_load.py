@@ -34,6 +34,24 @@ def _fail(msg, payload=None, exc=None):
     return JsonResponse(out, status=200)
 
 
+def _who(request, fallback=''):
+    """
+    요청자 표기.
+
+    ★ 여러 명이 같은 공정을 누를 수 있다. '이미 적재 중' 이라고만
+      하면 누구를 기다려야 하는지 알 수 없다.
+      로그인 정보가 있으면 그것을, 없으면 화면이 보낸 값을 쓴다.
+    """
+    try:
+        u = getattr(request, 'user', None)
+        name = getattr(u, 'username', '') if u else ''
+        if name and name != 'AnonymousUser':
+            return str(name)[:100]
+    except Exception:
+        pass
+    return str(fallback or '')[:100]
+
+
 def _body(request):
     try:
         return json.loads(request.body) if request.body else {}
@@ -136,7 +154,8 @@ def load_run(request):
     incremental = bool(b.get('incremental')) and not (date_from or date_to)
 
     try:
-        res = ls.run_async(ids, days=days, user=b.get('user', ''),
+        res = ls.run_async(ids, days=days,
+                           user=_who(request, b.get('user', '')),
                            date_from=date_from, date_to=date_to,
                            incremental=incremental)
         if not res.get('ok'):
