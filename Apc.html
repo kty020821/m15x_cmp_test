@@ -83,19 +83,23 @@
 .sum-card.c-same .n { color: var(--same); }
 
 /* ── 표 ────────────────────────────────────────── */
-.ap-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  margin-bottom: 9px; }
+/* 요약 카드와 필터를 한 줄에 — 필터는 오른쪽에 작게 */
+.ap-bar { display: flex; gap: 12px; align-items: flex-end;
+  flex-wrap: wrap; margin-bottom: 10px; }
+.ap-bar .ap-sum { margin-bottom: 0; }
+.ap-tools { display: flex; gap: 6px; align-items: center;
+  margin-left: auto; padding-bottom: 3px; }
 .ap-tools input, .ap-tools select {
-  font-size: 12px; font-weight: 600; color: var(--tx-1);
+  font-size: 11.5px; font-weight: 600; color: var(--tx-1);
   background: var(--bg-2); border: 1px solid var(--bd);
-  border-radius: 9px; padding: 7px 10px; outline: none; }
-.ap-tools .grow { flex: 1; min-width: 160px; }
+  border-radius: 8px; padding: 6px 9px; outline: none; }
+.ap-tools input { width: 130px; }
+.ap-tools input:focus, .ap-tools select:focus { border-color: var(--accent); }
+.ap-tools .ap-msg { color: var(--tx-muted); white-space: nowrap; }
 
 .ap-wrap { border: 1px solid var(--bd); border-radius: 14px;
   overflow: auto; max-height: 62vh; background: var(--bg-3); }
 table.ap { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-/* ★ 전부 가운데 정렬 — 값이 짧은 코드·숫자라 왼쪽 정렬이면
-   열 사이가 벌어져 어느 값이 어느 열인지 눈이 헤맨다. */
 /* ★ 전부 가운데 정렬 — 값이 짧은 코드·숫자라 왼쪽 정렬이면
    열 사이가 벌어져 어느 값이 어느 열인지 눈이 헤맨다. */
 table.ap thead th { position: sticky; top: 0; z-index: 2;
@@ -119,6 +123,9 @@ td.para { font-weight: 700; color: var(--tx-1);
 td.val { font-family: var(--ap-mono); font-size: 12px;
   word-break: break-all; }
 td.val.gone { color: var(--tx-muted); font-style: italic; }
+/* 값이 비어 있다 — 항목은 있는데 설정이 안 된 상태 */
+.empty { color: var(--only); font-style: italic; font-weight: 700; }
+.gone  { color: var(--same); font-style: italic; }
 tr.r-diff td.val { color: var(--diff); font-weight: 700; }
 tr.r-diff { background: rgba(220,38,38,.045); }
 tr.r-only { background: rgba(245,158,11,.05); }
@@ -196,19 +203,15 @@ td.area { font-size: 11.5px; color: var(--tx-2); white-space: nowrap;
   </div>
 
   <div id="result" style="display:none;">
-    <div class="ap-sum" id="summary"></div>
-
-    <div class="ap-tools">
-      <input class="grow" id="f-text" placeholder="항목·값 검색"
-             oninput="render()">
-      <select id="f-area" onchange="render()">
-        <option value="">영역 전체</option>
-      </select>
-      <label style="font-size:12px;font-weight:700;color:var(--tx-2);">
-        <input type="checkbox" id="f-same" onchange="render()"
-               style="vertical-align:middle;"> 같은 항목도 보기</label>
-      <span class="ap-msg" id="cnt" style="margin-left:auto;
-            color:var(--tx-muted);"></span>
+    <div class="ap-bar">
+      <div class="ap-sum" id="summary"></div>
+      <div class="ap-tools">
+        <select id="f-area" onchange="render()">
+          <option value="">구분 전체</option>
+        </select>
+        <input id="f-text" placeholder="검색" oninput="render()">
+        <span class="ap-msg" id="cnt"></span>
+      </div>
     </div>
 
     <div class="ap-wrap">
@@ -302,7 +305,7 @@ async function runCompare() {
 
   // 영역 목록 채우기
   const sel = document.getElementById('f-area');
-  sel.innerHTML = '<option value="">영역 전체</option>' +
+  sel.innerHTML = '<option value="">구분 전체</option>' +
     (j.areas || []).map(a => {
       const r = (j.rows || []).find(x => x.area === a);
       return `<option value="${esc(a)}">${esc(r ? r.area_name : a)}</option>`;
@@ -348,8 +351,6 @@ function renderSummary() {
 
 function setFilter(k) {
   statusFilter = (statusFilter === k) ? '' : k;
-  /* 같음을 고르면 체크박스도 함께 켠다 — 안 그러면 아무것도 안 보인다 */
-  if (statusFilter === 'same') document.getElementById('f-same').checked = true;
   renderSummary();
   render();
 }
@@ -408,14 +409,15 @@ function markSort() {
 function render() {
   if (!data) return;
 
-  const showSame = document.getElementById('f-same').checked;
   const fa = document.getElementById('f-area').value;
   const fx = (document.getElementById('f-text').value || '')
              .trim().toUpperCase();
 
   const rows = (data.rows || []).filter(r => {
+    /* ★ 기본은 다른 것만. '같음' 카드를 누르면 그것만 보인다.
+       (체크박스로 따로 켜는 것은 카드와 같은 일이라 없앴다) */
     if (statusFilter && r.status !== statusFilter) return false;
-    if (!statusFilter && !showSame && r.status === 'same') return false;
+    if (!statusFilter && r.status === 'same') return false;
     if (fa && r.area !== fa) return false;
     if (fx) {
       const hay = `${r.item} ${r.para} ${r.ref ?? ''} ${r.tgt ?? ''}`
@@ -432,8 +434,18 @@ function render() {
     const [cls, label] = TAG[r.status] || ['t-same', r.status];
     const rowCls = r.status === 'diff' ? 'r-diff'
                  : (r.status === 'same' ? '' : 'r-only');
-    const cell = v => v === null || v === undefined
-      ? '<span class="gone">(없음)</span>' : esc(v);
+    /* ★ 세 가지를 구분해서 보여 준다.
+         (없음)  항목 자체가 그쪽에 없다 (판정: 기준만/대상만)
+         (빈값)  항목은 있는데 값이 비어 있다
+         값      그대로
+       구분이 안 되면 '다름' 인데 화면엔 아무것도 안 보이는 일이 생긴다. */
+    const cell = v => {
+      if (v === null || v === undefined)
+        return '<span class="gone">(없음)</span>';
+      if (String(v).trim() === '')
+        return '<span class="empty">(빈값)</span>';
+      return esc(v);
+    };
     return `
     <tr class="${rowCls}">
       <td class="area">${esc(r.area_name)}</td>
@@ -444,10 +456,10 @@ function render() {
       <td><span class="tag ${cls}">${label}</span></td>
     </tr>`;
   }).join('') || `<tr><td colspan="6" class="none-row">
-      ${showSame || statusFilter
+      ${statusFilter
         ? '조건에 맞는 항목이 없습니다.'
         : '다른 항목이 없습니다 — 두 대상의 설정이 같습니다.<br>' +
-          '<span style="font-size:12px;">같은 항목도 보려면 위 체크박스를 켜세요.</span>'}
+          '<span style="font-size:12px;">전체를 보려면 위 «같음» 카드를 누르세요.</span>'}
     </td></tr>`;
 
   document.getElementById('cnt').textContent =
