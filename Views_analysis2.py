@@ -25,6 +25,7 @@ equipment/views_analysis2.py
 """
 
 import json
+import math
 import re
 import traceback
 
@@ -385,17 +386,23 @@ def an2_chart(request):
     차트 1개분 데이터.
 
       x_col   'DATE' 또는 숫자 컬럼   ← 상관 차트를 따로 두지 않는 이유
-      y_col   숫자 컬럼
+      y_cols  숫자 컬럼 목록 (기존 y_col 단일 입력도 지원)
       legend  색 구분 컬럼 (선택)
       spans   이슈 구간 목록 (선택)
     """
     b = _body(request)
     oper_id = b.get('oper_id')
-    x_col, y_col = b.get('x_col'), b.get('y_col')
+    x_col = b.get('x_col')
+    y_cols = b.get('y_cols', [b.get('y_col')])
+    if not isinstance(y_cols, list) or not y_cols or any(not isinstance(c, str) for c in y_cols):
+        return _fail('Y 컬럼을 하나 이상 선택하세요', {'data': []})
+    y_cols = list(dict.fromkeys(c.upper() for c in y_cols))
+    y_col = y_cols[0]  # 기존 단일 Y 클라이언트와 응답 호환
+
     legend = b.get('legend') or None
     lot_cd = b.get('lot_cd') or None
 
-    if not _safe(oper_id) or not _safe(x_col) or not _safe(y_col):
+    if not _safe(oper_id) or not _safe(x_col) or any(not _safe(c) for c in y_cols):
         return _fail('컬럼 이름 형식 오류', {'data': []})
 
     table = _table(oper_id)
@@ -408,11 +415,12 @@ def an2_chart(request):
             names = {c for c, _ in cols}
             num = {c for c, d in cols if d in NUMERIC_TYPES}
 
-            for c in (x_col, y_col):
+            for c in [x_col] + y_cols:
                 if c.upper() not in names:
                     return _fail(f'{c} 컬럼이 없습니다', {'data': []})
-            if y_col.upper() not in num:
-                return _fail(f'{y_col} 은 숫자 컬럼이 아닙니다', {'data': []})
+            for c in y_cols:
+                if c not in num:
+                    return _fail(f'{c} 은 숫자 컬럼이 아닙니다', {'data': []})
             is_date_x = x_col.upper() == 'DATE'
             if not is_date_x and x_col.upper() not in num:
                 return _fail(f'{x_col} 은 숫자 컬럼이 아닙니다', {'data': []})
@@ -439,29 +447,42 @@ def an2_chart(request):
                      'lpad(CAST("WF_ID" AS VARCHAR), 2, \'0\')'
                      if {'LOT_ID', 'WF_ID'} <= names else ", '', ''")
 
+            ysel = ', '.join(f'"{c}"::double precision' for c in y_cols)
+            # 모든 Y가 채워진 행만 남기면 서로 다른 스텝의 측정값이 사라집니다.
+            y_present = ' OR '.join(f'"{c}" IS NOT NULL' for c in y_cols)
             cur.execute(f'''
-                SELECT {idsel}, {xsel}, "{y_col}"::double precision,
+                SELECT {idsel}, {xsel}, {ysel},
                        ({span_sql}){lsel}{wfsel}
                 FROM {table}
                 WHERE {where} AND "{x_col}" IS NOT NULL
-                  AND "{y_col}" IS NOT NULL
+                  AND ({y_present})
                 ORDER BY "DATE"
             ''', args + wargs)
             rows = cur.fetchall()
 
-        # ★ 값은 그대로 보낸다 — 반올림하지 않는다.
-        data = [{
-            'id': r[0],
-            'x': (str(r[1])[:19] if is_date_x
-                  else (float(r[1]) if r[1] is not None else None)),
-            'y': float(r[2]) if r[2] is not None else None,
-            'span': r[3],
-            'g': r[4] or '',
-            'w': f'{r[5]}.{r[6]}' if r[5] else '',
-        } for r in rows]
+        # 한 행에 Y가 일부만 있어도 해당 값은 독립적인 점으로 그립니다.
+        # 같은 원본 행의 모든 시리즈는 같은 id를 유지해 선택 연동을 보존합니다.
+        data = []
+        offset = 2 + len(y_cols)
+        counts = {c: 0 for c in y_cols}
+        for r in rows:
+            x = str(r[1])[:19] if is_date_x else float(r[1])
+            if not is_date_x and not math.isfinite(x):
+                continue
+            for i, column in enumerate(y_cols):
+                value = r[2 + i]
+                if value is None or not math.isfinite(float(value)):
+                    continue
+                data.append({
+                    'id': r[0], 'x': x, 'y': float(value), 'y_col': column,
+                    'span': r[offset], 'g': r[offset + 1] or '',
+                    'w': f'{r[offset + 2]}.{r[offset + 3]}' if r[offset + 2] else '',
+                })
+                counts[column] += 1
 
         return JsonResponse({
             'ok': True, 'x_col': x_col, 'y_col': y_col,
+            'y_cols': y_cols, 'series_counts': counts,
             'legend': legend or '', 'n': len(data),
             'data': data,
         })

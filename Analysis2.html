@@ -554,10 +554,10 @@ function addChart() {
   if (!meta) { msg('먼저 DB 조회를 하세요', true); return; }
   const id = ++chartSeq;
   // 두 번째 차트부터는 앞 차트와 다른 Y 를 기본으로 (같은 걸 두 번 보면 무의미)
-  const used = charts.map(c => c.y_col);
+  const used = charts.flatMap(c => c.y_cols);
   const y = (meta.numeric || []).find(p => !used.includes(p)) ||
             (meta.numeric || [])[0] || '';
-  charts.push({id, x_col: 'DATE', y_col: y, data: null});
+  charts.push({id, x_col: 'DATE', y_cols: y ? [y] : [], data: null, requestSeq: 0});
   renderCharts();
   loadChart(id);
 }
@@ -568,6 +568,7 @@ function delChart(id) {
 }
 
 function renderCharts() {
+  closeAllPicks();
   const el = document.getElementById('charts');
   // innerHTML 로 다시 그리면 div 가 새로 만들어지므로 등록 표시도 사라진다
   if (!charts.length) {
@@ -580,10 +581,11 @@ function renderCharts() {
       <div class="card-h">
         <span class="lbl">X</span>
         ${pickHtml(c.id, 'x_col', c.x_col)}
-        <span class="lbl">Y</span>
-        ${pickHtml(c.id, 'y_col', c.y_col)}
+        <span class="lbl">Y · 복수 선택</span>
+        ${pickHtml(c.id, 'y_cols', c.y_cols.join(', '))}
         <span class="x" onclick="delChart(${c.id})">×</span>
       </div>
+      <div class="cnote" id="ys-${c.id}">${esc(c.y_cols.join(" · ")) || "Y 항목을 선택하세요"}</div>
       <div class="plot" id="plot-${c.id}"></div>
       <div class="cnote" id="note-${c.id}"></div>
     </div>`).join('');
@@ -673,6 +675,10 @@ function closeAllPicks() {
   openPickAt = null;
   const el = document.getElementById('pick-panel');
   if (el) el.style.display = 'none';
+  charts.forEach(c => ['x_col', 'y_cols'].forEach(key => {
+    const input = pickInput(c.id, key);
+    if (input) input.value = key === 'y_cols' ? c.y_cols.join(', ') : c.x_col;
+  }));
 }
 
 /* 후보 목록 — X 축에만 DATE 를 넣는다 */
@@ -701,22 +707,40 @@ function filterPick(id, key, q) {
                 esc(p.slice(i, i + qq.length)) + '</span>' +
                 esc(p.slice(i + qq.length));
       }
-      html += `<div class="pick-i" onmousedown="choosePick(${id},'${key}','${esc(p)}')">${label}</div>`;
+      const selected = key === 'y_cols' && charts.find(c => c.id === id)?.y_cols.includes(p);
+      html += `<div class="pick-i" data-value="${esc(p)}" role="option" aria-selected="${!!selected}">${key === 'y_cols' ? (selected ? '☑ ' : '☐ ') : ''}${label}</div>`;
     });
   });
 
   panel.innerHTML = n ? html :
     '<div class="pick-none">일치하는 컬럼이 없습니다.</div>';
 
+  panel.querySelectorAll('.pick-i').forEach(item => item.addEventListener('mousedown', event => {
+    event.preventDefault();
+    choosePick(id, key, item.dataset.value);
+  }));
   // 목록 길이가 바뀌면 뒤집힘 여부도 달라질 수 있다
   if (openPickAt) placePick(id, key);
 }
 
 function choosePick(id, key, val) {
+  const c = charts.find(chart => chart.id === id);
+  if (!c) return;
   const inp = pickInput(id, key);
-  if (inp) { inp.value = val; inp.title = val; inp.blur(); }
+  if (key === 'y_cols') {
+    const index = c.y_cols.indexOf(val);
+    if (index < 0) c.y_cols.push(val);
+    else c.y_cols.splice(index, 1);
+    if (inp) inp.title = c.y_cols.join(', ');
+    document.getElementById(`ys-${id}`).textContent = c.y_cols.join(' · ') || 'Y 항목을 선택하세요';
+    filterPick(id, key, '');
+    loadChart(id);
+    return; // 여러 항목을 연속 선택할 수 있도록 목록 유지
+  }
+  c.x_col = val;
   closeAllPicks();
-  setAxis(id, key, val);
+  if (inp) { inp.title = val; inp.blur(); }
+  loadChart(id);
 }
 
 /* 위·아래로 고르고 Enter 로 선택, Esc 로 닫기 */
@@ -758,42 +782,49 @@ document.addEventListener('mousedown', (ev) => {
   if (ev.target.closest &&
       (ev.target.closest('.pick') || ev.target.closest('.pick-panel'))) return;
   charts.forEach(c => {
-    ['x_col', 'y_col'].forEach(k => {
+    ['x_col', 'y_cols'].forEach(k => {
       const inp = pickInput(c.id, k);
-      if (inp && inp.value !== c[k]) inp.value = c[k];
+      if (inp) inp.value = k === 'y_cols' ? c.y_cols.join(', ') : c.x_col;
     });
   });
   closeAllPicks();
 });
 
-function setAxis(id, key, val) {
-  const c = charts.find(x => x.id === id);
-  if (!c) return;
-  c[key] = val;
-  loadChart(id);
-}
-
 async function loadChart(id) {
   const c = charts.find(x => x.id === id);
-  if (!c || !meta || !c.y_col) return;
-
+  if (!c || !meta) return;
+  const seq = ++c.requestSeq;
+  const source = meta.oper_id;
+  const note = document.getElementById(`note-${id}`);
+  c.data = [];
+  drawChart(c); // 축을 변경하는 동안 이전 축 데이터가 새 선택처럼 보이지 않게 제거
+  if (!c.y_cols.length) {
+    if (note) note.textContent = 'Y 항목을 하나 이상 선택하세요.';
+    renderLegendBar();
+    return;
+  }
+  if (note) { note.className = 'cnote'; note.textContent = '조회 중…'; }
   const j = await postJSON(API.chart, {
-    oper_id: meta.oper_id, x_col: c.x_col, y_col: c.y_col,
+    oper_id: source, x_col: c.x_col, y_cols: [...c.y_cols],
     legend: document.getElementById('legend').value || null,
     lot_cd: document.getElementById('lotcd').value || null,
     spans: spans,
   });
-  const note = document.getElementById(`note-${id}`);
+  // 빠르게 선택을 바꾸거나 카드를 삭제한 뒤 도착한 이전 응답은 무시합니다.
+  if (!charts.includes(c) || seq !== c.requestSeq || !meta || source !== meta.oper_id) return;
+  const currentNote = document.getElementById(`note-${id}`);
   if (!j.ok) {
-    if (note) { note.className = 'cnote warn'; note.textContent = j.error || '조회 실패'; }
+    if (currentNote) { currentNote.className = 'cnote warn'; currentNote.textContent = j.error || '조회 실패'; }
+    renderLegendBar();
     return;
   }
   c.data = j.data || [];
   c.legend = j.legend;
-  if (note) {
-    // 점은 전부 그린다 — 자르지 않으므로 경고할 것도 없다
-    note.className = 'cnote';
-    note.textContent = `${(j.n || 0).toLocaleString()}점`;
+  if (currentNote) {
+    currentNote.className = 'cnote';
+    currentNote.textContent = `${c.data.length.toLocaleString()}점 · ` +
+      c.y_cols.map(y => `${y}: ${(j.series_counts?.[y] || 0).toLocaleString()}점`).join(' / ') +
+      (c.y_cols.length > 1 ? ' · 공통 Y축 (항목별 마커 모양 구분)' : '');
   }
   drawChart(c);
   renderLegendBar();
@@ -811,7 +842,7 @@ function reloadAll() {
 function drawChart(c) {
   const div = document.getElementById(`plot-${c.id}`);
   if (!div || !c.data) return;
-  if (!c.data.length) { div.innerHTML = ''; return; }
+  if (!c.data.length) { Plotly.purge(div); div.innerHTML = ''; return; }
 
   const isDate = c.x_col === 'DATE';
   const traces = [];
@@ -822,25 +853,36 @@ function drawChart(c) {
      조용히 사라진다. 범위 밖이면 '나머지' 로 친다. */
   const inSpan = d => Number.isInteger(d.span) &&
                       d.span >= 0 && d.span < spans.length;
-  const rest = c.data.filter(d => !inSpan(d));
-  if (rest.length) {
+  const multi = c.y_cols.length > 1;
+  const symbols = ['circle', 'square', 'diamond', 'cross', 'x', 'triangle-up', 'triangle-down', 'star'];
+  c.y_cols.forEach((column, seriesIndex) => {
+    const points = c.data.filter(d => (d.y_col || c.y_cols[0]) === column);
+    const add = (arr, group, color, size) => {
+      if (!arr.length) return;
+      const name = multi ? (group ? `${column} · ${group}` : column) : (group || column);
+      const trace = mkTrace(arr, name, color, size);
+      trace.marker.symbol = symbols[seriesIndex % symbols.length];
+      // customdata는 기존 행 id를 그대로 유지합니다 (선택 연동용).
+      trace.hovertemplate = esc(column) + '<br>%{text}<br>%{x}<br><b>%{y}</b><extra></extra>';
+      traces.push(trace);
+    };
+    const rest = points.filter(d => !inSpan(d));
     if (c.legend) {
-      const by = {};
-      rest.forEach(d => { (by[d.g || '(없음)'] = by[d.g || '(없음)'] || []).push(d); });
-      Object.entries(by).sort((a, b) => a[0].localeCompare(b[0]))
-        .forEach(([g, arr]) => traces.push(mkTrace(arr, g, legendColor(g))));
+      const by = new Map();
+      rest.forEach(d => {
+        const group = d.g || '(없음)';
+        if (!by.has(group)) by.set(group, []);
+        by.get(group).push(d);
+      });
+      [...by.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+        .forEach(([g, arr]) => add(arr, g, legendColor(g)));
     } else {
-      traces.push(mkTrace(rest, '전체', BASE_COLOR));
+      add(rest, '', multi ? LEGEND_PALETTE[seriesIndex % LEGEND_PALETTE.length] : BASE_COLOR);
     }
-  }
-
-  spans.forEach((s, i) => {
-    const arr = c.data.filter(d => inSpan(d) && d.span === i);
-    if (arr.length) {
-      traces.push(mkTrace(arr, s.name || `구간 ${i + 1}`,
-                          SPAN_COLORS[i % SPAN_COLORS.length],
-                          markerSize() + 2));
-    }
+    spans.forEach((span, i) => {
+      add(points.filter(d => inSpan(d) && d.span === i), span.name || `구간 ${i + 1}`,
+          SPAN_COLORS[i % SPAN_COLORS.length], markerSize() + 2);
+    });
   });
 
   Plotly.newPlot(div, traces, {
@@ -852,7 +894,7 @@ function drawChart(c) {
             tickfont: {family: A2_FONT, size: 10},
             gridcolor: 'rgba(0,0,0,.06)', zeroline: false,
             type: isDate ? 'date' : 'linear'},
-    yaxis: {title: {text: c.y_col, font: {family: A2_FONT, size: 11}},
+    yaxis: {title: {text: multi ? '선택한 Y 항목 (공통 스케일)' : c.y_cols[0], font: {family: A2_FONT, size: 11}},
             tickfont: {family: A2_FONT, size: 10},
             gridcolor: 'rgba(0,0,0,.06)', zeroline: false},
     showlegend: true,
@@ -908,12 +950,11 @@ function bindSelect(div, c) {
   div.on('plotly_doubleclick', () => { selIds = new Set(); syncSelection(null); });
 }
 
-/* 고른 결과를 나머지 차트에 반영한다.
-   ★ 고른 차트 자신은 Plotly 가 이미 표시해 두었으므로 다시 그리지 않는다 —
-     다시 그리면 드래그한 상자가 사라져 어디를 골랐는지 알 수 없다. */
+/* 같은 원본 행의 다른 Y 시리즈도 함께 강조합니다.
+   선택한 차트까지 restyle로 갱신해 확대 범위는 유지합니다. */
 function syncSelection(fromId) {
   charts.forEach(c => {
-    if (c.id === fromId || !c.data) return;
+    if (!c.data) return;
     applySelection(c);
   });
   updateSelBar();
